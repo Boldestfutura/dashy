@@ -1,0 +1,7 @@
+# nothing from a running install belongs in the repo
+data/
+config/
+queue/
+*.pyc
+__pycache__/
+.DS_Store
