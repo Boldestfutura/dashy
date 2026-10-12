@@ -74,6 +74,8 @@ for a in apps:
                 'ports':sorted(p for p in ports if p),
                 'version':a.get('human_version'),
                 'icon':md.get('icon') or md.get('icon_url') or '',
+                # TrueNAS's own answer to 'what URL opens this app', path included
+                'portals':a.get('portals') or {},
                 'update':bool(a.get('upgrade_available')) or bool(a.get('image_updates_available'))})
 json.dump(out,sys.stdout)
 " > "$D/apps.json.tmp" 2>/dev/null && mv "$D/apps.json.tmp" "$D/apps.json"

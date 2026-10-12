@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.9.3"
+APP_VERSION = "0.9.4"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -926,6 +926,33 @@ NOT_WEB = (
 )
 
 
+def portal_of(app):
+    """TrueNAS's own answer to "what URL opens this app", as (port, path).
+
+    Worth more than any guess made here: it names the right port where an app
+    publishes several - Scrutiny's "Web UI" against its InfluxDB - and it
+    carries the path, so Pi-hole lands on /admin/ and Plex on /web instead of
+    a bare port that redirects at best. Empty for custom apps, which declare
+    no portals at all, and for apps with no web interface."""
+    portals = app.get("portals") or {}
+    if not portals:
+        return None, ""
+    key = next((k for k in portals
+                if k.strip().lower() in ("web ui", "webui", "web", "gui")), None)
+    url = portals[key] if key else list(portals.values())[0]
+    try:
+        u = urllib.parse.urlsplit(url)
+        port = u.port
+    except ValueError:
+        return None, ""
+    if not port:
+        return None, ""
+    path = u.path or "/"
+    if u.query:
+        path += "?" + u.query
+    return int(port), path
+
+
 def serve_map():
     """Local port -> tailnet port, from whatever Tailscale Serve publishes.
     An address book, not a census."""
@@ -966,17 +993,26 @@ def discover():
     out, claimed = [], set()
     for a in apps:
         ports = sorted(int(p) for p in (a.get("ports") or []) if p)
-        # A port Serve publishes wins outright: that is the owner stating which
-        # port you reach this app on, which beats any guess made here.
-        chosen = next((p for p in ports if p in pub), None)
-        if chosen is None:
-            chosen = next((p for p in ports if p not in NOT_WEB), None)
+        pport, ppath = portal_of(a)
+
+        # In order of how much the answer is worth: the app's own portal when
+        # Tailscale also publishes it, then anything Tailscale publishes (the
+        # owner saying which port matters), then the portal, then a guess.
+        order = []
+        if pport and pport in pub:
+            order.append(pport)
+        order += [p for p in ports if p in pub]
+        if pport:
+            order.append(pport)
+        order += [p for p in ports if p not in NOT_WEB]
+        chosen = next((p for p in order if p), None)
         if chosen is None:
             continue                 # host networking, or nothing web-facing
         claimed.add(chosen)
         label, desc = KNOWN.get(a.get("name"),
                                 ((a.get("name") or "?").replace("-", " ").title(), ""))
         out.append({"port": pub.get(chosen), "lport": chosen,
+                    "path": ppath if chosen == pport else "/",
                     "name": label, "desc": desc,
                     "state": a.get("state"), "app": a.get("name"),
                     "version": a.get("version"), "update": bool(a.get("update")),
@@ -988,7 +1024,8 @@ def discover():
         if lport in claimed:
             continue
         label, desc = PORT_FALLBACK.get(lport, ("Port %d" % lport, ""))
-        out.append({"port": tport, "lport": lport, "name": label, "desc": desc,
+        out.append({"port": tport, "lport": lport, "path": "/",
+                    "name": label, "desc": desc,
                     "state": None, "app": None, "version": None, "update": False,
                     "iconsrc": "/icon-192.png" if lport == PORT else None})
 
@@ -1019,9 +1056,10 @@ def services_loop():
         for svc in discover():
             svc = dict(svc)
             svc["code"] = probe(svc["lport"])
-            svc["url"] = ("https://%s:%d/" % (TAILNET, svc["port"])) \
+            path = svc.get("path") or "/"
+            svc["url"] = ("https://%s:%d%s" % (TAILNET, svc["port"], path)) \
                          if (TAILNET and svc.get("port")) \
-                         else ("http://%s:%d/" % (LINK_HOST, svc["lport"]))
+                         else ("http://%s:%d%s" % (LINK_HOST, svc["lport"], path))
             found.append(svc)
         with _lock:
             _state["services"] = found
