@@ -94,12 +94,15 @@ if [ -f "$Q/_self.req" ]; then
   REPO="${UPDATE_REPO:-Boldestfutura/dashy}"
   BRANCH="${UPDATE_BRANCH:-main}"
   BASEURL="https://raw.githubusercontent.com/$REPO/$BRANCH/app"
-  note(){ python3 - "$1" "$2" "$S" <<'PYN'
+  note(){ python3 - "$1" "$2" "$S" "${3:-}" <<'PYN'
 import json,sys,time
 st,msg,path=sys.argv[1],sys.argv[2],sys.argv[3]
+pct=sys.argv[4] if len(sys.argv)>4 else ""
 try: d=json.load(open(path))
 except Exception: d={}
-d["_self"]={"state":st,"msg":msg,"t":int(time.time())}
+row={"state":st,"msg":msg,"t":int(time.time())}
+if pct.isdigit(): row["pct"]=int(pct)
+d["_self"]=row
 json.dump(d,open(path,"w"))
 PYN
   }
@@ -116,12 +119,46 @@ print(svc.get('image') or '')" 2>/dev/null)
 
   case "$IMAGE" in
     */dashy:*|*/dashy)
-      note running "pulling the new image"
+      note running "taking a snapshot" 5
       stamp=$(date +%Y%m%d-%H%M%S)
       ds=${BASE#/mnt/}
       zfs list -H -o name "$ds" >/dev/null 2>&1 && \
         zfs snapshot -r "$ds@preupdate-$stamp" 2>/dev/null
-      if midclt call -j app.pull_images "$APPNAME" '{"redeploy": true}' >/dev/null 2>&1; then
+      note running "pulling the new image" 10
+      # midclt -j prints its own progress; read it as it goes and publish the
+      # percentage, so the dashboard can say how far along it is rather than
+      # leaving someone watching a word
+      if midclt call -j app.pull_images "$APPNAME" '{"redeploy": true}' 2>&1 \
+           | python3 -u -c "
+import json, os, re, sys, time
+S = sys.argv[1]
+last, lastw = 0.0, 0.0
+pat = re.compile(r'([0-9]{1,3}(?:\.[0-9]+)?)%')
+while True:
+    chunk = sys.stdin.read(256)
+    if not chunk:
+        break
+    found = pat.findall(chunk)
+    if not found:
+        continue
+    pct = float(found[-1])
+    # the pull is the long middle of the job, so map it into 10-90
+    pct = 10 + pct * 0.8
+    now = time.time()
+    if pct <= last or now - lastw < 1.0:
+        continue
+    last, lastw = pct, now
+    try:
+        d = json.load(open(S))
+    except Exception:
+        d = {}
+    d['_self'] = {'state': 'running', 'msg': 'pulling the new image',
+                  'pct': int(pct), 't': int(now)}
+    tmp = S + '.tmp'
+    with open(tmp, 'w') as fh:
+        json.dump(d, fh)
+    os.replace(tmp, S)
+" "$S" >/dev/null 2>&1; then
         # the container's entrypoint copies the new cron scripts back out to
         # this directory as it starts, so cron picks them up too
         note done "updated"

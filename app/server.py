@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.12.0"
+APP_VERSION = "0.12.1"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1318,6 +1318,12 @@ PAGE = """<!doctype html>
   /* Closing the pane and opening whatever is underneath used to be the same
      tap. This catches it, so a tap outside only ever closes. */
   .mscrim{position:fixed;inset:0;z-index:50;background:transparent}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  /* a check that takes two seconds and says nothing looks like a dead button */
+  #mi-check[data-state="busy"] svg{animation:spin .85s linear infinite;
+                                   transform-origin:50% 50%}
+  #mi-self[data-state="running"] svg{animation:spin 1.1s linear infinite;
+                                     transform-origin:50% 50%}
   .mscrim[hidden]{display:none}
   #settings.dot{position:relative}
   #settings.dot::after{content:'';position:absolute;top:5px;right:5px;width:7px;height:7px;
@@ -2681,6 +2687,33 @@ function paintWeather(w){
   el.title=bits.join(' \u00b7 ');
 }
 
+/* The collector looks every half hour, which is the right cadence for a
+   background check and the wrong one for somebody standing there waiting.
+   This asks now, and shows that it is asking. */
+let checking=false;
+function doCheck(){
+  if(checking) return;
+  checking=true;
+  const row=$('mi-check'), t=$('mi-checktxt'), m=$('mi-checkmsg');
+  if(row) row.dataset.state='busy';
+  if(t) t.textContent='Checking\u2026';
+  if(m) m.textContent='';
+  const done=(msg)=>{
+    checking=false;
+    if(row) row.dataset.state='';
+    if(t) t.textContent='Check for updates';
+    if(m) m.textContent=msg||'';
+  };
+  // a registry that never answers would otherwise spin for ever
+  const ac=('AbortController' in window) ? new AbortController() : null;
+  const bail=setTimeout(()=>{ if(ac) ac.abort(); }, 20000);
+  fetch('/api/check',{method:'POST', signal: ac ? ac.signal : undefined})
+    .then(r=>r.json())
+    .then(r=>{ clearTimeout(bail); done(r && r.msg); tick(); })
+    .catch(e=>{ clearTimeout(bail);
+                done(e && e.name==='AbortError' ? 'timed out' : 'no answer'); });
+}
+
 function paintSelfUpdate(){
   const b=$('mi-self');
   if(!b) return;
@@ -2699,7 +2732,8 @@ function paintSelfUpdate(){
   // out here or they pin the row: 'Updated' would sit in the menu for weeks,
   // and a worker that died mid-update would leave 'Updating...' forever.
   const age=(st && st.t) ? (Date.now()/1000 - st.t) : 1e9;
-  if(st && st.state==='running' && age < 900) return set('running','Updating\u2026','');
+  if(st && st.state==='running' && age < 900)
+    return set('running','Updating\u2026', st.pct ? st.pct+'%' : (st.msg||''));
   if(st && st.state==='failed' && age < 3600)
     return set('idle','Install update', st.msg||'that did not work');
   if(u && u.available) return set('ready','Update to '+u.latest, u.current+' \u2192 '+u.latest);
