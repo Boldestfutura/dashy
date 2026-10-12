@@ -21,8 +21,12 @@ ask()  { # ask <prompt> <default>  -> echoes the answer
   # not exist in a non-interactive session, where it fails and takes the
   # default silently. Fall back to stdin so a piped or scripted install works.
   local a=""
-  if [ -r /dev/tty ]; then read -r -p "   $1 [$2]: " a </dev/tty 2>/dev/null
-  else read -r -p "   $1 [$2]: " a 2>/dev/null || true; fi
+  # [ -r /dev/tty ] is true even where opening it fails, so try to open it.
+  if { true >/dev/tty; } 2>/dev/null; then
+    read -r -p "   $1 [$2]: " a </dev/tty 2>/dev/null || true
+  else
+    read -r -p "   $1 [$2]: " a 2>/dev/null || true
+  fi
   printf '%s' "${a:-$2}"; }
 
 # ---------------------------------------------------------------- preflight
@@ -198,9 +202,14 @@ done
 # midclt creates datasets owned by root, so the user running this - who is
 # probably truenas_admin, not root - cannot write a single file into them.
 # Hand the tree over before copying anything into it.
-midclt call -j filesystem.chown \
-  "{\"path\":\"$BASE\",\"uid\":$(id -u),\"gid\":$(id -g),\"options\":{\"recursive\":true}}" \
-  >/dev/null 2>&1
+#
+# One at a time, because a recursive chown does not cross a dataset boundary:
+# chowning $BASE leaves $BASE/app, which is its own dataset, owned by root.
+for d in "" /app /data /queue /config; do
+  midclt call -j filesystem.chown \
+    "{\"path\":\"$BASE$d\",\"uid\":$(id -u),\"gid\":$(id -g),\"options\":{\"recursive\":true}}" \
+    >/dev/null 2>&1
+done
 
 say "installing files"
 # collect.sh and worker.sh always land on disk: they run on the host from cron,
