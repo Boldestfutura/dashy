@@ -127,3 +127,22 @@ if [ -r "$E" ]; then
 fi
 
 date +%s > "$D/pools.stamp"
+
+# --- does the repo have a newer Dashy? Checked every 30 min, not every minute:
+# --- GitHub does not need 1440 requests a day to answer the same question.
+REPO="${UPDATE_REPO:-Boldestfutura/dashy}"
+BRANCH="${UPDATE_BRANCH:-main}"
+STAMP="$D/selfupdate.stamp"
+NOW=$(date +%s)
+LAST=$(cat "$STAMP" 2>/dev/null || echo 0)
+if [ $(( NOW - LAST )) -ge 1800 ]; then
+  echo "$NOW" > "$STAMP"
+  RAW="https://raw.githubusercontent.com/$REPO/$BRANCH/app/server.py"
+  VER=$(curl -fsSL -m 20 "$RAW" 2>/dev/null \
+        | grep -m1 '^APP_VERSION' | sed 's/.*"\(.*\)".*/\1/')
+  case "$VER" in
+    [0-9]*)
+      printf '{"latest":"%s","checked":%s,"repo":"%s"}\n' "$VER" "$NOW" "$REPO" \
+        > "$D/selfupdate.json.tmp" && mv "$D/selfupdate.json.tmp" "$D/selfupdate.json" ;;
+  esac
+fi

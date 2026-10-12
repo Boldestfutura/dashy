@@ -131,6 +131,19 @@ else
   warn "could not locate the install directory"
 fi
 
+head_ "Update check"
+if [ -n "$BASE" ] && [ -f "$BASE/data/selfupdate.json" ]; then
+  LATEST=$(python3 -c "
+import json;print(json.load(open('$BASE/data/selfupdate.json')).get('latest',''))" 2>/dev/null)
+  [ -n "$LATEST" ] && ok "repo says the current release is $LATEST" \
+                   || bad "selfupdate.json is there but unreadable"
+  if [ -n "$VER" ] && [ -n "$LATEST" ] && [ "$VER" != "$LATEST" ]; then
+    warn "running $VER, repo has $LATEST - Update Dashy is waiting in the settings pane"
+  fi
+else
+  warn "no update check yet (it runs every 30 minutes, give it that long)"
+fi
+
 head_ "Cron"
 CRON=$(midclt call cronjob.query 2>/dev/null | python3 -c "
 import json,sys

@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.7.1"
+APP_VERSION = "0.8.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -62,6 +62,11 @@ QUEUE = os.environ.get("DASH_QUEUE", "/queue")
 # so the shared state gets its own writable mount.
 CONFIG = os.environ.get("DASH_CONFIG", "/config")
 HEXOS_URL = os.environ.get("HEXOS_URL", "https://deck.hexos.com/dash")
+
+# Where this install gets its own updates. The check is done by the cron job,
+# not by the container, and it is a plain file read here.
+UPDATE_REPO = os.environ.get("UPDATE_REPO", "Boldestfutura/dashy")
+UPDATE_BRANCH = os.environ.get("UPDATE_BRANCH", "main")
 
 # Only used to pretty up names and add a one-liner. Anything not listed still
 # appears, titled from whatever the app is actually called on the NAS.
@@ -302,6 +307,33 @@ def link_speed(name):
         return None
 
 
+def _vtuple(v):
+    """0.8.10 sorts after 0.8.9, which a string compare would get wrong."""
+    out = []
+    for part in str(v or "").split("."):
+        digits = "".join(c for c in part if c.isdigit())
+        out.append(int(digits) if digits else 0)
+    return tuple(out + [0] * (4 - len(out)))[:4]
+
+
+def self_update():
+    """What the cron job last saw on GitHub. Missing file just means it has not
+    looked yet, which is not an error."""
+    try:
+        with open(os.path.join(DATA, "selfupdate.json")) as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    latest = str(d.get("latest") or "").strip()
+    if not latest:
+        return None
+    return {"latest": latest,
+            "current": APP_VERSION,
+            "available": _vtuple(latest) > _vtuple(APP_VERSION),
+            "checked": d.get("checked"),
+            "repo": UPDATE_REPO}
+
+
 def update_status():
     try:
         with open(os.path.join(DATA, "updates.json")) as fh:
@@ -313,6 +345,16 @@ def update_status():
 
 def request_upgrade(app):
     """Drop a request for the root worker. The container cannot call midclt itself."""
+    # this app updates itself from the repo rather than through midclt, so it
+    # is checked before the app-name rule that it deliberately does not match
+    if app == "_self":
+        try:
+            os.makedirs(QUEUE, exist_ok=True)
+            with open(os.path.join(QUEUE, "_self.req"), "w") as fh:
+                fh.write(str(int(time.time())))
+        except OSError as e:
+            return False, str(e)
+        return True, "queued"
     if not app or not re.match(r"^[a-z0-9][a-z0-9._-]{0,48}$", app):
         return False, "bad app name"
     known = {s.get("app") for s in discover() if s.get("app")}
@@ -935,6 +977,7 @@ def snapshot():
     out["weather"] = _wx["data"]          # whatever the loop last fetched
     out["prefs"] = load_prefs()
     out["detected"] = detect()
+    out["selfupdate"] = self_update()
     out["links"] = header_links(svc, (out["prefs"] or {}).get("setup"))
     return out
 
@@ -1059,6 +1102,12 @@ PAGE = """<!doctype html>
       font-weight:600;cursor:pointer;text-align:left;text-decoration:none;
       transition:background .13s ease}
   .mi:hover{background:var(--faint)}
+  #mi-self{color:var(--warn)}
+  #settings.dot{position:relative}
+  #settings.dot::after{content:'';position:absolute;top:5px;right:5px;width:7px;height:7px;
+      border-radius:50%;background:var(--warn);box-shadow:0 0 0 2px var(--card)}
+  #mi-self svg{color:var(--warn)}
+  #mi-self[data-state="running"]{opacity:.6;pointer-events:none}
   .mi svg{width:16px;height:16px;flex:0 0 auto;color:var(--muted)}
   .mi .rt{margin-left:auto;font-size:12px;color:var(--muted);font-weight:600;
           display:inline-flex;align-items:center;gap:6px}
@@ -1433,6 +1482,11 @@ PAGE = """<!doctype html>
          stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
          stroke-linejoin="round"><circle cx="12" cy="12" r="3.1"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
         <div class="menu" id="menu" hidden role="menu" aria-labelledby="settings">
+          <button class="mi" id="mi-self" type="button" role="menuitem" hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                 stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+            <span id="mi-selftxt">Update Dashy</span><span class="rt" id="mi-selfver"></span></button>
+          <div class="msep" id="mi-selfsep" hidden></div>
           <p class="mh">Appearance</p>
           <div class="seg" id="seg-theme" role="group" aria-label="Theme">
             <button type="button" data-theme="system" aria-pressed="true">System</button>
@@ -2302,8 +2356,32 @@ function paintWeather(w){
   el.title=bits.join(' \u00b7 ');
 }
 
-// both header buttons follow whatever is actually published, so a port
-// change on the NAS carries through without touching this page
+function paintSelfUpdate(){
+  const b=$('mi-self');
+  if(!b) return;
+  const u=data && data.selfupdate;
+  const st=(data && data.updates && data.updates._self) || null;
+  // the row lives at the top of the menu but is worth nothing if you never
+  // open the menu, so the gear carries a dot for as long as the row is there
+  const show=(on,dot)=>{ b.hidden=!on;
+    const sep=$('mi-selfsep'); if(sep) sep.hidden=!on;
+    const g=$('settings'); if(g) g.classList.toggle('dot',!!dot); };
+  if(st && st.state==='running'){
+    show(true,false); b.dataset.state='running';
+    $('mi-selftxt').textContent='Updating\u2026'; $('mi-selfver').textContent='';
+    return;
+  }
+  if(st && st.state==='done' && !(u && u.available)){
+    show(true,false); b.dataset.state='';
+    $('mi-selftxt').textContent='Updated'; $('mi-selfver').textContent=st.msg||'';
+    return;
+  }
+  if(!u || !u.available){ show(false,false); return; }
+  show(true,true); b.dataset.state='';
+  $('mi-selftxt').textContent='Update Dashy';
+  $('mi-selfver').textContent=u.current+' \u2192 '+u.latest;
+}
+
 function paintLinks(L){
   const set=(id,url)=>{const a=$(id); if(!a) return;
     if(url){a.href=url;a.hidden=false;}else{a.removeAttribute('href');a.hidden=true;}};
@@ -2316,6 +2394,7 @@ function paintLinks(L){
   set('mi-truenas',L.truenas);
   set('mi-chat',chat);
   set('mi-hexos',hexos);
+  paintSelfUpdate();
   setSwitch('m-ts', !!su.tailscale);
   setSwitch('m-oc', !!su.openclaw);
   setSwitch('m-hx', !!su.hexos);
@@ -2625,6 +2704,24 @@ function closePop(){
   setTimeout(()=>{ sc.classList.remove('out'); sc.hidden=true; }, 170);
 }
 
+async function askSelfUpdate(){
+  const u=(data && data.selfupdate) || {};
+  $('sh-t').textContent='Update Dashy';
+  $('sh-s').textContent='';
+  $('sh-b').innerHTML=
+    '<div class="row"><span class="l"><span class="t1">'+esc(u.current||'')+
+      ' \u2192 '+esc(u.latest||'')+'</span>'+
+      '<span class="t2">from '+esc(u.repo||'the repository')+'</span></span></div>'+
+    '<div class="row"><span class="t2 wrap">The new files are downloaded and '+
+      'checked before anything is replaced, and a ZFS snapshot is taken first. '+
+      'Dashy restarts, so the page will go quiet for a few seconds.</span></div>'+
+    '<div class="m-row" style="padding:12px 16px 14px;display:flex;gap:10px">'+
+      '<button class="ubtn no" id="u-no">Cancel</button>'+
+      '<button class="ubtn yes" id="su-yes">Update</button></div>';
+  $('sh-b')._html=null;
+  $('scrim').hidden=false;
+}
+
 async function askUpdate(app,name,ver){
   const body=
     '<div class="row"><span class="l"><span class="t1">'+name+'</span>'+
@@ -2748,6 +2845,13 @@ document.addEventListener('click',ev=>{
   if(u){ ev.preventDefault(); ev.stopPropagation();
          askUpdate(u.dataset.app,u.dataset.name,u.dataset.ver); return; }
   if(ev.target.id==='u-no'){ closePop(); return; }
+  if(ev.target.id==='su-yes'){
+    ev.target.disabled=true; ev.target.textContent='Queued\u2026';
+    fetch('/api/update',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({app:'_self'})}).catch(()=>{});
+    setTimeout(closePop, 900);
+    return;
+  }
   if(ev.target.id==='u-yes'){
     const app=ev.target.dataset.app;
     ev.target.disabled=true; ev.target.textContent='Queued\\u2026';
@@ -2768,6 +2872,7 @@ document.addEventListener('click',ev=>{
   if(ev.target.closest('#mi-edit')){ closeMenu(); setEditing(true); return; }
   if(ev.target.closest('#mi-ver')){ closeMenu(); openPop('up'); return; }
   if(ev.target.closest('#mi-setup')){ closeMenu(); openSetup(true); return; }
+  if(ev.target.closest('#mi-self')){ closeMenu(); askSelfUpdate(); return; }
   const cb=ev.target.closest('.cityres button[data-city]');
   if(cb){ pickCity(parseInt(cb.dataset.city,10), cb.closest('.cityres').id); return; }
   const sw2=ev.target.closest('.sw2');
