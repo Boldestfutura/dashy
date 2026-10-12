@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.9.1"
+APP_VERSION = "0.9.2"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -914,6 +914,18 @@ def save_prefs(d):
     return True, "saved", clean["rev"]
 
 
+# Lowest-numbered port is a poor guess at "the web interface". Pi-hole publishes
+# 53 and 20720, and 53 is DNS. RustDesk publishes three relay ports and has no
+# web interface at all. So rule out what is definitely not HTTP, and if an app
+# has nothing left, it has no tile - which is the right answer for RustDesk.
+NOT_WEB = (
+    {22, 23, 25, 53, 111, 123, 135, 137, 138, 139, 161, 389, 445, 465, 514,
+     587, 636, 993, 995, 1900, 2049, 3306, 3389, 5353, 5432, 6379, 11211,
+     27017, 50300}
+    | set(range(21115, 21120))            # RustDesk relay
+)
+
+
 def discover_lan():
     """No Tailscale Serve, so there is no curated list of what is published and no
     tailnet to reach it on. Fall back to every app that binds a host port - which
@@ -929,8 +941,9 @@ def discover_lan():
     out = []
     for a in apps:
         ports = sorted(int(p) for p in (a.get("ports") or []) if p)
+        ports = [p for p in ports if p not in NOT_WEB]
         if not ports:
-            continue                      # host networking, or publishes nothing
+            continue                      # host networking, or nothing web-facing
         label, desc = KNOWN.get(a.get("name"),
                                 ((a.get("name") or "?").replace("-", " ").title(), ""))
         out.append({"port": ports[0], "lport": ports[0], "name": label, "desc": desc,
