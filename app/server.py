@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.9.4"
+APP_VERSION = "0.9.5"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -323,14 +323,75 @@ def _vtuple(v):
     return tuple(out + [0] * (4 - len(out)))[:4]
 
 
-def self_update():
-    """What the cron job last saw on GitHub. Missing file just means it has not
-    looked yet, which is not an error."""
+# A check the user asked for, held in memory because /data is the collector's
+# and mounted read-only here. It wins over the file while it is the newer of
+# the two; the cron job's own check overtakes it half an hour later.
+_checked_now = {"latest": "", "checked": 0, "repo": ""}
+
+
+def _fetch_latest(repo):
+    """Ask whichever source this install actually updates from. An image
+    install can only run what the registry holds; a file install reads main."""
+    if repo.startswith("ghcr.io/"):
+        name = repo[len("ghcr.io/"):]
+        try:
+            tok = _getjson("https://ghcr.io/token?service=ghcr.io"
+                           "&scope=repository:%s:pull" % name)["token"]
+            tags = _getjson("https://ghcr.io/v2/%s/tags/list" % name,
+                            {"Authorization": "Bearer " + tok}).get("tags") or []
+            tags = [t for t in tags if t and t[0].isdigit()]
+            return max(tags, key=_vtuple) if tags else ""
+        except Exception:
+            return ""
+    try:
+        req = urllib.request.Request(
+            "https://raw.githubusercontent.com/%s/%s/app/server.py"
+            % (repo, UPDATE_BRANCH), headers={"User-Agent": "dashy"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            for line in r.read(200000).decode("utf-8", "replace").splitlines():
+                if line.startswith("APP_VERSION"):
+                    return line.split('"')[1]
+    except Exception:
+        pass
+    return ""
+
+
+def _getjson(url, headers=None):
+    req = urllib.request.Request(url, headers=headers or {"User-Agent": "dashy"})
+    if headers:
+        req.add_header("User-Agent", "dashy")
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.loads(r.read(1 << 20))
+
+
+def check_now():
+    """Look right now, rather than waiting out the collector's half hour."""
+    d = {}
     try:
         with open(os.path.join(DATA, "selfupdate.json")) as fh:
             d = json.load(fh)
     except (OSError, ValueError):
-        return None
+        pass
+    repo = str(d.get("repo") or UPDATE_REPO).strip()
+    latest = _fetch_latest(repo)
+    if not latest:
+        return False, "could not reach %s" % (repo.split("/")[0] or "the repository")
+    _checked_now.update({"latest": latest, "checked": int(time.time()), "repo": repo})
+    if _vtuple(latest) > _vtuple(APP_VERSION):
+        return True, "%s is available" % latest
+    return True, "up to date"
+
+
+def self_update():
+    """What was last seen upstream, by the cron job or by the user asking."""
+    d = {}
+    try:
+        with open(os.path.join(DATA, "selfupdate.json")) as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        pass
+    if _checked_now["latest"] and _checked_now["checked"] >= (d.get("checked") or 0):
+        d = _checked_now
     latest = str(d.get("latest") or "").strip()
     if not latest:
         return None
@@ -338,7 +399,7 @@ def self_update():
             "current": APP_VERSION,
             "available": _vtuple(latest) > _vtuple(APP_VERSION),
             "checked": d.get("checked"),
-            "repo": UPDATE_REPO}
+            "repo": d.get("repo") or UPDATE_REPO}
 
 
 def update_status():
@@ -1663,6 +1724,11 @@ PAGE = """<!doctype html>
                  stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 9.6 9.6 0 0 1-2.9-.4L3 21l1.6-4.6A8.3 8.3 0 0 1 3.6 11.5a8.4 8.4 0 0 1 9-8.4 8.4 8.4 0 0 1 8.4 8.4z"/></svg>
             Chat</a>
           <div class="msep"></div>
+          <button class="mi" id="mi-check" type="button" role="menuitem">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                 stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/></svg>
+            <span id="mi-checktxt">Check for updates</span>
+            <span class="rt" id="mi-checkmsg"></span></button>
           <button class="mi" id="mi-ver" type="button" role="menuitem"
                   style="color:var(--muted)"></button>
         </div>
@@ -2567,6 +2633,23 @@ function askPublish(which){
                           msg.classList.add('bad'); } });
 }
 
+// The collector looks every half hour, which is the right cadence for a
+// background check and the wrong one for somebody standing there waiting.
+// This asks now. The menu stays open so the answer lands where you are looking.
+let checking=false;
+function doCheck(){
+  if(checking) return;
+  checking=true;
+  const t=$('mi-checktxt'), m=$('mi-checkmsg');
+  if(t) t.textContent='Checking\u2026';
+  if(m) m.textContent='';
+  fetch('/api/check',{method:'POST'})
+    .then(r=>r.json())
+    .then(r=>{ if(m) m.textContent=r.msg||''; tick(); })
+    .catch(()=>{ if(m) m.textContent='no answer'; })
+    .finally(()=>{ checking=false; if(t) t.textContent='Check for updates'; });
+}
+
 function paintLinks(L){
   const set=(id,url)=>{const a=$(id); if(!a) return;
     if(url){a.href=url;a.hidden=false;}else{a.removeAttribute('href');a.hidden=true;}};
@@ -3060,6 +3143,7 @@ document.addEventListener('click',ev=>{
   if(ev.target.closest('#mi-setup')){ closeMenu(); openSetup(true); return; }
   if(ev.target.closest('#su-tsgo')){ askPublish('su'); return; }
   if(ev.target.closest('#m-tsgo')){ askPublish('m'); return; }
+  if(ev.target.closest('#mi-check')){ doCheck(); return; }
   if(ev.target.closest('#mi-self')){ closeMenu(); askSelfUpdate(); return; }
   const cb=ev.target.closest('.cityres button[data-city]');
   if(cb){ pickCity(parseInt(cb.dataset.city,10), cb.closest('.cityres').id); return; }
@@ -3277,6 +3361,10 @@ class Handler(BaseHTTPRequestHandler):
             ok, msg, rev = save_prefs(body)
             return self._send(200 if ok else 400,
                               json.dumps({"ok": ok, "msg": msg, "rev": rev}),
+                              "application/json; charset=utf-8")
+        if path == "/api/check":
+            ok, msg = check_now()
+            return self._send(200, json.dumps({"ok": ok, "msg": msg}),
                               "application/json; charset=utf-8")
         if path == "/api/serve":
             try:
