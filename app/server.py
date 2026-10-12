@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.12.3"
+APP_VERSION = "0.12.4"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1189,8 +1189,7 @@ PAGE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
-<meta name="theme-color" content="#f5f6f8" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#0a0c10" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f5f6f8" id="tc">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Dashy">
 <link rel="icon" href="/favicon.png" sizes="32x32" type="image/png">
@@ -2140,7 +2139,41 @@ function applyAccent(){
   document.documentElement.style.setProperty('--brand', isDark()?a.dark:a.light);
   document.querySelectorAll('#sw-accent button').forEach(b=>
     b.setAttribute('aria-pressed', String(b.dataset.accent===prefs.accent)));
+  paintBrowserChrome();
 }
+
+/* On a phone the browser paints the strip behind the status bar, and the one
+   behind its own toolbar, from the theme-color meta. That was a fixed grey, so
+   the accent wash stopped dead at the top and bottom of the page and left a
+   band of the wrong colour at each end. Work out what the page actually
+   renders up there and hand the browser the same value.
+
+   The mix is done here rather than with color-mix because the computed value
+   comes back as color(srgb ...) on some engines, and theme-color wants
+   something every browser will parse. Plain hex is that. */
+function cssRGB(expr){
+  const probe=document.createElement('span');
+  probe.style.cssText='position:absolute;left:-9999px;top:0;color:'+expr;
+  document.body.appendChild(probe);
+  const v=getComputedStyle(probe).color;
+  probe.remove();
+  let m=v.match(/rgba?\\(\\s*([0-9.]+)[,\\s]+([0-9.]+)[,\\s]+([0-9.]+)/);
+  if(m) return [+m[1], +m[2], +m[3]];
+  m=v.match(/color\\(srgb\\s+([0-9.]+)\\s+([0-9.]+)\\s+([0-9.]+)/);
+  if(m) return [m[1]*255, m[2]*255, m[3]*255];
+  return null;
+}
+
+function paintBrowserChrome(){
+  const m=$('tc');
+  if(!m) return;
+  const brand=cssRGB('var(--brand)'), bg=cssRGB('var(--bg)');
+  if(!brand || !bg) return;
+  const k=0.11;                       // about what the wash lands on up there
+  const hex=(n)=>('0'+Math.round(n).toString(16)).slice(-2);
+  m.setAttribute('content', '#'+[0,1,2].map(i=>hex(bg[i]+(brand[i]-bg[i])*k)).join(''));
+}
+
 function buildSwatches(){
   $('sw-accent').innerHTML=Object.keys(ACCENTS).map(k=>
     '<button type="button" data-accent="'+k+'" aria-label="'+k+'" aria-pressed="false" '+
