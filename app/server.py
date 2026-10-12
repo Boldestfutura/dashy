@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.11.0"
+APP_VERSION = "0.11.1"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1304,7 +1304,11 @@ PAGE = """<!doctype html>
       font-weight:600;cursor:pointer;text-align:left;text-decoration:none;
       transition:background .13s ease}
   .mi:hover{background:var(--faint)}
-  #mi-self{color:var(--warn)}
+  /* only an update actually waiting earns the warning colour; the rest of
+     the time the row is present but plainly doing nothing */
+  #mi-self[data-state="ready"]{color:var(--warn)}
+  #mi-self[data-state="idle"]{color:var(--muted);cursor:default}
+  #mi-self[data-state="idle"]:hover{background:none}
   .opt.col{display:block}
   .opt.col .seg{margin-top:10px}
   .seg.sm{margin-top:8px}
@@ -1314,7 +1318,7 @@ PAGE = """<!doctype html>
   #settings.dot{position:relative}
   #settings.dot::after{content:'';position:absolute;top:5px;right:5px;width:7px;height:7px;
       border-radius:50%;background:var(--warn);box-shadow:0 0 0 2px var(--card)}
-  #mi-self svg{color:var(--warn)}
+  #mi-self[data-state="ready"] svg{color:var(--warn)}
   #mi-self[data-state="running"]{opacity:.6;pointer-events:none}
   .mi svg{width:16px;height:16px;flex:0 0 auto;color:var(--muted)}
   .mi .rt{margin-left:auto;font-size:12px;color:var(--muted);font-weight:600;
@@ -1698,11 +1702,17 @@ PAGE = """<!doctype html>
          stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
          stroke-linejoin="round"><circle cx="12" cy="12" r="3.1"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
         <div class="menu" id="menu" hidden role="menu" aria-labelledby="settings">
-          <button class="mi" id="mi-self" type="button" role="menuitem" hidden>
+          <p class="mh">Updates</p>
+          <button class="mi" id="mi-check" type="button" role="menuitem">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                 stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/></svg>
+            <span id="mi-checktxt">Check for updates</span>
+            <span class="rt" id="mi-checkmsg"></span></button>
+          <button class="mi" id="mi-self" type="button" role="menuitem">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
                  stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
             <span id="mi-selftxt">Update Dashy</span><span class="rt" id="mi-selfver"></span></button>
-          <div class="msep" id="mi-selfsep" hidden></div>
+          <div class="msep"></div>
           <p class="mh">Appearance</p>
           <div class="seg" id="seg-theme" role="group" aria-label="Theme">
             <button type="button" data-theme="system" aria-pressed="true">System</button>
@@ -1763,11 +1773,6 @@ PAGE = """<!doctype html>
                  stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 9.6 9.6 0 0 1-2.9-.4L3 21l1.6-4.6A8.3 8.3 0 0 1 3.6 11.5a8.4 8.4 0 0 1 9-8.4 8.4 8.4 0 0 1 8.4 8.4z"/></svg>
             Chat</a>
           <div class="msep"></div>
-          <button class="mi" id="mi-check" type="button" role="menuitem">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
-                 stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/></svg>
-            <span id="mi-checktxt">Check for updates</span>
-            <span class="rt" id="mi-checkmsg"></span></button>
           <button class="mi" id="mi-ver" type="button" role="menuitem"
                   style="color:var(--muted)"></button>
         </div>
@@ -2637,30 +2642,25 @@ function paintSelfUpdate(){
   if(!b) return;
   const u=data && data.selfupdate;
   const st=(data && data.updates && data.updates._self) || null;
-  // the row lives at the top of the menu but is worth nothing if you never
-  // open the menu, so the gear carries a dot for as long as the row is there
-  const show=(on,dot)=>{ b.hidden=!on;
-    const sep=$('mi-selfsep'); if(sep) sep.hidden=!on;
-    const g=$('settings'); if(g) g.classList.toggle('dot',!!dot); };
-  // Both of these states are written to a file that nothing ever clears, so
-  // they need to age out here or they pin the row forever: 'Updated' sits in
-  // the menu for weeks, and a worker that died mid-update leaves 'Updating...'
-  // which is also pointer-events:none, so it cannot even be dismissed.
+  const txt=$('mi-selftxt'), ver=$('mi-selfver');
+  const gear=$('settings');
+  const set=(state, label, right)=>{
+    b.dataset.state=state;
+    if(txt) txt.textContent=label;
+    if(ver) ver.textContent=right||'';
+    if(gear) gear.classList.toggle('dot', state==='ready');
+  };
+
+  // Both of these are written to a file that nothing ever clears, so they age
+  // out here or they pin the row: 'Updated' would sit in the menu for weeks,
+  // and a worker that died mid-update would leave 'Updating...' forever.
   const age=(st && st.t) ? (Date.now()/1000 - st.t) : 1e9;
-  if(st && st.state==='running' && age < 900){
-    show(true,false); b.dataset.state='running';
-    $('mi-selftxt').textContent='Updating\u2026'; $('mi-selfver').textContent='';
-    return;
-  }
-  if(st && st.state==='done' && age < 3600 && !(u && u.available)){
-    show(true,false); b.dataset.state='';
-    $('mi-selftxt').textContent='Updated'; $('mi-selfver').textContent=st.msg||'';
-    return;
-  }
-  if(!u || !u.available){ show(false,false); return; }
-  show(true,true); b.dataset.state='';
-  $('mi-selftxt').textContent='Update Dashy';
-  $('mi-selfver').textContent=u.current+' \u2192 '+u.latest;
+  if(st && st.state==='running' && age < 900) return set('running','Updating\u2026','');
+  if(st && st.state==='failed' && age < 3600)
+    return set('idle','Install update', st.msg||'that did not work');
+  if(u && u.available) return set('ready','Update to '+u.latest, u.current+' \u2192 '+u.latest);
+  if(st && st.state==='done' && age < 3600) return set('idle','Install update','just updated');
+  set('idle','Install update', u ? 'up to date' : 'not checked yet');
 }
 
 // Which address a tile opens. The server sends both, so this is a repaint and
@@ -3217,7 +3217,11 @@ document.addEventListener('click',ev=>{
   const lk=ev.target.closest('#su-links button, #m-links button');
   if(lk){ setLinks(lk.dataset.links); return; }
   if(ev.target.closest('#mi-check')){ doCheck(); return; }
-  if(ev.target.closest('#mi-self')){ closeMenu(); askSelfUpdate(); return; }
+  const selfRow=ev.target.closest('#mi-self');
+  if(selfRow){
+    if(selfRow.dataset.state==='ready'){ closeMenu(); askSelfUpdate(); }
+    return;
+  }
   const cb=ev.target.closest('.cityres button[data-city]');
   if(cb){ pickCity(parseInt(cb.dataset.city,10), cb.closest('.cityres').id); return; }
   const sw2=ev.target.closest('.sw2');
