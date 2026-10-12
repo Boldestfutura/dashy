@@ -140,14 +140,41 @@ BRANCH="${UPDATE_BRANCH:-main}"
 STAMP="$D/selfupdate.stamp"
 NOW=$(date +%s)
 LAST=$(cat "$STAMP" 2>/dev/null || echo 0)
-if [ $(( NOW - LAST )) -ge 1800 ]; then
-  echo "$NOW" > "$STAMP"
-  APPNAME=$(basename -- "$BASE")
-  IMAGE=$(midclt call app.config "$APPNAME" 2>/dev/null | python3 -c "
+APPNAME=$(basename -- "$BASE")
+
+# One read of the app's own config gives both the image, which says how this
+# install is packaged, and the port, which says where to ask it its version.
+CFG=$(midclt call app.config "$APPNAME" 2>/dev/null)
+IMAGE=$(printf '%s' "$CFG" | python3 -c "
 import json,sys
 try: svc=list(json.load(sys.stdin)['services'].values())[0]
 except Exception: raise SystemExit
 print(svc.get('image') or '')" 2>/dev/null)
+DPORT=$(printf '%s' "$CFG" | python3 -c "
+import json,sys
+try: svc=list(json.load(sys.stdin)['services'].values())[0]
+except Exception: raise SystemExit
+print((svc.get('environment') or {}).get('DASH_PORT') or '')" 2>/dev/null)
+
+# Half an hour between checks is fine right up until Dashy itself is updated,
+# at which point the cached "latest" is being compared against a version that
+# is no longer running - which shows the user a stale and meaningless upgrade.
+# So if the running version has moved since the last check, check again now.
+CUR=""
+if [ -n "$DPORT" ]; then
+  CUR=$(curl -fsS -m 5 "http://127.0.0.1:$DPORT/version" 2>/dev/null \
+        | sed -n 's/.*"version"[^"]*"\([^"]*\)".*/\1/p')
+  WAS=$(python3 -c "
+import json
+try: print(json.load(open('$D/selfupdate.json')).get('current') or '')
+except Exception: print('')" 2>/dev/null)
+  if [ -n "$CUR" ] && [ "$CUR" != "$WAS" ]; then
+    LAST=0
+  fi
+fi
+
+if [ $(( NOW - LAST )) -ge 1800 ]; then
+  echo "$NOW" > "$STAMP"
 
   VER=""
   SRC="$REPO"
@@ -196,7 +223,8 @@ PYGHCR
 
   case "$VER" in
     [0-9]*)
-      printf '{"latest":"%s","checked":%s,"repo":"%s"}\n' "$VER" "$NOW" "$SRC" \
+      printf '{"latest":"%s","current":"%s","checked":%s,"repo":"%s"}\n' \
+        "$VER" "$CUR" "$NOW" "$SRC" \
         > "$D/selfupdate.json.tmp" && mv "$D/selfupdate.json.tmp" "$D/selfupdate.json" ;;
   esac
 fi

@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.8.3"
+APP_VERSION = "0.8.4"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -2366,12 +2366,17 @@ function paintSelfUpdate(){
   const show=(on,dot)=>{ b.hidden=!on;
     const sep=$('mi-selfsep'); if(sep) sep.hidden=!on;
     const g=$('settings'); if(g) g.classList.toggle('dot',!!dot); };
-  if(st && st.state==='running'){
+  // Both of these states are written to a file that nothing ever clears, so
+  // they need to age out here or they pin the row forever: 'Updated' sits in
+  // the menu for weeks, and a worker that died mid-update leaves 'Updating...'
+  // which is also pointer-events:none, so it cannot even be dismissed.
+  const age=(st && st.t) ? (Date.now()/1000 - st.t) : 1e9;
+  if(st && st.state==='running' && age < 900){
     show(true,false); b.dataset.state='running';
     $('mi-selftxt').textContent='Updating\u2026'; $('mi-selfver').textContent='';
     return;
   }
-  if(st && st.state==='done' && !(u && u.available)){
+  if(st && st.state==='done' && age < 3600 && !(u && u.available)){
     show(true,false); b.dataset.state='';
     $('mi-selftxt').textContent='Updated'; $('mi-selfver').textContent=st.msg||'';
     return;
