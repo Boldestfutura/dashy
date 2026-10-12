@@ -35,7 +35,11 @@ add and remove things.
 | ![Phone](docs/03-phone.png) | ![Apps](docs/04-apps.png) |
 | On a phone | Apps, with versions and update markers |
 | ![Settings](docs/05-settings.png) | ![Arrange](docs/06-arrange.png) |
-| Settings | Hold-to-drag arrange mode |
+| Settings | Hold a tile to arrange: drag to reorder, **×** removes |
+
+![An update waiting](docs/07-update.png)
+
+*Dashy updates itself. Check whenever you like, or let it find one on its own.*
 
 ![Dark mode](docs/02-desktop-dark.png)
 

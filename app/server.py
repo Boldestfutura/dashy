@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.12.2"
+APP_VERSION = "0.12.3"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1373,19 +1373,23 @@ PAGE = """<!doctype html>
   @keyframes jigA{0%,100%{transform:rotate(-.7deg)}50%{transform:rotate(.7deg)}}
   @keyframes jigB{0%,100%{transform:rotate(.7deg)}50%{transform:rotate(-.7deg)}}
   body.editing .cardwrap{touch-action:none}
-  body.editing .cardwrap > .card{animation:jigA .28s ease-in-out infinite;
-                                 transform-origin:50% 50%}
-  body.editing .cardwrap:nth-child(2n) > .card{animation-name:jigB}
-  body.editing .cardwrap:nth-child(3n) > .card{animation-delay:-.09s}
-  body.editing .cardwrap:nth-child(5n) > .card{animation-delay:-.17s}
-  /* the tile being carried does not wobble, and it is the wrapper that is
-     positioned, so the scale goes on the card where it will not fight FLIP */
+  /* The wobble lives on .jig, which holds the card AND its corner badge, so the
+     badge travels with the tile. The wrapper above it stays untouched for the
+     drag animation - a running animation beats an inline transform, so those
+     two can never share an element. */
+  .jig{position:relative;display:flex;width:100%}
+  body.editing .cardwrap > .jig{animation:jigA .28s ease-in-out infinite;
+                                transform-origin:50% 50%}
+  body.editing .cardwrap:nth-child(2n) > .jig{animation-name:jigB}
+  body.editing .cardwrap:nth-child(3n) > .jig{animation-delay:-.09s}
+  body.editing .cardwrap:nth-child(5n) > .jig{animation-delay:-.17s}
   body.editing .cardwrap.drag{z-index:40;pointer-events:none}
-  body.editing .cardwrap.drag > .card{animation:none;transform:scale(1.06);
-                              opacity:.92;box-shadow:0 18px 40px -12px rgba(0,0,0,.45)}
+  body.editing .cardwrap.drag > .jig{animation:none;transform:scale(1.06);
+                              opacity:.92}
+  body.editing .cardwrap.drag .card{box-shadow:0 18px 40px -12px rgba(0,0,0,.45)}
   body.editing .cardwrap.slot{opacity:.35}
   @media (prefers-reduced-motion:reduce){
-    body.editing .cardwrap > .card{animation:none}
+    body.editing .cardwrap > .jig{animation:none}
     .cardwrap{transition:none !important}
   }
   .card.ghost{opacity:.45}
@@ -1398,7 +1402,7 @@ PAGE = """<!doctype html>
   .cardwrap{position:relative;display:flex;
             -webkit-user-select:none;user-select:none;
             -webkit-touch-callout:none}
-  .cardwrap > .card{width:100%}
+  .cardwrap .card{width:100%}
   .cardtools{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
              gap:7px;background:color-mix(in srgb,var(--panel) 86%,transparent);
              border-radius:var(--r);z-index:3}
@@ -1421,8 +1425,8 @@ PAGE = """<!doctype html>
   .cardwrap[data-off="1"] .xbtn{color:var(--ok);font-weight:700}
   .cardtools .hint{position:absolute;bottom:8px;left:0;right:0;text-align:center;
                    font-size:10px;color:var(--muted);font-weight:600;pointer-events:none}
-  .cardwrap[data-off="1"] > .card,
-  .cardwrap[data-off="1"] > .cardtools{opacity:.34}
+  .cardwrap[data-off="1"] .card,
+  .cardwrap[data-off="1"] .cardtools{opacity:.34}
   body:not(.editing) .cardwrap[data-off="1"]{display:none}
   .editbar{display:none;align-items:center;gap:10px;margin:0 0 12px;padding:11px 14px;
            background:var(--panel);border:1px solid var(--brd);border-radius:14px;
@@ -1457,6 +1461,7 @@ PAGE = """<!doctype html>
   .cardwrap[data-w="2"]{grid-column:span 2}
   /* and a big one spans two of each - four cells, hence 4x */
   .cardwrap[data-w="4"]{grid-column:span 2;grid-row:span 2}
+  .cardwrap[data-w="4"] .jig,
   .cardwrap[data-w="4"] .card{min-height:100%}
   .spark{margin-top:10px;height:46px;width:100%;display:block;overflow:visible}
   .cardwrap[data-w="1"] .spark{display:none}
@@ -2386,9 +2391,11 @@ function cardHTML(c){
     '</div>'+
     '<button type="button" class="xbtn" data-eye="'+c.k+'" aria-label="Remove"></button>';
   return '<div class="cardwrap" data-k="'+c.k+'">'+
-           '<button class="card" data-pop="'+c.k+'">'+
-             '<p class="lbl">'+c.label+'</p>'+body+spark+
-           '</button>'+tools+
+           '<div class="jig">'+
+             '<button class="card" data-pop="'+c.k+'">'+
+               '<p class="lbl">'+c.label+'</p>'+body+spark+
+             '</button>'+tools+
+           '</div>'+
          '</div>';
 }
 
