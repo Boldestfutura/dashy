@@ -14,11 +14,10 @@ add and remove things.
 - **Live vitals.** CPU, memory, temperatures, pool capacity, disk and network
   throughput. Every tile opens a detail sheet with per-core figures, drive
   temperatures, SMART state, throughput history and an uptime record.
-- **Your apps, found automatically.** Nothing is hard-coded. Dashy joins your
-  Tailscale Serve config against the TrueNAS app list, so publishing a service
-  makes a tile appear for it, with its real icon, version and status. Remove one
-  and the tile goes. No Tailscale? It lists every app that binds a host port
-  instead, linked on your LAN.
+- **Your apps, found automatically.** Nothing is hard-coded and nothing to
+  configure. Every app on the NAS gets a tile, with its real icon, version and
+  status. If you use Tailscale Serve, the apps you publish get their tailnet
+  address; everything else is linked on your LAN. Hide what you do not want.
 - **Updates from the dashboard.** Apps with an update show a marker; tapping it
   queues the upgrade and a recursive ZFS snapshot is taken first. Dashy updates
   itself the same way, straight from this repository.

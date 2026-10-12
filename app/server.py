@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.9.2"
+APP_VERSION = "0.9.3"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -926,55 +926,15 @@ NOT_WEB = (
 )
 
 
-def discover_lan():
-    """No Tailscale Serve, so there is no curated list of what is published and no
-    tailnet to reach it on. Fall back to every app that binds a host port - which
-    collect.sh already records - and link to each on the LAN.
-
-    Tailscale is how Dashy knows what you *chose* to publish. Without it the honest
-    answer is everything that is listening, so that is what this shows."""
-    try:
-        with open(os.path.join(DATA, "apps.json")) as fh:
-            apps = json.load(fh)
-    except (OSError, ValueError):
-        return []
-    out = []
-    for a in apps:
-        ports = sorted(int(p) for p in (a.get("ports") or []) if p)
-        ports = [p for p in ports if p not in NOT_WEB]
-        if not ports:
-            continue                      # host networking, or nothing web-facing
-        label, desc = KNOWN.get(a.get("name"),
-                                ((a.get("name") or "?").replace("-", " ").title(), ""))
-        out.append({"port": ports[0], "lport": ports[0], "name": label, "desc": desc,
-                    "state": a.get("state"), "app": a.get("name"),
-                    "version": a.get("version"), "update": bool(a.get("update")),
-                    "iconsrc": ("/appicon/" + a["name"]) if a.get("icon") else None})
-    out.sort(key=lambda x: (x["name"] or "").lower())
-    return out
-
-
-def discover():
-    """Every tailnet mapping, named from the installed app that owns the local port.
-    Nothing is hard-coded, so publishing a new app makes it appear here by itself."""
+def serve_map():
+    """Local port -> tailnet port, from whatever Tailscale Serve publishes.
+    An address book, not a census."""
     try:
         with open(SERVE) as fh:
             cfg = json.load(fh)
     except (OSError, ValueError):
-        cfg = {}
-    if not (cfg.get("Web") or {}):
-        return discover_lan()
-
-    owner = {}
-    try:
-        with open(os.path.join(DATA, "apps.json")) as fh:
-            for a in json.load(fh):
-                for p in a.get("ports") or []:
-                    owner[int(p)] = a
-    except (OSError, ValueError, TypeError):
-        pass
-
-    out = []
+        return {}
+    pub = {}
     for host, entry in (cfg.get("Web") or {}).items():
         try:
             tport = int(host.rsplit(":", 1)[1])
@@ -983,26 +943,60 @@ def discover():
         handlers = entry.get("Handlers") or {}
         target = (list(handlers.values())[0] or {}).get("Proxy", "") if handlers else ""
         try:
-            lport = int(target.rsplit(":", 1)[1])
+            pub[int(target.rsplit(":", 1)[1])] = tport
         except (IndexError, ValueError):
             continue
+    return pub
 
-        app = owner.get(lport)
-        if app:
-            label, desc = KNOWN.get(app["name"], (app["name"].replace("-", " ").title(), ""))
-            state = app.get("state")
-            out.append({"port": tport, "lport": lport, "name": label, "desc": desc,
-                        "state": state, "app": app.get("name"),
-                        "version": app.get("version"), "update": bool(app.get("update")),
-                        "iconsrc": ("/appicon/" + app["name"]) if app.get("icon") else None})
-        else:
-            label, desc = PORT_FALLBACK.get(lport, ("Port %d" % lport, ""))
-            # this app publishes no ports (host networking) so it never appears
-            # in the app list; it can still show its own bundled icon
-            out.append({"port": tport, "lport": lport, "name": label, "desc": desc,
-                        "state": None, "app": None, "version": None, "update": False,
-                        "iconsrc": "/icon-192.png" if lport == PORT else None})
-    out.sort(key=lambda x: x["port"])
+
+def discover():
+    """Every installed app, plus whatever Serve says about how to reach it.
+
+    Serve used to BE the list, which meant publishing one app hid all the
+    others - install Dashy on a fresh Tailscale setup and the dashboard showed
+    exactly one tile, itself. Serve answers "what address", not "what exists".
+    The app list comes from the NAS; anything you do not want, hide."""
+    pub = serve_map()
+    try:
+        with open(os.path.join(DATA, "apps.json")) as fh:
+            apps = json.load(fh)
+    except (OSError, ValueError):
+        apps = []
+
+    out, claimed = [], set()
+    for a in apps:
+        ports = sorted(int(p) for p in (a.get("ports") or []) if p)
+        # A port Serve publishes wins outright: that is the owner stating which
+        # port you reach this app on, which beats any guess made here.
+        chosen = next((p for p in ports if p in pub), None)
+        if chosen is None:
+            chosen = next((p for p in ports if p not in NOT_WEB), None)
+        if chosen is None:
+            continue                 # host networking, or nothing web-facing
+        claimed.add(chosen)
+        label, desc = KNOWN.get(a.get("name"),
+                                ((a.get("name") or "?").replace("-", " ").title(), ""))
+        out.append({"port": pub.get(chosen), "lport": chosen,
+                    "name": label, "desc": desc,
+                    "state": a.get("state"), "app": a.get("name"),
+                    "version": a.get("version"), "update": bool(a.get("update")),
+                    "iconsrc": ("/appicon/" + a["name"]) if a.get("icon") else None})
+
+    # Published ports that belong to no installed app: the TrueNAS UI on 443,
+    # and Dashy itself, which publishes nothing because it runs host networking.
+    for lport, tport in pub.items():
+        if lport in claimed:
+            continue
+        label, desc = PORT_FALLBACK.get(lport, ("Port %d" % lport, ""))
+        out.append({"port": tport, "lport": lport, "name": label, "desc": desc,
+                    "state": None, "app": None, "version": None, "update": False,
+                    "iconsrc": "/icon-192.png" if lport == PORT else None})
+
+    # published first, in tailnet-port order, then everything else by name, so
+    # an existing install's tiles keep their order and the newly visible ones
+    # land after them rather than shuffling the lot
+    out.sort(key=lambda x: (x["port"] is None, x["port"] or 0,
+                            (x["name"] or "").lower()))
     return out
 
 
@@ -1025,7 +1019,8 @@ def services_loop():
         for svc in discover():
             svc = dict(svc)
             svc["code"] = probe(svc["lport"])
-            svc["url"] = ("https://%s:%d/" % (TAILNET, svc["port"])) if TAILNET \
+            svc["url"] = ("https://%s:%d/" % (TAILNET, svc["port"])) \
+                         if (TAILNET and svc.get("port")) \
                          else ("http://%s:%d/" % (LINK_HOST, svc["lport"]))
             found.append(svc)
         with _lock:
