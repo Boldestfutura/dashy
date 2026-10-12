@@ -97,7 +97,31 @@ else
     info "no Tailscale Serve config found."
   fi
   info "that is fine - installing for your LAN instead."
-  info "to publish on your tailnet later, set up Serve and re-run this."
+  # ...unless Tailscale is actually here, in which case offer to finish the job.
+  # Serve on TrueNAS is a JSON file you write yourself, mounted into the
+  # Tailscale container and named by TS_SERVE_CONFIG. Four fiddly steps that
+  # people reasonably expect Tailscale to have done for them.
+  if midclt call app.query '[["name","=","tailscale"]]' 2>/dev/null | grep -q '"name"'; then
+    info ""
+    info "Tailscale IS installed here, just not publishing anything yet."
+    ans="$(ask "set Tailscale Serve up for you? (y/n)" "y")"
+    case "$ans" in
+      y|Y|yes|YES)
+        info ""
+        info "I need this machine's tailnet name. It is in the Tailscale admin"
+        info "console, or run 'tailscale status' on any of your devices."
+        info "It looks like  machine-name.tailXXXX.ts.net"
+        TSHOST="$(ask "tailnet name" "")"
+        if [ -n "$TSHOST" ]; then
+          TS=2        # set it up after the app exists and the port is known
+        else
+          info "no name given - installing for your LAN instead."
+        fi ;;
+      *) info "installing for your LAN. Re-run this later to publish it." ;;
+    esac
+  else
+    info "to publish on your tailnet later, install Tailscale and re-run this."
+  fi
 fi
 
 # What a link in the page should point at. The app probes on 127.0.0.1, but a
@@ -119,12 +143,13 @@ fi
 [ -n "$LPORT" ] || die "no free local port in 30800-30899."
 
 TPORT=""
-if [ "$TS" = 1 ]; then
+if [ "$TS" != 0 ]; then
   if [ -z "${TPORT:-}" ]; then
     USED=$(python3 -c "
 import json
-cfg=json.load(open('$SERVE'))
-print(' '.join((cfg.get('TCP') or {}).keys()))")
+try: cfg=json.load(open('$SERVE'))
+except Exception: cfg={}
+print(' '.join((cfg.get('TCP') or {}).keys()))" 2>/dev/null)
     for p in $(seq 8443 8499); do
       case " $USED " in *" $p "*) continue ;; esac
       TPORT=$p; break
@@ -198,8 +223,10 @@ env = {"DASH_PORT": lport, "DASH_DATA": "/data", "DASH_QUEUE": "/queue",
        "HOST_IP": "127.0.0.1", "LINK_HOST": lan_ip,
        "DASH_CONFIG": "/config",
        "PYTHONDONTWRITEBYTECODE": "1"}
-if ts == "1":
+if ts != "0":
     env["SERVE_JSON"] = "/serve/serve.json"
+# so the dashboard's own "publish on the tailnet" button knows where to put it
+env["SERVE_HOST_PATH"] = serve
 if wlat and wlon:
     env.update({"WEATHER_LAT": wlat, "WEATHER_LON": wlon})
     if wtz:
@@ -215,7 +242,7 @@ svc = {
                 base + "/queue:/queue",
                 base + "/config:/config"],
 }
-if ts == "1":
+if ts != "0":
     svc["volumes"].append(serve + ":/serve/serve.json:ro")
 if mode == "image":
     svc["image"] = image
@@ -236,6 +263,19 @@ PY
 [ $? -eq 0 ] || die "app.create failed"
 
 # ---------------------------------------------------------------- serve entry
+if [ "$TS" = 2 ]; then
+  say "setting up Tailscale Serve"
+  [ -n "$SERVE" ] || SERVE="/mnt/$POOL/appconfig/serve.json"
+  if python3 "$REPO/app/serve_setup.py" --host "$TSHOST" --tport "$TPORT" \
+       --lport "$LPORT" --serve "$SERVE"; then
+    TS=1
+  else
+    info "Serve setup failed. Dashy is installed and reachable at"
+    info "http://$LAN_IP:$LPORT - fix Tailscale and re-run this to publish it."
+    TS=0
+  fi
+fi
+
 if [ "$TS" = 1 ]; then
 say "publishing on the tailnet"
 python3 - "$SERVE" "$TSHOST" "$TPORT" "$LPORT" <<'PY'

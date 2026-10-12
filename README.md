@@ -47,6 +47,14 @@ tailnet and lists the services you chose to publish, each at its tailnet name.
 Without it, Dashy serves on your LAN and lists every app that binds a host port.
 Install it either way and add Tailscale later if you want it.
 
+**And if Tailscale is installed but you have not published anything, Dashy will
+set Serve up for you** — during install, or later from the settings pane. On
+TrueNAS, Serve is not something Tailscale configures itself: it reads a JSON
+file you have to write, mount into the Tailscale container and name with
+`TS_SERVE_CONFIG`. Dashy does those steps, backing up anything it touches, and
+asks you for one thing: your tailnet name. It will not restart Tailscale unless
+something actually changed.
+
 ## Install
 
 Over SSH as `root` or `truenas_admin`, or in the TrueNAS web UI under
@@ -202,6 +210,7 @@ ever contacts a weather service.
 | Config | `<pool>/Applications/dashy/config` — shared settings |
 | Queue | `<pool>/Applications/dashy/queue` — upgrade requests |
 | Cron | two root jobs, every minute: `collect.sh`, `worker.sh` |
+| Serve setup | `app/serve_setup.py`, run as root by the installer or the worker |
 | Serve | one `TCP` entry and one `Web` handler added to your `serve.json`, if you use Tailscale |
 
 `serve.json` is backed up before it is touched.

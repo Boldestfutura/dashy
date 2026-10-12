@@ -7,7 +7,7 @@ LABEL org.opencontainers.image.title="Dashy" \
       org.opencontainers.image.licenses="MIT"
 
 COPY app/ /app/
-RUN chmod +x /app/entrypoint.sh /app/collect.sh /app/worker.sh
+RUN chmod +x /app/entrypoint.sh /app/collect.sh /app/worker.sh /app/serve_setup.py
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     DASH_DATA=/data \

@@ -9,7 +9,7 @@
 # mounted at /hostapp. By rename, because worker.sh may be running right now -
 # the swap leaves the running shell reading the old inode.
 if [ -d /hostapp ]; then
-  for f in collect.sh worker.sh; do
+  for f in collect.sh worker.sh serve_setup.py; do
     if ! cmp -s "/app/$f" "/hostapp/$f" 2>/dev/null; then
       if cp "/app/$f" "/hostapp/$f.new" 2>/dev/null; then
         chmod +x "/hostapp/$f.new" 2>/dev/null

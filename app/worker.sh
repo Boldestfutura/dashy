@@ -10,6 +10,59 @@ Q="$BASE/queue"
 D="$BASE/data"
 S="$D/updates.json"
 
+# --- a request from the dashboard to set up Tailscale Serve -----------------
+# The container cannot do this itself: it has no midclt, and the Tailscale app
+# has to be edited and redeployed. The dashboard drops the parameters here and
+# this runs serve_setup.py, which is the same script install.sh uses.
+if [ -f "$Q/_serve.req" ]; then
+  REQ=$(cat "$Q/_serve.req" 2>/dev/null)
+  rm -f "$Q/_serve.req"
+  snote(){ python3 - "$1" "$2" "$S" <<'PYS'
+import json,sys,time
+st,msg,path=sys.argv[1],sys.argv[2],sys.argv[3]
+try: d=json.load(open(path))
+except Exception: d={}
+d["_serve"]={"state":st,"msg":msg,"t":int(time.time())}
+json.dump(d,open(path,"w"))
+PYS
+  }
+  snote running "setting up Tailscale Serve"
+  ARGS=$(printf '%s' "$REQ" | python3 -c "
+import json,sys,re
+try: r=json.load(sys.stdin)
+except Exception: raise SystemExit
+host=str(r.get('host') or '').strip()
+# the host goes into a filename-ish key and then into a shell command, so keep
+# it to what a tailnet name can actually contain
+if not re.match(r'^[A-Za-z0-9][A-Za-z0-9.-]{0,252}\$', host): raise SystemExit
+try:
+    tport=int(r.get('tport')); lport=int(r.get('lport'))
+except Exception: raise SystemExit
+if not (1 <= tport <= 65535 and 1 <= lport <= 65535): raise SystemExit
+serve=str(r.get('serve') or '').strip()
+if serve and (not serve.startswith('/mnt/') or '..' in serve): raise SystemExit
+print('%s %d %d %s' % (host, tport, lport, serve or '-'))
+" 2>/dev/null)
+  if [ -z "$ARGS" ]; then
+    snote failed "the request did not make sense"
+  else
+    set -- $ARGS
+    SPATH="$4"
+    if [ "$SPATH" = "-" ]; then
+      # no hint from the app, so put it beside the other app config on our pool:
+      # /mnt/<pool>/Applications/<app> -> /mnt/<pool>/appconfig
+      POOL=${BASE#/mnt/}; POOL=${POOL%%/*}
+      SPATH="/mnt/$POOL/appconfig/serve.json"
+    fi
+    if python3 "$APP_DIR/serve_setup.py" --host "$1" --tport "$2" --lport "$3" \
+         --serve "$SPATH" > "$D/serve-setup.log" 2>&1; then
+      snote done "published on the tailnet"
+    else
+      snote failed "$(tail -1 "$D/serve-setup.log" 2>/dev/null | head -c 120)"
+    fi
+  fi
+fi
+
 # --- a request to update Dashy itself ---------------------------------------
 # Two install shapes, and the update differs between them:
 #   image  - the app runs a published container image, so pull a new one

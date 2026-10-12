@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.9.0"
+APP_VERSION = "0.9.1"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -23,6 +23,9 @@ HOST_IP = os.environ.get("HOST_IP", "127.0.0.1")
 # what goes in a link the browser follows, where 127.0.0.1 would be the viewer's
 # own machine. They only differ on a LAN install, which has no tailnet name to use.
 LINK_HOST = os.environ.get("LINK_HOST", "").strip() or HOST_IP
+# where the worker should put serve.json if it has to create one. The
+# container cannot see the host filesystem, so this is a hint, not a lookup.
+SERVE_HOST_HINT = os.environ.get("SERVE_HOST_PATH", "").strip()
 
 # Weather is OFF unless coordinates are supplied. There is no geolocation and
 # no IP lookup anywhere in this app: whoever installs it types a latitude and
@@ -756,11 +759,36 @@ def installed_apps():
         return set()
 
 
+def request_serve(host, tport):
+    """Ask the root worker to set Tailscale Serve up. The container cannot:
+    no midclt, and the Tailscale app itself has to be edited and redeployed."""
+    host = (host or "").strip().lower()
+    if not re.match(r"^[a-z0-9][a-z0-9.-]{0,252}$", host) or "." not in host:
+        return False, "that does not look like a tailnet name"
+    try:
+        tport = int(tport)
+    except (TypeError, ValueError):
+        return False, "bad port"
+    if not 1024 <= tport <= 65535:
+        return False, "port must be 1024-65535"
+    try:
+        os.makedirs(QUEUE, exist_ok=True)
+        with open(os.path.join(QUEUE, "_serve.req"), "w") as fh:
+            json.dump({"host": host, "tport": tport, "lport": PORT,
+                       "serve": SERVE_HOST_HINT}, fh)
+    except OSError as e:
+        return False, str(e)
+    return True, "queued"
+
+
 def detect():
     """What this NAS appears to be running, so first-run setup can be a
     confirmation rather than an interrogation."""
     apps = installed_apps()
     return {"tailscale": bool(TAILNET) or "tailscale" in apps,
+            # Tailscale is here but nothing is published, which is the normal
+            # state of a new install and the one worth offering to fix
+            "serve_offer": (not TAILNET) and ("tailscale" in apps),
             "hexos": "hexos" in apps,
             "openclaw": "openclaw" in apps,
             "weather": weather_where() is not None}
@@ -1139,6 +1167,12 @@ PAGE = """<!doctype html>
       transition:background .13s ease}
   .mi:hover{background:var(--faint)}
   #mi-self{color:var(--warn)}
+  .pubbtn{margin-top:8px;padding:7px 14px;border:none;border-radius:9px;
+          background:var(--brand);color:#fff;font:inherit;font-size:13px;
+          font-weight:700;cursor:pointer}
+  .pubbtn:disabled{opacity:.5;cursor:default}
+  .pubmsg{display:block;margin-top:7px;font-size:12px;color:var(--muted)}
+  .pubmsg.bad{color:var(--warn)}
   #settings.dot{position:relative}
   #settings.dot::after{content:'';position:absolute;top:5px;right:5px;width:7px;height:7px;
       border-radius:50%;background:var(--warn);box-shadow:0 0 0 2px var(--card)}
@@ -1553,6 +1587,13 @@ PAGE = """<!doctype html>
             <input class="fld sm" id="m-city" type="search" autocomplete="off"
                    placeholder="Type a town&hellip;">
             <div class="cityres" id="m-cityres"></div></div>
+          <div class="mrow nas" id="m-serverow" hidden>
+            <span class="ml">Publish on your tailnet</span>
+            <span class="mhint">Tailscale is installed but not publishing yet</span>
+            <input class="fld sm" id="m-tsname" type="text" autocomplete="off"
+                   spellcheck="false" placeholder="nas.tailXXXX.ts.net">
+            <button class="pubbtn" id="m-tsgo" type="button">Publish</button>
+            <span class="pubmsg" id="m-tsmsg"></span></div>
           <div class="mrow nas"><span class="ml">TrueNAS address</span>
             <span class="mhint">Where you open the TrueNAS interface</span>
             <input class="fld sm" id="m-nas" type="url" inputmode="url"
@@ -1640,6 +1681,16 @@ PAGE = """<!doctype html>
         <span class="txt"><b>Tailscale<span class="auto" id="a-ts"></span></b>
           <span>Open apps by their tailnet address.</span></span>
         <button class="sw2" id="o-ts" role="switch" aria-checked="false"><i></i></button>
+      </div>
+      <div class="opt" id="su-serve" hidden>
+        <span class="txt"><b>Publish on your tailnet</b>
+          <span>Tailscale is running here but nothing is published yet. Dashy can
+          set that up. Your tailnet name is in the Tailscale admin console, or run
+          <code>tailscale status</code> on any of your devices.</span>
+          <input class="fld sm" id="su-tsname" type="text" autocomplete="off"
+                 spellcheck="false" placeholder="nas.tailXXXX.ts.net">
+          <button class="pubbtn" id="su-tsgo" type="button">Publish</button>
+          <span class="pubmsg" id="su-tsmsg"></span></span>
       </div>
       <div class="opt">
         <span class="txt"><b>OpenClaw<span class="auto" id="a-oc"></span></b>
@@ -2430,6 +2481,46 @@ function paintSelfUpdate(){
   $('mi-selfver').textContent=u.current+' \u2192 '+u.latest;
 }
 
+// Offered only when Tailscale is actually installed and publishing nothing.
+// The container cannot do any of this itself, so the button drops a request in
+// the queue and the root worker runs the same script install.sh does.
+function paintServeOffer(){
+  const det=(data&&data.detected)||{};
+  const st=(data&&data.updates&&data.updates._serve)||null;
+  const on=!!det.serve_offer || (st && st.state==='running');
+  ['su-serve','m-serverow'].forEach(id=>{ const el=$(id); if(el) el.hidden=!on; });
+  if(!on) return;
+  let msg='', bad=false, busy=false;
+  if(st && st.state==='running'){ msg='Setting it up\u2026 Tailscale restarts, give it a minute.'; busy=true; }
+  else if(st && st.state==='failed'){ msg=st.msg||'That did not work.'; bad=true; }
+  else if(st && st.state==='done'){ msg='Published. Reload to use the tailnet address.'; }
+  ['su-tsmsg','m-tsmsg'].forEach(id=>{
+    const el=$(id); if(!el) return;
+    el.textContent=msg; el.classList.toggle('bad',bad); });
+  ['su-tsgo','m-tsgo'].forEach(id=>{ const b=$(id); if(b) b.disabled=busy; });
+}
+
+function askPublish(which){
+  const inp=$(which==='su'?'su-tsname':'m-tsname');
+  const msg=$(which==='su'?'su-tsmsg':'m-tsmsg');
+  const host=(inp&&inp.value||'').trim().toLowerCase();
+  if(!host || host.indexOf('.')<0){
+    if(msg){ msg.textContent='Needs the full name, like nas.tail1234.ts.net';
+             msg.classList.add('bad'); }
+    return;
+  }
+  if(msg){ msg.textContent='Asking the NAS\u2026'; msg.classList.remove('bad'); }
+  fetch('/api/serve',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({host:host})})
+    .then(r=>r.json())
+    .then(r=>{ if(msg){ msg.textContent = r.ok
+        ? 'Queued. Tailscale will restart shortly.'
+        : (r.msg||'That did not work.');
+        msg.classList.toggle('bad', !r.ok); } })
+    .catch(()=>{ if(msg){ msg.textContent='Could not reach the NAS.';
+                          msg.classList.add('bad'); } });
+}
+
 function paintLinks(L){
   const set=(id,url)=>{const a=$(id); if(!a) return;
     if(url){a.href=url;a.hidden=false;}else{a.removeAttribute('href');a.hidden=true;}};
@@ -2443,6 +2534,7 @@ function paintLinks(L){
   set('mi-chat',chat);
   set('mi-hexos',hexos);
   paintSelfUpdate();
+  paintServeOffer();
   setSwitch('m-ts', !!su.tailscale);
   setSwitch('m-oc', !!su.openclaw);
   setSwitch('m-hx', !!su.hexos);
@@ -2920,6 +3012,8 @@ document.addEventListener('click',ev=>{
   if(ev.target.closest('#mi-edit')){ closeMenu(); setEditing(true); return; }
   if(ev.target.closest('#mi-ver')){ closeMenu(); openPop('up'); return; }
   if(ev.target.closest('#mi-setup')){ closeMenu(); openSetup(true); return; }
+  if(ev.target.closest('#su-tsgo')){ askPublish('su'); return; }
+  if(ev.target.closest('#m-tsgo')){ askPublish('m'); return; }
   if(ev.target.closest('#mi-self')){ closeMenu(); askSelfUpdate(); return; }
   const cb=ev.target.closest('.cityres button[data-city]');
   if(cb){ pickCity(parseInt(cb.dataset.city,10), cb.closest('.cityres').id); return; }
@@ -3137,6 +3231,16 @@ class Handler(BaseHTTPRequestHandler):
             ok, msg, rev = save_prefs(body)
             return self._send(200 if ok else 400,
                               json.dumps({"ok": ok, "msg": msg, "rev": rev}),
+                              "application/json; charset=utf-8")
+        if path == "/api/serve":
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(min(n, 8192)) or b"{}")
+            except (ValueError, TypeError):
+                body = {}
+            ok, msg = request_serve(body.get("host"), body.get("tport") or 8455)
+            return self._send(200 if ok else 400,
+                              json.dumps({"ok": ok, "msg": msg}),
                               "application/json; charset=utf-8")
         if path != "/api/update":
             return self._send(404, json.dumps({"error": "not found"}),
