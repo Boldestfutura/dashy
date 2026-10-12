@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.10.1"
+APP_VERSION = "0.11.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -907,6 +907,22 @@ def _clean_prefs(d):
     if d.get("accent") in _ACCENTS:
         out["accent"] = d["accent"]
 
+    # Per-card size. 1x is the default and is stored by omission, so a card
+    # only appears here when it is bigger than normal.
+    sz = d.get("size")
+    if isinstance(sz, dict):
+        clean = {}
+        for k, v in list(sz.items())[:64]:
+            if not (isinstance(k, str) and re.match(r"^[a-z0-9_-]{1,32}$", k)):
+                continue
+            try:
+                n = int(v)
+            except (TypeError, ValueError):
+                continue
+            if n in (2, 4):
+                clean[k] = n
+        out["size"] = clean
+
     w = d.get("weather")
     if isinstance(w, dict):
         try:
@@ -925,6 +941,9 @@ def _clean_prefs(d):
         for flag in ("done", "tailscale", "hexos", "openclaw", "weather"):
             if isinstance(su.get(flag), bool):
                 clean[flag] = su[flag]
+        # whether a tile opens its tailnet address or its address on the LAN
+        if su.get("links") in ("ts", "lan"):
+            clean["links"] = su["links"]
         url = su.get("truenas")
         if isinstance(url, str) and len(url) <= 200:
             url = url.strip()
@@ -1401,8 +1420,14 @@ PAGE = """<!doctype html>
 
   /* a wide tile spans two columns; at phone width that is the full row */
   .cardwrap[data-w="2"]{grid-column:span 2}
+  /* and a big one spans two of each - four cells, hence 4x */
+  .cardwrap[data-w="4"]{grid-column:span 2;grid-row:span 2}
+  .cardwrap[data-w="4"] .card{min-height:100%}
   .spark{margin-top:10px;height:46px;width:100%;display:block;overflow:visible}
   .cardwrap[data-w="1"] .spark{display:none}
+  /* the container has a fixed height, so a taller chart drew straight out
+     through the bottom of the card. Give it the room it is asking for. */
+  .cardwrap[data-w="4"] .spark{margin-top:14px;height:132px}
   .card .sparkwrap{margin-top:auto;padding-top:8px}
   .cardwrap[data-w="2"] .card{min-height:168px}
 
@@ -1467,7 +1492,8 @@ PAGE = """<!doctype html>
   .setup .skip{display:block;width:100%;margin-top:8px;padding:8px;background:none;
                border:none;color:var(--muted);font:inherit;font-size:12.5px;cursor:pointer}
 
-  .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(178px,1fr))}
+  .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(178px,1fr));
+        grid-auto-rows:minmax(146px,auto)}
 
   .card{position:relative;background:var(--panel);border:1px solid var(--brd);
         border-radius:var(--r);box-shadow:var(--shadow);padding:15px 16px;
@@ -1959,7 +1985,7 @@ const ACCENTS={
   sky:   {light:'#0585b5', dark:'#38bdf8'},
   slate: {light:'#55657a', dark:'#94a3b8'}
 };
-const DEFAULTS={theme:'system', accent:'teal', order:CARDK.slice(), hidden:[], wide:[],
+const DEFAULTS={theme:'system', accent:'teal', order:CARDK.slice(), hidden:[], wide:[], size:{},
                 setup:{}, weather:null};
 let prefs=Object.assign({}, DEFAULTS);
 let lastTick=0;
@@ -1975,6 +2001,7 @@ function loadPrefs(){
       if(ACCENTS[d.accent]) prefs.accent=d.accent;
       if(Array.isArray(d.hidden)) prefs.hidden=d.hidden.filter(k=>CARDK.indexOf(k)>=0);
       if(Array.isArray(d.wide)) prefs.wide=d.wide.filter(k=>CARDK.indexOf(k)>=0);
+      if(d.size && typeof d.size==='object') prefs.size=cleanSize(d.size);
       if(d.setup && typeof d.setup==='object') prefs.setup=d.setup;
       if(d.weather && typeof d.weather==='object') prefs.weather=d.weather;
       if(Array.isArray(d.order)){
@@ -2003,6 +2030,7 @@ function pushPrefs(){
       const r=await fetch('/api/layout',{method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({order:prefs.order, hidden:prefs.hidden, wide:prefs.wide,
+                             size:prefs.size,
                              theme:prefs.theme, accent:prefs.accent,
                              setup:prefs.setup, weather:prefs.weather})});
       const j=await r.json();
@@ -2031,6 +2059,10 @@ function adoptPrefs(P){
   if(Array.isArray(P.hidden)){
     const next=P.hidden.filter(k=>CARDK.indexOf(k)>=0);
     if(!same(next, prefs.hidden)){ prefs.hidden=next; layoutChanged=true; }
+  }
+  if(P.size && typeof P.size==='object'){
+    const ns=cleanSize(P.size);
+    if(JSON.stringify(ns)!==JSON.stringify(prefs.size)){ prefs.size=ns; layoutChanged=true; }
   }
   if(Array.isArray(P.wide)){
     const next=P.wide.filter(k=>CARDK.indexOf(k)>=0);
@@ -2253,9 +2285,27 @@ function setEditing(on){
   document.body.classList.toggle('editing', !!on);
   if(!on) savePrefs();
 }
+// Sizes a card can be, in the order the button walks through them.
+const SIZES=[1,2,4];
+function sizeOf(k){ const n=prefs.size[k]; return SIZES.indexOf(n)>=0 ? n : 1; }
+function nextSize(k){ return SIZES[(SIZES.indexOf(sizeOf(k))+1) % SIZES.length]; }
+
+function cleanSize(o){
+  const out={};
+  for(const k in o){
+    if(CARDK.indexOf(k)<0) continue;
+    const n=Number(o[k]);
+    if(SIZES.indexOf(n)>=0 && n!==1) out[k]=n;
+  }
+  return out;
+}
+
 function toggleWide(k){
-  const i=prefs.wide.indexOf(k);
-  if(i>=0) prefs.wide.splice(i,1); else prefs.wide.push(k);
+  const n=nextSize(k);
+  if(n===1) delete prefs.size[k]; else prefs.size[k]=n;
+  // keep the old flat list in step, so a device still on an older Dashy shows
+  // a resized card as wide rather than losing the setting entirely
+  prefs.wide=CARDK.filter(c=>sizeOf(c)>=2);
   savePrefs(); applyWidths(); applyHidden();
   if(data) drawSparks(data);
 }
@@ -2265,7 +2315,7 @@ function toggleCard(k){
   savePrefs(); applyHidden();
 }
 function resetLayout(){
-  prefs.order=CARDK.slice(); prefs.hidden=[]; prefs.wide=[];
+  prefs.order=CARDK.slice(); prefs.hidden=[]; prefs.wide=[]; prefs.size={};
   savePrefs(); build(); if(data) paint(data);
 }
 
@@ -2302,7 +2352,7 @@ function build(){
 
 function applyWidths(){
   document.querySelectorAll('#vitals .cardwrap').forEach(el=>{
-    el.dataset.w = prefs.wide.indexOf(el.dataset.k)>=0 ? '2' : '1';
+    el.dataset.w = String(sizeOf(el.dataset.k));
   });
 }
 
@@ -2322,15 +2372,22 @@ function drawSparks(d){
     const el=$('k-'+k);
     if(!el) continue;
     const wrap=el.closest('.cardwrap');
-    if(!wrap || wrap.dataset.w!=='2'){ el.innerHTML=''; continue; }
+    const w=wrap ? wrap.dataset.w : '1';
+    if(w!=='2' && w!=='4'){ el.innerHTML=''; continue; }
     const [rows, colour, cap]=SPARKS[k](d);
-    el.innerHTML=sparkPath(rows, colour, cap);
+    // a card with four times the room earns more than four times the line
+    const h = w==='4' ? 132 : 46;
+    // the viewBox is written into the markup, so it has to follow the height
+    // or the path simply draws out through the bottom of the card
+    el.setAttribute('viewBox', '0 0 300 '+h);
+    el.innerHTML=sparkPath(rows, colour, cap, h);
   }
 }
 
-function sparkPath(rows, colour, cap){
+function sparkPath(rows, colour, cap, H){
   if(!rows || rows.length<2) return '';
-  const W=300, H=46, n=rows.length;
+  const W=300, n=rows.length;
+  H = H || 46;
   let lo=Infinity, hi=-Infinity;
   rows.forEach(r=>{ const v=r[1]; if(v<lo)lo=v; if(v>hi)hi=v; });
   // Scale to the data, not to zero. A sparkline is about shape; the big number
@@ -2355,7 +2412,7 @@ function applyHidden(){
     el.dataset.off = off ? '1' : '0';
     // an arrow with nowhere to go should look like it
     const w=el.querySelector('[data-wide]');
-    if(w) w.textContent = el.dataset.w==='2' ? '1\u00d7' : '2\u00d7';
+    if(w) w.textContent = nextSize(el.dataset.k)+'\u00d7';
     const eye=el.querySelector('[data-eye]');
     if(eye){
       eye.textContent = off ? '\u25cc' : '\u25c9';
