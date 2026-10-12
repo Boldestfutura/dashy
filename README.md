@@ -25,6 +25,9 @@ add and remove things.
   sparkline, or hide it. Light, dark or system theme and twelve accent colours.
   **Layout and theme are stored on the server**, so they follow you to every
   device and apply within seconds without a refresh.
+- **Tailnet or local, your choice.** One switch decides whether a tile opens
+  its tailnet address or its address on your LAN. Choose the tailnet and Dashy
+  publishes whatever is not published yet, so those addresses exist.
 - **Optional weather** from a town you choose.
 
 | | |
@@ -71,28 +74,25 @@ cd dashy
 ./install.sh
 ```
 
-It works out the pool, a free local port, a free tailnet port and where
-Tailscale keeps `serve.json`, then asks about anything it cannot determine.
-When it finishes it prints your URL. First run walks you through a short setup.
+It asks two things — which pool, and whether to set Tailscale Serve up — and
+both arrive with an answer already filled in. Everything else it works out: a
+free local port, a free tailnet port, your LAN address, and where Tailscale
+keeps `serve.json`. When it finishes it prints your URL, and the first run
+walks you through a short setup.
 
-It also asks how you want it packaged:
-
-- **image** (default) — pulls `ghcr.io/boldestfutura/dashy:latest`. TrueNAS then
-  treats Dashy like any other app and will offer updates on the Apps page.
-- **files** — a stock `python:3.13-alpine` with this directory mounted in. No
-  registry involved, and you can edit `server.py` in place and restart.
-
-Either way the two cron scripts live on the host, because they need `zpool`,
-`smartctl` and `midclt`. In image mode the container copies them out to the
-host as it starts, so an image update carries them along.
+The two cron scripts live on the host, because they need `zpool`, `smartctl`
+and `midclt`. The container copies them out as it starts, so an image update
+carries them along.
 
 Override any of its choices with environment variables:
 
 ```sh
 POOL=tank LPORT=30802 TPORT=8455 APP_NAME=dashy ./install.sh
-INSTALL_MODE=files ./install.sh
 IMAGE=ghcr.io/you/your-fork:latest ./install.sh
 ```
+
+Running it again over an existing install repairs it in place and leaves your
+data alone.
 
 Give it a minute after installing — pool capacity, temperatures and power come
 from a cron job that runs on the minute.
@@ -238,10 +238,9 @@ Everything is optional — the app discovers or asks for all of it.
 | `HOST_NAME` | first label of the tailnet hostname |
 | `HOST_IP` | `127.0.0.1` — where the app probes from |
 | `LINK_HOST` | the NAS's LAN address — what goes in a link you click |
-| `WEATHER_LAT` / `WEATHER_LON` / `WEATHER_TZ` | unset — use the setup screen instead |
 | `HEXOS_URL` | `https://deck.hexos.com/dash` |
+| `IMAGE` | `ghcr.io/boldestfutura/dashy:latest` (installer only) |
 | `UPDATE_REPO` / `UPDATE_BRANCH` | `Boldestfutura/dashy` / `main` |
-| `INSTALL_MODE` / `IMAGE` | `image` / `ghcr.io/boldestfutura/dashy:latest` (installer only) |
 | `IMAGE_UPDATE_SWEEP` | `1` — nudge TrueNAS to re-check image registries |
 
 ## Uninstall
