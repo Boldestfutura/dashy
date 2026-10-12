@@ -45,7 +45,16 @@ add and remove things.
 
 ## Install
 
+Over SSH as `root` or `truenas_admin`, or in the TrueNAS web UI under
+**System → Shell**.
+
+**Clone it somewhere under `/mnt`, not your home directory.** TrueNAS mounts
+`/home` with `noexec`, so `./install.sh` there fails with a bare "permission
+denied" that does not explain itself. `/home` also lives inside the boot
+environment, so it is wiped by a TrueNAS version upgrade.
+
 ```sh
+cd /mnt/<your-pool>
 git clone https://github.com/Boldestfutura/dashy.git
 cd dashy
 ./install.sh
@@ -82,6 +91,8 @@ from a cron job that runs on the minute.
 ```sh
 ./test.sh
 ```
+
+(Same place as the installer — under `/mnt`, for the same `noexec` reason.)
 
 Twenty-odd checks, read-only, safe to run at any time. It tells you whether the
 box can run Dashy at all, whether Tailscale Serve is set up properly, whether
