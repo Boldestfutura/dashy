@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.11.1"
+APP_VERSION = "0.12.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1315,6 +1315,10 @@ PAGE = """<!doctype html>
   .seg.sm button{padding:6px 10px;font-size:12.5px}
   .pubmsg{display:block;margin-top:7px;font-size:12px;color:var(--muted)}
   .pubmsg.bad{color:var(--warn)}
+  /* Closing the pane and opening whatever is underneath used to be the same
+     tap. This catches it, so a tap outside only ever closes. */
+  .mscrim{position:fixed;inset:0;z-index:50;background:transparent}
+  .mscrim[hidden]{display:none}
   #settings.dot{position:relative}
   #settings.dot::after{content:'';position:absolute;top:5px;right:5px;width:7px;height:7px;
       border-radius:50%;background:var(--warn);box-shadow:0 0 0 2px var(--card)}
@@ -1360,24 +1364,32 @@ PAGE = """<!doctype html>
      out of phase - a grid of identically-timed wobbles reads as one object. */
   @keyframes jigA{0%,100%{transform:rotate(-.7deg)}50%{transform:rotate(.7deg)}}
   @keyframes jigB{0%,100%{transform:rotate(.7deg)}50%{transform:rotate(-.7deg)}}
-  body.editing .cardwrap{animation:jigA .28s ease-in-out infinite;
-                         transform-origin:50% 50%;touch-action:none}
-  body.editing .cardwrap:nth-child(2n){animation-name:jigB}
-  body.editing .cardwrap:nth-child(3n){animation-delay:-.09s}
-  body.editing .cardwrap:nth-child(5n){animation-delay:-.17s}
-  body.editing .cardwrap.drag{animation:none;z-index:40;position:relative;
-                              transform:scale(1.06);opacity:.92;
-                              box-shadow:0 18px 40px -12px rgba(0,0,0,.45);
-                              transition:none;pointer-events:none}
+  body.editing .cardwrap{touch-action:none}
+  body.editing .cardwrap > .card{animation:jigA .28s ease-in-out infinite;
+                                 transform-origin:50% 50%}
+  body.editing .cardwrap:nth-child(2n) > .card{animation-name:jigB}
+  body.editing .cardwrap:nth-child(3n) > .card{animation-delay:-.09s}
+  body.editing .cardwrap:nth-child(5n) > .card{animation-delay:-.17s}
+  /* the tile being carried does not wobble, and it is the wrapper that is
+     positioned, so the scale goes on the card where it will not fight FLIP */
+  body.editing .cardwrap.drag{z-index:40;pointer-events:none}
+  body.editing .cardwrap.drag > .card{animation:none;transform:scale(1.06);
+                              opacity:.92;box-shadow:0 18px 40px -12px rgba(0,0,0,.45)}
   body.editing .cardwrap.slot{opacity:.35}
   @media (prefers-reduced-motion:reduce){
-    body.editing .cardwrap{animation:none}
+    body.editing .cardwrap > .card{animation:none}
+    .cardwrap{transition:none !important}
   }
   .card.ghost{opacity:.45}
   body.editing .card{cursor:default}
   /* a <button> may not contain a <button>; the parser would hoist the tools out
      of the card, so each card sits in a positioned wrapper instead */
-  .cardwrap{position:relative;display:flex}
+  /* A tile is a control, not prose. Dragging one used to paint a selection
+     across whatever text sat behind it, and a long press raised the system
+     callout menu on iOS. */
+  .cardwrap{position:relative;display:flex;
+            -webkit-user-select:none;user-select:none;
+            -webkit-touch-callout:none}
   .cardwrap > .card{width:100%}
   .cardtools{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
              gap:7px;background:color-mix(in srgb,var(--panel) 86%,transparent);
@@ -1389,9 +1401,20 @@ PAGE = """<!doctype html>
                     padding:0}
   .cardtools button:disabled{opacity:.3;cursor:default}
   .cardtools .wbtn{font-size:11px;font-weight:700;letter-spacing:-.02em}
+  /* The corner badge you get on a phone home screen: a white disc with a dark
+     glyph, hanging off the top-left corner. x removes a tile, + puts a removed
+     one back. It sits above the tools overlay, which covers the whole card. */
+  .xbtn{position:absolute;top:-7px;left:-7px;width:23px;height:23px;border-radius:50%;
+        border:none;padding:0;display:none;align-items:center;justify-content:center;
+        background:#fff;color:#1c1f24;font-size:15px;line-height:1;font-weight:500;
+        cursor:pointer;z-index:6;
+        box-shadow:0 1px 3px rgba(0,0,0,.34),0 0 0 .5px rgba(0,0,0,.12)}
+  body.editing .xbtn{display:flex}
+  .cardwrap[data-off="1"] .xbtn{color:var(--ok);font-weight:700}
   .cardtools .hint{position:absolute;bottom:8px;left:0;right:0;text-align:center;
                    font-size:10px;color:var(--muted);font-weight:600;pointer-events:none}
-  .cardwrap[data-off="1"]{opacity:.38}
+  .cardwrap[data-off="1"] > .card,
+  .cardwrap[data-off="1"] > .cardtools{opacity:.34}
   body:not(.editing) .cardwrap[data-off="1"]{display:none}
   .editbar{display:none;align-items:center;gap:10px;margin:0 0 12px;padding:11px 14px;
            background:var(--panel);border:1px solid var(--brd);border-radius:14px;
@@ -1701,6 +1724,7 @@ PAGE = """<!doctype html>
                 aria-expanded="false" title="Settings" aria-label="Settings"><svg viewBox="0 0 24 24" fill="none"
          stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
          stroke-linejoin="round"><circle cx="12" cy="12" r="3.1"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+        <div class="mscrim" id="mscrim" hidden></div>
         <div class="menu" id="menu" hidden role="menu" aria-labelledby="settings">
           <p class="mh">Updates</p>
           <button class="mi" id="mi-check" type="button" role="menuitem">
@@ -1781,7 +1805,7 @@ PAGE = """<!doctype html>
   </header>
 
   <div class="editbar" id="editbar">
-    <span>Hold and drag to reorder. <b>2\u00d7</b> resizes, the eye hides.</span>
+    <span>Drag to reorder. <b>2\u00d7</b> resizes, <b>\u00d7</b> removes. Removed tiles stay here, faded, with a <b>+</b>.</span>
     <button class="rst" id="eb-reset" type="button">Reset</button>
     <button class="done" id="eb-done" type="button">Done</button>
   </div>
@@ -2007,6 +2031,7 @@ function loadPrefs(){
       if(Array.isArray(d.hidden)) prefs.hidden=d.hidden.filter(k=>CARDK.indexOf(k)>=0);
       if(Array.isArray(d.wide)) prefs.wide=d.wide.filter(k=>CARDK.indexOf(k)>=0);
       if(d.size && typeof d.size==='object') prefs.size=cleanSize(d.size);
+      migrateSizes();
       if(d.setup && typeof d.setup==='object') prefs.setup=d.setup;
       if(d.weather && typeof d.weather==='object') prefs.weather=d.weather;
       if(Array.isArray(d.order)){
@@ -2068,6 +2093,11 @@ function adoptPrefs(P){
   if(P.size && typeof P.size==='object'){
     const ns=cleanSize(P.size);
     if(JSON.stringify(ns)!==JSON.stringify(prefs.size)){ prefs.size=ns; layoutChanged=true; }
+  }
+  if(Array.isArray(P.wide) && !(P.size && Object.keys(P.size).length)){
+    const had=JSON.stringify(prefs.size);
+    prefs.wide=P.wide.slice(); prefs.size={}; migrateSizes();
+    if(JSON.stringify(prefs.size)!==had) layoutChanged=true;
   }
   if(Array.isArray(P.wide)){
     const next=P.wide.filter(k=>CARDK.indexOf(k)>=0);
@@ -2277,11 +2307,13 @@ function menuOpen(){ return !$('menu').hidden; }
 function openMenu(){
   const m=$('menu');
   m.hidden=false; m.classList.add('in');
+  const sc=$('mscrim'); if(sc) sc.hidden=false;
   $('settings').setAttribute('aria-expanded','true');
 }
 function closeMenu(){
   const m=$('menu');
   m.hidden=true; m.classList.remove('in');
+  const sc=$('mscrim'); if(sc) sc.hidden=true;
   $('settings').setAttribute('aria-expanded','false');
 }
 
@@ -2303,6 +2335,18 @@ function cleanSize(o){
     if(SIZES.indexOf(n)>=0 && n!==1) out[k]=n;
   }
   return out;
+}
+
+// 0.11 moved from a flat "these are wide" list to a size per card. Anyone
+// upgrading had the old list and no sizes, and watched their double-width
+// cards quietly go back to normal - which is exactly what happened to the
+// first person to install it. Read the old shape when the new one is empty.
+function migrateSizes(){
+  if(prefs.size && Object.keys(prefs.size).length) return;
+  if(!Array.isArray(prefs.wide) || !prefs.wide.length) return;
+  const out={};
+  prefs.wide.forEach(k=>{ if(CARDK.indexOf(k)>=0) out[k]=2; });
+  prefs.size=out;
 }
 
 function toggleWide(k){
@@ -2335,9 +2379,9 @@ function cardHTML(c){
               '" preserveAspectRatio="none" viewBox="0 0 300 46"></svg></div>';
   const tools='<div class="cardtools">'+
       '<button type="button" class="wbtn" data-wide="'+c.k+'" aria-label="Change size"></button>'+
-      '<button type="button" data-eye="'+c.k+'" aria-label="Show or hide"></button>'+
       '<span class="hint">hold to drag</span>'+
-    '</div>';
+    '</div>'+
+    '<button type="button" class="xbtn" data-eye="'+c.k+'" aria-label="Remove"></button>';
   return '<div class="cardwrap" data-k="'+c.k+'">'+
            '<button class="card" data-pop="'+c.k+'">'+
              '<p class="lbl">'+c.label+'</p>'+body+spark+
@@ -2420,8 +2464,8 @@ function applyHidden(){
     if(w) w.textContent = nextSize(el.dataset.k)+'\u00d7';
     const eye=el.querySelector('[data-eye]');
     if(eye){
-      eye.textContent = off ? '\u25cc' : '\u25c9';
-      eye.setAttribute('aria-label', off ? 'Show this card' : 'Hide this card');
+      eye.textContent = off ? '\u002b' : '\u00d7';
+      eye.setAttribute('aria-label', off ? 'Put this card back' : 'Remove this card');
     }
   });
 }
@@ -3152,9 +3196,48 @@ function onMove(ev){
   const list=wrapsInOrder();
   const from=list.indexOf(drag.wrap), to=list.indexOf(over);
   if(from<0 || to<0 || from===to) return;
-  // move it in the DOM straight away so the gap follows the finger
-  if(from<to) over.after(drag.wrap); else over.before(drag.wrap);
+  // move it in the DOM straight away so the gap follows the finger, and let
+  // the tiles it displaced slide rather than jump
+  slide(()=>{ if(from<to) over.after(drag.wrap); else over.before(drag.wrap); });
   commitOrderFromDOM();
+}
+
+/* The tiles that get pushed aside should travel, the way app icons do on a
+   phone home screen. The grid gives no control over that, so: measure where
+   everything is, do the move, then put each tile back where it was with a
+   transform and release it on the next frame. It animates from the old place
+   to the new one without the layout ever being in an intermediate state.
+
+   This is why the wobble moved onto the inner card - a running animation wins
+   against an inline transform, so the two cannot share an element. */
+const SLIDE_MS=210;
+function slide(mutate){
+  const items=wrapsInOrder().filter(el=>el!==drag.wrap);
+  const before=new Map();
+  items.forEach(el=>before.set(el, el.getBoundingClientRect()));
+
+  mutate();
+
+  items.forEach(el=>{
+    const b=before.get(el), a=el.getBoundingClientRect();
+    const dx=b.left-a.left, dy=b.top-a.top;
+    if(!dx && !dy) return;
+    el.style.transition='none';
+    el.style.transform='translate('+dx+'px,'+dy+'px)';
+  });
+  // one reflow for the lot, then let them all go together
+  void document.body.offsetWidth;
+  items.forEach(el=>{
+    if(!el.style.transform) return;
+    el.style.transition='transform '+SLIDE_MS+'ms cubic-bezier(.2,.75,.3,1)';
+    el.style.transform='';
+  });
+}
+
+function clearSlides(){
+  [].slice.call(document.querySelectorAll('#vitals .cardwrap')).forEach(el=>{
+    el.style.transition=''; el.style.transform='';
+  });
 }
 
 function onUp(ev){
@@ -3164,6 +3247,7 @@ function onUp(ev){
   w.classList.remove('drag');
   w.style.position=w.style.left=w.style.top=w.style.width=w.style.height=w.style.margin='';
   drag=null;
+  clearSlides();
   commitOrderFromDOM();
   savePrefs();
 }
@@ -3253,7 +3337,11 @@ document.addEventListener('click',ev=>{
   if(ev.target.closest('#su-skip')){ finishSetup(true); return; }
   if(ev.target.closest('#eb-done')){ setEditing(false); return; }
   if(ev.target.closest('#eb-reset')){ resetLayout(); return; }
-  if(menuOpen() && !ev.target.closest('#menu')) closeMenu();
+  // the scrim swallows this tap: close, and let nothing else see it
+  if(ev.target.closest('#mscrim')){
+    ev.preventDefault(); ev.stopPropagation(); closeMenu(); return;
+  }
+  if(menuOpen() && !ev.target.closest('#menu')){ closeMenu(); return; }
 
   // --- rearrange mode ----------------------------------------------
   const wb=ev.target.closest('.cardtools button[data-wide]');
