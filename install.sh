@@ -113,6 +113,20 @@ fi
 [ -n "$TPORT" ] || die "no free tailnet port in 8443-8499."
 info "local $LPORT, tailnet $TPORT  ->  https://$TSHOST:$TPORT"
 
+# ---------------------------------------------------------------- packaging
+say "how should the app be packaged"
+info "image - pull the published container image. TrueNAS can then update it"
+info "        from the Apps page like any other app."
+info "files - stock python image with this directory mounted in. No registry,"
+info "        and you can edit server.py in place."
+MODE="${INSTALL_MODE:-$(ask "image or files" "image")}"
+case "$MODE" in
+  image|files) ;;
+  *) die "INSTALL_MODE must be 'image' or 'files'" ;;
+esac
+IMAGE="${IMAGE:-ghcr.io/boldestfutura/dashy:latest}"
+[ "$MODE" = image ] && info "using $IMAGE"
+
 # ---------------------------------------------------------------- weather
 say "weather (optional, Open-Meteo, no API key)"
 info "leave blank to skip the weather widget entirely."
@@ -136,9 +150,12 @@ for d in "" /app /data /queue /config; do
 done
 
 say "installing files"
-cp "$REPO/app/server.py" "$REPO/app/collect.sh" "$REPO/app/worker.sh" "$BASE/app/" || die "copy failed"
-chmod +x "$BASE/app/collect.sh" "$BASE/app/worker.sh"
-info "server.py, collect.sh, worker.sh -> $BASE/app"
+# collect.sh and worker.sh always land on disk: they run on the host from cron,
+# whichever way the app itself is packaged. The rest matter only to a file
+# install, but copying them costs nothing and keeps the directory honest.
+cp "$REPO/app/"*.py "$REPO/app/"*.sh "$REPO/app/"*.png "$BASE/app/" || die "copy failed"
+chmod +x "$BASE/app/collect.sh" "$BASE/app/worker.sh" "$BASE/app/entrypoint.sh"
+info "$(ls -1 "$BASE/app" | wc -l) files -> $BASE/app"
 
 # the container runs as this uid; the data and queue dirs must be writable by it
 midclt call -j filesystem.chown \
@@ -151,9 +168,9 @@ midclt call -j filesystem.chown \
 
 # ---------------------------------------------------------------- the app
 say "creating the app"
-python3 - "$APP_NAME" "$BASE" "$LPORT" "$SERVE" "$WLAT" "$WLON" "$WTZ" <<'PY'
+python3 - "$APP_NAME" "$BASE" "$LPORT" "$SERVE" "$WLAT" "$WLON" "$WTZ" "$MODE" "$IMAGE" <<'PY'
 import json, subprocess, sys
-name, base, lport, serve, wlat, wlon, wtz = sys.argv[1:8]
+name, base, lport, serve, wlat, wlon, wtz, mode, image = sys.argv[1:10]
 env = {"DASH_PORT": lport, "DASH_DATA": "/data", "DASH_QUEUE": "/queue",
        "SERVE_JSON": "/serve/serve.json", "HOST_IP": "127.0.0.1",
        "DASH_CONFIG": "/config",
@@ -162,21 +179,28 @@ if wlat and wlon:
     env.update({"WEATHER_LAT": wlat, "WEATHER_LON": wlon})
     if wtz:
         env["WEATHER_TZ"] = wtz
-compose = {"services": {name: {
-    "image": "python:3.13-alpine",
+svc = {
     "container_name": name,
     "restart": "unless-stopped",
     # host networking: the real interface counters, and /proc is the host's
     "network_mode": "host",
-    "command": ["python", "-u", "/app/server.py"],
     "working_dir": "/app",
     "environment": env,
-    "volumes": [base + "/app:/app:ro",
-                base + "/data:/data:ro",
+    "volumes": [base + "/data:/data:ro",
                 base + "/queue:/queue",
                 base + "/config:/config",
                 serve + ":/serve/serve.json:ro"],
-}}}
+}
+if mode == "image":
+    svc["image"] = image
+    # read-write, and not at /app: the entrypoint copies the two cron scripts
+    # back out to the host here, so an image update carries them along
+    svc["volumes"].insert(0, base + "/app:/hostapp")
+else:
+    svc["image"] = "python:3.13-alpine"
+    svc["command"] = ["python", "-u", "/app/server.py"]
+    svc["volumes"].insert(0, base + "/app:/app:ro")
+compose = {"services": {name: svc}}
 r = subprocess.run(["midclt", "call", "-j", "app.create", json.dumps(
     {"custom_app": True, "app_name": name, "custom_compose_config": compose})],
     capture_output=True, text=True)
@@ -219,6 +243,7 @@ cat <<EOF
    It takes a minute or two to look right: the pool, temperature and power
    figures come from the cron job, which runs on the minute.
 
+   Packaging  $MODE
    Files      $BASE/app
    Data       $BASE/data
    Serve      $SERVE   (backed up before the edit)

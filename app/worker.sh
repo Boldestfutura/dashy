@@ -10,13 +10,17 @@ Q="$BASE/queue"
 D="$BASE/data"
 S="$D/updates.json"
 
-# --- a request to update Dashy itself, pulled straight from the repo --------
+# --- a request to update Dashy itself ---------------------------------------
+# Two install shapes, and the update differs between them:
+#   image  - the app runs a published container image, so pull a new one
+#   files  - the app runs a stock python image with this directory mounted in,
+#            so fetch the files from the repo
 if [ -f "$Q/_self.req" ]; then
   rm -f "$Q/_self.req"
+  APPNAME=$(basename "$BASE")
   REPO="${UPDATE_REPO:-Boldestfutura/dashy}"
   BRANCH="${UPDATE_BRANCH:-main}"
   BASEURL="https://raw.githubusercontent.com/$REPO/$BRANCH/app"
-  TMP=$(mktemp -d)
   note(){ python3 - "$1" "$2" "$S" <<'PYN'
 import json,sys,time
 st,msg,path=sys.argv[1],sys.argv[2],sys.argv[3]
@@ -26,41 +30,68 @@ d["_self"]={"state":st,"msg":msg,"t":int(time.time())}
 json.dump(d,open(path,"w"))
 PYN
   }
-  note running "updating"
 
-  # Every file the app needs. Fetch all of them before touching anything.
-  OK=1
-  for f in server.py collect.sh worker.sh favicon.png icon-180.png icon-192.png \
-           icon-512.png icon-512-maskable.png; do
-    curl -fsSL -m 60 "$BASEURL/$f" -o "$TMP/$f" 2>/dev/null || OK=0
-  done
-  # A half-downloaded server.py would take the dashboard down, so prove it parses
-  python3 -m py_compile "$TMP/server.py" 2>/dev/null || OK=0
-  [ -s "$TMP/server.py" ] || OK=0
+  # ask the app itself which shape it is, rather than guessing from the disk
+  IMAGE=$(midclt call app.config "$APPNAME" 2>/dev/null | python3 -c "
+import json,sys
+try: svc=list(json.load(sys.stdin)['services'].values())[0]
+except Exception: raise SystemExit
+print(svc.get('image') or '')" 2>/dev/null)
 
-  if [ "$OK" = 1 ]; then
-    stamp=$(date +%Y%m%d-%H%M%S)
-    ds=${BASE#/mnt/}
-    zfs list -H -o name "$ds" >/dev/null 2>&1 && \
-      zfs snapshot -r "$ds@preupdate-$stamp" 2>/dev/null
-    for f in server.py favicon.png icon-180.png icon-192.png icon-512.png \
-             icon-512-maskable.png collect.sh; do
-      cp "$TMP/$f" "$APP_DIR/$f" 2>/dev/null
-    done
-    # last, and by rename: this script is running from that path right now, and
-    # an atomic swap leaves the running shell reading the old inode
-    mv "$TMP/worker.sh" "$APP_DIR/worker.sh.new" 2>/dev/null && \
-      mv "$APP_DIR/worker.sh.new" "$APP_DIR/worker.sh"
-    chmod +x "$APP_DIR/collect.sh" "$APP_DIR/worker.sh" 2>/dev/null
-    if midclt call -j app.redeploy "$(basename "$BASE")" >/dev/null 2>&1; then
-      note done "updated"
-    else
-      note done "files updated, restart the app to finish"
-    fi
-  else
-    note failed "download failed, nothing changed"
-  fi
-  rm -rf "$TMP"
+  stamp=$(date +%Y%m%d-%H%M%S)
+  ds=${BASE#/mnt/}
+  snap(){ zfs list -H -o name "$ds" >/dev/null 2>&1 && \
+          zfs snapshot -r "$ds@preupdate-$stamp" 2>/dev/null; }
+
+  case "$IMAGE" in
+    */dashy:*|*/dashy)
+      # ---- image install: the registry has the new version, not the repo ----
+      note running "pulling the new image"
+      snap
+      if midclt call -j app.pull_images "$APPNAME" '{"redeploy": true}' >/dev/null 2>&1; then
+        # the container's entrypoint copies the new collect.sh and worker.sh
+        # back out to this directory as it starts, so cron picks them up too
+        note done "updated"
+      else
+        note failed "could not pull the image"
+      fi
+      ;;
+    *)
+      # ---- file install: fetch everything from the repo --------------------
+      note running "updating"
+      TMP=$(mktemp -d)
+      OK=1
+      for f in server.py collect.sh worker.sh entrypoint.sh favicon.png \
+               icon-180.png icon-192.png icon-512.png icon-512-maskable.png; do
+        curl -fsSL -m 60 "$BASEURL/$f" -o "$TMP/$f" 2>/dev/null || OK=0
+      done
+      # A half-downloaded server.py would take the dashboard down, so prove it parses
+      python3 -m py_compile "$TMP/server.py" 2>/dev/null || OK=0
+      [ -s "$TMP/server.py" ] || OK=0
+
+      if [ "$OK" = 1 ]; then
+        snap
+        for f in server.py entrypoint.sh favicon.png icon-180.png icon-192.png \
+                 icon-512.png icon-512-maskable.png collect.sh; do
+          cp "$TMP/$f" "$APP_DIR/$f" 2>/dev/null
+        done
+        # last, and by rename: this script is running from that path right now,
+        # and an atomic swap leaves the running shell reading the old inode
+        mv "$TMP/worker.sh" "$APP_DIR/worker.sh.new" 2>/dev/null && \
+          mv "$APP_DIR/worker.sh.new" "$APP_DIR/worker.sh"
+        chmod +x "$APP_DIR/collect.sh" "$APP_DIR/worker.sh" \
+                 "$APP_DIR/entrypoint.sh" 2>/dev/null
+        if midclt call -j app.redeploy "$APPNAME" >/dev/null 2>&1; then
+          note done "updated"
+        else
+          note done "files updated, restart the app to finish"
+        fi
+      else
+        note failed "download failed, nothing changed"
+      fi
+      rm -rf "$TMP"
+      ;;
+  esac
 fi
 
 [ -d "$Q" ] || exit 0

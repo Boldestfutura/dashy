@@ -55,10 +55,23 @@ It works out the pool, a free local port, a free tailnet port and where
 Tailscale keeps `serve.json`, then asks about anything it cannot determine.
 When it finishes it prints your URL. First run walks you through a short setup.
 
+It also asks how you want it packaged:
+
+- **image** (default) — pulls `ghcr.io/boldestfutura/dashy:latest`. TrueNAS then
+  treats Dashy like any other app and will offer updates on the Apps page.
+- **files** — a stock `python:3.13-alpine` with this directory mounted in. No
+  registry involved, and you can edit `server.py` in place and restart.
+
+Either way the two cron scripts live on the host, because they need `zpool`,
+`smartctl` and `midclt`. In image mode the container copies them out to the
+host as it starts, so an image update carries them along.
+
 Override any of its choices with environment variables:
 
 ```sh
 POOL=tank LPORT=30802 TPORT=8455 APP_NAME=dashy ./install.sh
+INSTALL_MODE=files ./install.sh
+IMAGE=ghcr.io/you/your-fork:latest ./install.sh
 ```
 
 Give it a minute after installing — pool capacity, temperatures and power come
@@ -91,6 +104,18 @@ recursive ZFS snapshot of the install, replaces the files and redeploys the
 app. `worker.sh` replaces itself by rename, last, so the copy that is running
 finishes on the old inode.
 
+What "the rest" is depends on how Dashy is packaged. The worker asks the app
+which shape it is rather than guessing:
+
+- **image install** — `app.pull_images`, which pulls the new image and
+  redeploys. The container then copies the new cron scripts out to the host.
+- **file install** — downloads the files from this repository, refuses to go on
+  unless `server.py` actually compiles, and swaps them in. `worker.sh` replaces
+  itself last and by rename, so the copy that is running finishes on the old
+  inode.
+
+Both take a recursive ZFS snapshot of the install first.
+
 If an update goes wrong, the snapshot is called `@preupdate-<timestamp>`:
 
 ```sh
@@ -98,12 +123,22 @@ zfs rollback <pool>/Applications/dashy@preupdate-20261012-184500
 midclt call -j app.redeploy dashy
 ```
 
+On an image install you can also just pin the old tag — every release is
+published as `ghcr.io/boldestfutura/dashy:<version>`, not only `:latest`.
+
 To track a fork instead, set `UPDATE_REPO=you/your-fork` (and `UPDATE_BRANCH`
 if it is not `main`) in the app's environment. Both scripts read it.
 
-The TrueNAS Apps page cannot update Dashy — it only knows how to pull container
-images, and Dashy is a stock Python image with this repository's files mounted
-into it. Updates go through the dashboard.
+### The TrueNAS Apps page
+
+On an **image install** the Apps page works normally: TrueNAS polls ghcr.io and
+offers the update itself. On a **file install** it cannot — there is no image to
+pull — so updates go through the dashboard.
+
+One wrinkle on an image install: the version check reads this repository, but
+the thing it installs is the image, and the image is built by CI a minute or
+two after a push. Tap Update in that window and you will pull the previous
+image and stay on the old version. The next check puts the row back.
 
 ## What leaves your network
 
@@ -115,6 +150,7 @@ Dashy is built to keep to itself. In full, everything that ever goes out:
 | **Geocoding (open-meteo)** | Only while you are typing a town name in setup. | The text you typed, proxied through your own server. |
 | **media.sys.truenas.net** | Once per app, when an icon is first seen. | Your server's IP. Icons are then cached locally and served by Dashy. |
 | **raw.githubusercontent.com** | Every 30 minutes, to read the version number in this repository. | Your server's IP. Nothing is sent about you, your NAS or what you run. |
+| **ghcr.io** | Image installs only. When TrueNAS checks for a newer image, and when you install one. | Your server's IP. This is an ordinary registry pull. |
 
 That is the complete list. Your browser never contacts anything but your own
 NAS. There is no telemetry, no analytics, no phone-home and no account anywhere
@@ -133,6 +169,7 @@ ever contacts a weather service.
 | Thing | Where |
 |---|---|
 | App | a custom app, host networking, one published port |
+| Image | `ghcr.io/boldestfutura/dashy` (image installs only) |
 | Code | `<pool>/Applications/dashy/app` |
 | Data | `<pool>/Applications/dashy/data` — written by cron, read by the app |
 | Config | `<pool>/Applications/dashy/config` — shared settings |
@@ -168,6 +205,7 @@ Everything is optional — the app discovers or asks for all of it.
 | `WEATHER_LAT` / `WEATHER_LON` / `WEATHER_TZ` | unset — use the setup screen instead |
 | `HEXOS_URL` | `https://deck.hexos.com/dash` |
 | `UPDATE_REPO` / `UPDATE_BRANCH` | `Boldestfutura/dashy` / `main` |
+| `INSTALL_MODE` / `IMAGE` | `image` / `ghcr.io/boldestfutura/dashy:latest` (installer only) |
 
 ## Uninstall
 
@@ -185,8 +223,8 @@ alone — deleting data should be a decision, not a side effect.
   (`catalog.update` accepts only `preferred_trains`), so there is no supported
   way to set one. Dashy does ship a proper icon for the browser tab and the
   phone home screen.
-- Upgrades go through `midclt app.upgrade`, so anything that tool cannot
-  upgrade, Dashy cannot either.
+- Upgrades of **other** apps go through `midclt app.upgrade`, so anything that
+  tool cannot upgrade, Dashy cannot either.
 - Power figures need Intel RAPL. On a CPU without it, the power chart is empty.
 - **There is no authentication.** It is meant to sit behind Tailscale, where
   reaching it at all means you are already on the tailnet. Do not expose it to
