@@ -227,6 +227,22 @@ PYGHCR
         "$VER" "$CUR" "$NOW" "$SRC" \
         > "$D/selfupdate.json.tmp" && mv "$D/selfupdate.json.tmp" "$D/selfupdate.json" ;;
   esac
+
+  # Dashy and the TrueNAS Apps page were on two independent half-hour timers
+  # that never lined up, so the dashboard could know about an update for up to
+  # thirty minutes before the Apps page did. If there is one, clear the sweep
+  # stamp: the block at the foot of this script then runs it on this same pass.
+  if [ -n "$VER" ] && [ -n "$CUR" ] && python3 -c "
+import sys
+def vt(v):
+    out = []
+    for part in str(v).split('.'):
+        digits = ''.join(c for c in part if c.isdigit())
+        out.append(int(digits) if digits else 0)
+    return tuple(out + [0] * (4 - len(out)))[:4]
+sys.exit(0 if vt('$VER') > vt('$CUR') else 1)" 2>/dev/null; then
+    rm -f "$D/imagesweep.stamp"
+  fi
 fi
 
 # --- TrueNAS sweeps the registries for newer images only when the Docker

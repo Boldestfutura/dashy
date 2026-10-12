@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.8.4"
+APP_VERSION = "0.8.5"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1016,7 +1016,7 @@ PAGE = """<!doctype html>
       --ok:#34d399; --warn:#fbbf24; --bad:#f87171;
       --accent:#5b8cff; --brand:#14b8a6;
       --shadow:0 1px 2px rgba(0,0,0,.4), 0 18px 42px -18px rgba(0,0,0,.7);
-      --wash1:22%; --wash2:13%;
+      --wash1:30%; --wash2:19%; --wash3:14%;
       color-scheme:dark;
     }
   }
@@ -1026,7 +1026,7 @@ PAGE = """<!doctype html>
       --ok:#34d399; --warn:#fbbf24; --bad:#f87171;
       --accent:#5b8cff; --brand:#14b8a6;
       --shadow:0 1px 2px rgba(0,0,0,.4), 0 18px 42px -18px rgba(0,0,0,.7);
-      --wash1:22%; --wash2:13%;
+      --wash1:30%; --wash2:19%; --wash3:14%;
       color-scheme:dark;
   }
   :root[data-theme="light"]{color-scheme:light}
@@ -1039,11 +1039,14 @@ PAGE = """<!doctype html>
      changes. Lighter in light mode, deeper and cooler in dark. */
   body::before{content:"";position:fixed;inset:-10%;z-index:-1;pointer-events:none;
     background:
-      radial-gradient(52% 42% at 8% -6%,
-        color-mix(in srgb, var(--brand) var(--wash1,15%), transparent), transparent 70%),
-      radial-gradient(46% 38% at 104% 4%,
-        color-mix(in srgb, var(--accent) var(--wash2,9%), transparent), transparent 68%);}
-  :root{--wash1:15%;--wash2:9%}
+      radial-gradient(64% 56% at 6% -2%,
+        color-mix(in srgb, var(--brand) var(--wash1,24%), transparent), transparent 72%),
+      radial-gradient(58% 50% at 104% 6%,
+        color-mix(in srgb, var(--accent) var(--wash2,15%), transparent), transparent 70%),
+      /* a third low on the right, so the page below the cards is not flat grey */
+      radial-gradient(56% 44% at 96% 98%,
+        color-mix(in srgb, var(--brand) var(--wash3,11%), transparent), transparent 72%);}
+  :root{--wash1:24%;--wash2:15%;--wash3:11%}
   body{
     margin:0;background:var(--bg);color:var(--ink);
     padding:calc(env(safe-area-inset-top,0px) + 18px) 0 calc(env(safe-area-inset-bottom,0px) + 28px);
@@ -1135,7 +1138,8 @@ PAGE = """<!doctype html>
   .seg button[aria-pressed="true"]{background:var(--panel);color:var(--ink);
                                    box-shadow:0 1px 3px rgba(0,0,0,.12)}
 
-  .sw{display:flex;gap:8px;padding:4px 10px 10px;flex-wrap:wrap}
+  .sw{display:grid;grid-template-columns:repeat(6,24px);gap:9px;
+      justify-content:space-between;padding:4px 10px 10px}
   .sw button{width:24px;height:24px;border-radius:50%;border:2px solid transparent;
              cursor:pointer;padding:0;transition:transform .14s ease}
   .sw button:hover{transform:scale(1.12)}
@@ -1734,11 +1738,17 @@ const CARDK=CARDS.map(c=>c.k);
 const PKEY='dashy.prefs.v2';
 const ACCENTS={
   teal:  {light:'#0d9488', dark:'#14b8a6'},
-  blue:  {light:'#2f6df6', dark:'#5b8cff'},
-  violet:{light:'#6d4aff', dark:'#8b6cff'},
+  green: {light:'#1fa971', dark:'#34d399'},
+  lime:  {light:'#5f9b0f', dark:'#a3d94a'},
   amber: {light:'#d9820a', dark:'#f0a92c'},
+  orange:{light:'#e2620e', dark:'#fb923c'},
   rose:  {light:'#e0443a', dark:'#f87171'},
-  green: {light:'#1fa971', dark:'#34d399'}
+  pink:  {light:'#d6337e', dark:'#f472b6'},
+  violet:{light:'#6d4aff', dark:'#8b6cff'},
+  indigo:{light:'#4457e0', dark:'#818cf8'},
+  blue:  {light:'#2f6df6', dark:'#5b8cff'},
+  sky:   {light:'#0585b5', dark:'#38bdf8'},
+  slate: {light:'#55657a', dark:'#94a3b8'}
 };
 const DEFAULTS={theme:'system', accent:'teal', order:CARDK.slice(), hidden:[], wide:[],
                 setup:{}, weather:null};

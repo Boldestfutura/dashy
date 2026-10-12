@@ -22,7 +22,7 @@ add and remove things.
   queues the upgrade and a recursive ZFS snapshot is taken first. Dashy updates
   itself the same way, straight from this repository.
 - **Make it yours.** Hold a tile to drag it, resize it to double width with a
-  sparkline, or hide it. Light, dark or system theme and six accent colours.
+  sparkline, or hide it. Light, dark or system theme and twelve accent colours.
   **Layout and theme are stored on the server**, so they follow you to every
   device and apply within seconds without a refresh.
 - **Optional weather** from a town you choose.

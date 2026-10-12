@@ -16,7 +16,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write   # cutting the release tag
       packages: write
 
     steps:
@@ -58,3 +58,21 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # One release per version, so the Releases page is the version history
+      # rather than a list of commits. The notes are the commit message, which
+      # is where the reasoning already lives.
+      - name: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V: ${{ steps.ver.outputs.v }}
+          IMG: ghcr.io/${{ steps.repo.outputs.name }}
+        run: |
+          if gh release view "v$V" >/dev/null 2>&1; then
+            echo "v$V is already released"; exit 0
+          fi
+          {
+            git log -1 --pretty=%B
+            printf '\n---\n\n```sh\ndocker pull %s:%s\n```\n' "$IMG" "$V"
+          } > /tmp/notes.md
+          gh release create "v$V" --title "$V" --notes-file /tmp/notes.md
