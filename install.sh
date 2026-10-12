@@ -279,6 +279,13 @@ sys.exit(r.returncode)
 PY
 [ $? -eq 0 ] || die "could not create the app"
 
+# A tag is not a version. If this box has ever run Dashy, docker already has
+# something called :latest and will happily use it rather than ask the registry
+# - so a fresh install can come up on a months-old image. Make it go and look.
+say "making sure the image is the current one"
+midclt call -j app.pull_images "$APP_NAME" '{"redeploy": true}' >/dev/null 2>&1 \
+  && info "pulled" || info "could not pull; it will run whatever is cached"
+
 # ---------------------------------------------------------------- serve entry
 if [ "$TS" = 2 ]; then
   say "setting up Tailscale Serve"
