@@ -128,8 +128,13 @@ fi
 
 date +%s > "$D/pools.stamp"
 
-# --- does the repo have a newer Dashy? Checked every 30 min, not every minute:
-# --- GitHub does not need 1440 requests a day to answer the same question.
+# --- is there a newer Dashy? Checked every 30 min, not every minute: neither
+# --- GitHub nor ghcr needs 1440 requests a day to answer the same question.
+# ---
+# --- Where to look depends on how this install is packaged. An image install
+# --- can only ever run what the registry has, and CI publishes that a minute
+# --- or so behind the push - so asking GitHub would offer an update that is
+# --- not installable yet. Ask whichever one is actually the source.
 REPO="${UPDATE_REPO:-Boldestfutura/dashy}"
 BRANCH="${UPDATE_BRANCH:-main}"
 STAMP="$D/selfupdate.stamp"
@@ -137,12 +142,61 @@ NOW=$(date +%s)
 LAST=$(cat "$STAMP" 2>/dev/null || echo 0)
 if [ $(( NOW - LAST )) -ge 1800 ]; then
   echo "$NOW" > "$STAMP"
-  RAW="https://raw.githubusercontent.com/$REPO/$BRANCH/app/server.py"
-  VER=$(curl -fsSL -m 20 "$RAW" 2>/dev/null \
-        | grep -m1 '^APP_VERSION' | sed 's/.*"\(.*\)".*/\1/')
+  APPNAME=$(basename -- "$BASE")
+  IMAGE=$(midclt call app.config "$APPNAME" 2>/dev/null | python3 -c "
+import json,sys
+try: svc=list(json.load(sys.stdin)['services'].values())[0]
+except Exception: raise SystemExit
+print(svc.get('image') or '')" 2>/dev/null)
+
+  VER=""
+  SRC="$REPO"
+  case "$IMAGE" in
+    ghcr.io/*dashy:*|ghcr.io/*dashy)
+      # highest version tag the registry actually holds
+      GREPO=${IMAGE#ghcr.io/}; GREPO=${GREPO%%:*}
+      SRC="ghcr.io/$GREPO"
+      VER=$(python3 - "$GREPO" <<'PYGHCR' 2>/dev/null
+import json, sys, urllib.request
+repo = sys.argv[1]
+
+def get(url, tok=None):
+    r = urllib.request.Request(url, headers={"User-Agent": "dashy"})
+    if tok:
+        r.add_header("Authorization", "Bearer " + tok)
+    with urllib.request.urlopen(r, timeout=20) as f:
+        return json.load(f)
+
+def vt(v):
+    out = []
+    for part in v.split("."):
+        digits = "".join(c for c in part if c.isdigit())
+        out.append(int(digits) if digits else 0)
+    return tuple(out + [0] * (4 - len(out)))[:4]
+
+try:
+    tok = get("https://ghcr.io/token?service=ghcr.io&scope=repository:%s:pull" % repo)["token"]
+    tags = [t for t in get("https://ghcr.io/v2/%s/tags/list" % repo, tok).get("tags") or []
+            if t and t[0].isdigit()]
+    if tags:
+        print(max(tags, key=vt))
+except Exception:
+    pass
+PYGHCR
+) ;;
+  esac
+
+  # file install, or the registry did not answer
+  if [ -z "$VER" ]; then
+    SRC="$REPO"
+    RAW="https://raw.githubusercontent.com/$REPO/$BRANCH/app/server.py"
+    VER=$(curl -fsSL -m 20 "$RAW" 2>/dev/null \
+          | grep -m1 '^APP_VERSION' | sed 's/.*"\(.*\)".*/\1/')
+  fi
+
   case "$VER" in
     [0-9]*)
-      printf '{"latest":"%s","checked":%s,"repo":"%s"}\n' "$VER" "$NOW" "$REPO" \
+      printf '{"latest":"%s","checked":%s,"repo":"%s"}\n' "$VER" "$NOW" "$SRC" \
         > "$D/selfupdate.json.tmp" && mv "$D/selfupdate.json.tmp" "$D/selfupdate.json" ;;
   esac
 fi

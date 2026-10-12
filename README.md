@@ -135,10 +135,11 @@ On an **image install** the Apps page works normally: TrueNAS polls ghcr.io and
 offers the update itself. On a **file install** it cannot — there is no image to
 pull — so updates go through the dashboard.
 
-One wrinkle on an image install: the version check reads this repository, but
-the thing it installs is the image, and the image is built by CI a minute or
-two after a push. Tap Update in that window and you will pull the previous
-image and stay on the old version. The next check puts the row back.
+The version check follows the packaging. On an image install it reads the
+highest version tag in the registry, because that is the only thing such an
+install can actually run — CI publishes it a minute or so after a push, and
+offering an update that is not installable yet would just be a lie. On a file
+install it reads `APP_VERSION` straight out of `main`.
 
 ## What leaves your network
 
@@ -149,8 +150,8 @@ Dashy is built to keep to itself. In full, everything that ever goes out:
 | **open-meteo.com** | Only if you turn weather on. Your NAS, every 15 minutes. | Your server's IP and the **town you picked**. Never an address, never a browser request, no account, no API key. |
 | **Geocoding (open-meteo)** | Only while you are typing a town name in setup. | The text you typed, proxied through your own server. |
 | **media.sys.truenas.net** | Once per app, when an icon is first seen. | Your server's IP. Icons are then cached locally and served by Dashy. |
-| **raw.githubusercontent.com** | Every 30 minutes, to read the version number in this repository. | Your server's IP. Nothing is sent about you, your NAS or what you run. |
-| **ghcr.io** | Image installs only. When TrueNAS checks for a newer image, and when you install one. | Your server's IP. This is an ordinary registry pull. |
+| **raw.githubusercontent.com** | File installs, every 30 minutes, to read the version number in this repository. | Your server's IP. Nothing is sent about you, your NAS or what you run. |
+| **ghcr.io** | Image installs. Every 30 minutes to list the published tags, plus whatever TrueNAS does on its own, plus the pull itself. | Your server's IP. This is an ordinary registry read. |
 
 That is the complete list. Your browser never contacts anything but your own
 NAS. There is no telemetry, no analytics, no phone-home and no account anywhere
