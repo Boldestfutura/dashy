@@ -131,9 +131,20 @@ if it is not `main`) in the app's environment. Both scripts read it.
 
 ### The TrueNAS Apps page
 
-On an **image install** the Apps page works normally: TrueNAS polls ghcr.io and
-offers the update itself. On a **file install** it cannot — there is no image to
-pull — so updates go through the dashboard.
+On an **image install** the Apps page offers the update like any other app, and
+clicking it there does the same thing as the dashboard. On a **file install** it
+cannot — there is no image to pull — so updates go through the dashboard.
+
+There is a wrinkle in TrueNAS worth knowing about. It only sweeps the
+registries for newer images when the **Docker service starts**:
+`app.image.op.check_update` has no periodic caller. So a custom app's update
+badge can sit stale until the next reboot, and that is true of every custom app
+you run, not only Dashy.
+
+`collect.sh` therefore nudges that sweep every 30 minutes. It is what keeps
+both Dashy's own update markers and the TrueNAS Apps page honest. It costs one
+registry request per image. Set `IMAGE_UPDATE_SWEEP=0` in the app's environment
+if you would rather it left your system alone.
 
 The version check follows the packaging. On an image install it reads the
 highest version tag in the registry, because that is the only thing such an
@@ -207,6 +218,7 @@ Everything is optional — the app discovers or asks for all of it.
 | `HEXOS_URL` | `https://deck.hexos.com/dash` |
 | `UPDATE_REPO` / `UPDATE_BRANCH` | `Boldestfutura/dashy` / `main` |
 | `INSTALL_MODE` / `IMAGE` | `image` / `ghcr.io/boldestfutura/dashy:latest` (installer only) |
+| `IMAGE_UPDATE_SWEEP` | `1` — nudge TrueNAS to re-check image registries |
 
 ## Uninstall
 

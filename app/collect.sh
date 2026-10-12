@@ -200,3 +200,19 @@ PYGHCR
         > "$D/selfupdate.json.tmp" && mv "$D/selfupdate.json.tmp" "$D/selfupdate.json" ;;
   esac
 fi
+
+# --- TrueNAS sweeps the registries for newer images only when the Docker
+# --- service starts (app.image.op.check_update has no periodic caller), so a
+# --- custom app can sit on a stale "no update" for weeks. Nudge it on the same
+# --- half-hour cadence. This is what keeps both Dashy's own update markers and
+# --- the TrueNAS Apps page honest. Set IMAGE_UPDATE_SWEEP=0 to leave it alone.
+if [ "${IMAGE_UPDATE_SWEEP:-1}" = 1 ]; then
+  ISTAMP="$D/imagesweep.stamp"
+  ILAST=$(cat "$ISTAMP" 2>/dev/null || echo 0)
+  if [ $(( NOW - ILAST )) -ge 1800 ]; then
+    echo "$NOW" > "$ISTAMP"
+    # the sweep routinely outruns midclt's client timeout while still finishing
+    # server-side, so start it and walk away rather than failing on the wait
+    (midclt call app.image.op.check_update >/dev/null 2>&1 &)
+  fi
+fi
