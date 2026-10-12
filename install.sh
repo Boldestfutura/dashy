@@ -17,7 +17,13 @@ say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 info() { printf '   %s\n' "$*"; }
 die()  { printf '\n\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 ask()  { # ask <prompt> <default>  -> echoes the answer
-  local a; read -r -p "   $1 [$2]: " a </dev/tty; printf '%s' "${a:-$2}"; }
+  # /dev/tty is the right place to read from when stdin is a pipe, but it does
+  # not exist in a non-interactive session, where it fails and takes the
+  # default silently. Fall back to stdin so a piped or scripted install works.
+  local a=""
+  if [ -r /dev/tty ]; then read -r -p "   $1 [$2]: " a </dev/tty 2>/dev/null
+  else read -r -p "   $1 [$2]: " a 2>/dev/null || true; fi
+  printf '%s' "${a:-$2}"; }
 
 # ---------------------------------------------------------------- preflight
 say "checking this is a TrueNAS SCALE box"
@@ -41,11 +47,20 @@ say "where should Dashy keep its files"
 mapfile -t POOLS < <(zfs list -H -d 0 -o name 2>/dev/null)
 [ "${#POOLS[@]}" -gt 0 ] || die "no ZFS pools found."
 info "pools: ${POOLS[*]}"
-# prefer a pool that already has an Applications dataset, else the first one
-DEFPOOL="${POOLS[0]}"
-for p in "${POOLS[@]}"; do
-  zfs list -H -o name "$p/Applications" >/dev/null 2>&1 && { DEFPOOL="$p"; break; }
-done
+# Prefer wherever TrueNAS already keeps its apps - it is the pool the user
+# chose for exactly this. "Has an Applications dataset" was the old rule and it
+# picked alphabetically on a box where two pools had one.
+DEFPOOL=$(midclt call docker.config 2>/dev/null | python3 -c '"'"'
+import json,sys
+try: print((json.load(sys.stdin).get("pool") or "").strip())
+except Exception: pass'"'"' 2>/dev/null)
+if [ -z "$DEFPOOL" ] || ! zfs list -H -o name "$DEFPOOL" >/dev/null 2>&1; then
+  DEFPOOL="${POOLS[0]}"
+  for p in "${POOLS[@]}"; do
+    zfs list -H -o name "$p/Applications" >/dev/null 2>&1 && { DEFPOOL="$p"; break; }
+  done
+fi
+info "TrueNAS keeps its apps on ${DEFPOOL:-?}; a different pool is fine too"
 POOL="${POOL:-$(ask "pool" "$DEFPOOL")}"
 zfs list -H -o name "$POOL" >/dev/null 2>&1 || die "no such pool: $POOL"
 PARENT="$POOL/Applications"
@@ -63,6 +78,10 @@ try: cfg=json.load(sys.stdin)
 except Exception: raise SystemExit
 def walk(o):
     if isinstance(o,dict):
+        # TrueNAS stores environment as a list of {"name","value"} pairs, not as
+        # keys. Looking only for a key named TS_SERVE_CONFIG never matched.
+        if o.get("name")=="TS_SERVE_CONFIG" and isinstance(o.get("value"),str):
+            print(o["value"]); return True
         for k,v in o.items():
             if k=="TS_SERVE_CONFIG" and isinstance(v,str): print(v); return True
             if walk(v): return True
@@ -71,11 +90,13 @@ def walk(o):
             if walk(v): return True
     return False
 walk(cfg)' 2>/dev/null | head -1)
-  # that path is inside the tailscale container; find the host side of the mount
-  if [ -n "$SERVE" ] && [ ! -f "$SERVE" ]; then
-    CAND=$(find /mnt -maxdepth 4 -name "$(basename "$SERVE")" 2>/dev/null | head -1)
-    [ -n "$CAND" ] && SERVE="$CAND"
-  fi
+fi
+# Whatever the app says, the path it gives is the one inside its own container.
+# The file has to exist on the host to be any use here, so look on disk - which
+# is what was finding it all along, on the rare path that reached this.
+if [ -z "$SERVE" ] || [ ! -f "$SERVE" ]; then
+  CAND=$(find /mnt -maxdepth 4 -name serve.json 2>/dev/null | head -1)
+  [ -n "$CAND" ] && SERVE="$CAND"
 fi
 TSHOST=""
 if [ -n "$SERVE" ] && [ -f "$SERVE" ] && python3 -c "import json;json.load(open('$SERVE'))" 2>/dev/null; then
@@ -174,11 +195,19 @@ for d in "" /app /data /queue /config; do
   fi
 done
 
+# midclt creates datasets owned by root, so the user running this - who is
+# probably truenas_admin, not root - cannot write a single file into them.
+# Hand the tree over before copying anything into it.
+midclt call -j filesystem.chown \
+  "{\"path\":\"$BASE\",\"uid\":$(id -u),\"gid\":$(id -g),\"options\":{\"recursive\":true}}" \
+  >/dev/null 2>&1
+
 say "installing files"
 # collect.sh and worker.sh always land on disk: they run on the host from cron,
 # whichever way the app itself is packaged. The rest matter only to a file
 # install, but copying them costs nothing and keeps the directory honest.
-cp "$REPO/app/"*.py "$REPO/app/"*.sh "$REPO/app/"*.png "$BASE/app/" || die "copy failed"
+cp "$REPO/app/"*.py "$REPO/app/"*.sh "$REPO/app/"*.png "$BASE/app/" \
+  || die "could not write to $BASE/app - are you root or truenas_admin?"
 chmod +x "$BASE/app/collect.sh" "$BASE/app/worker.sh" "$BASE/app/entrypoint.sh"
 info "$(ls -1 "$BASE/app" | wc -l) files -> $BASE/app"
 

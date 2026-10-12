@@ -62,17 +62,19 @@ something actually changed.
 Over SSH as `root` or `truenas_admin`, or in the TrueNAS web UI under
 **System → Shell**.
 
-**Clone it somewhere under `/mnt`, not your home directory.** TrueNAS mounts
-`/home` with `noexec`, so `./install.sh` there fails with a bare "permission
-denied" that does not explain itself. `/home` also lives inside the boot
-environment, so it is wiped by a TrueNAS version upgrade.
+Clone it anywhere you can write, and run it with `bash` rather than `./`:
 
 ```sh
-cd /mnt/<your-pool>
 git clone https://github.com/Boldestfutura/dashy.git
 cd dashy
-./install.sh
+bash install.sh
 ```
+
+**Why `bash install.sh` and not `./install.sh`.** TrueNAS mounts `/home` and
+`/tmp` with `noexec`, so `./install.sh` there fails with a bare "permission
+denied" that explains nothing. Pool roots like `/mnt/tank` are owned by root,
+so `truenas_admin` cannot clone into them either. Running it with `bash`
+sidesteps both, and the clone is disposable once the install finishes.
 
 It asks two things — which pool, and whether to set Tailscale Serve up — and
 both arrive with an answer already filled in. Everything else it works out: a
@@ -100,10 +102,8 @@ from a cron job that runs on the minute.
 ## Check it worked
 
 ```sh
-./test.sh
+bash test.sh
 ```
-
-(Same place as the installer — under `/mnt`, for the same `noexec` reason.)
 
 Twenty-odd checks, read-only, safe to run at any time. It tells you whether the
 box can run Dashy at all, whether Tailscale Serve is set up properly, whether
