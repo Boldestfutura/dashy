@@ -27,7 +27,7 @@ python3 -c 'import json,urllib.request,http.server' 2>/dev/null \
   && ok "python standard library is enough (no pip needed)" \
   || bad "python3 is missing modules Dashy uses"
 
-head_ "Tailscale Serve"
+head_ "Tailscale Serve (optional)"
 SERVE="${SERVE:-$(find /mnt -maxdepth 4 -name serve.json 2>/dev/null | head -1)}"
 if [ -n "$SERVE" ] && [ -f "$SERVE" ]; then
   ok "serve.json found at $SERVE"
@@ -38,7 +38,8 @@ import json, sys
 cfg = json.load(open(sys.argv[1]))
 web, tcp = cfg.get("Web") or {}, cfg.get("TCP") or {}
 if not web:
-    print("  \033[31m✗\033[0m no Web entries — publish a service before installing"); sys.exit(0)
+    print("  \033[33m\u2013\033[0m nothing published yet - Dashy will install for your LAN")
+    sys.exit(0)
 print("  \033[32m✓\033[0m %d service(s) published" % len(web))
 host = next(iter(web)).rsplit(":", 1)[0]
 print("  \033[32m✓\033[0m this machine is %s" % host)
@@ -54,7 +55,8 @@ PY
     bad "serve.json is not valid JSON"
   fi
 else
-  bad "no serve.json found — set up Tailscale Serve first"
+  warn "no Tailscale Serve config - Dashy will install for your LAN instead"
+  warn "(app tiles will link to this NAS's LAN address rather than a tailnet name)"
 fi
 
 head_ "Is $APP_NAME installed?"

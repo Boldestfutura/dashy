@@ -17,7 +17,8 @@ add and remove things.
 - **Your apps, found automatically.** Nothing is hard-coded. Dashy joins your
   Tailscale Serve config against the TrueNAS app list, so publishing a service
   makes a tile appear for it, with its real icon, version and status. Remove one
-  and the tile goes.
+  and the tile goes. No Tailscale? It lists every app that binds a host port
+  instead, linked on your LAN.
 - **Updates from the dashboard.** Apps with an update show a marker; tapping it
   queues the upgrade and a recursive ZFS snapshot is taken first. Dashy updates
   itself the same way, straight from this repository.
@@ -39,9 +40,12 @@ add and remove things.
 ## Requirements
 
 - **TrueNAS SCALE** — the app list, versions and upgrades go through `midclt`.
-- **Tailscale** with Serve configured, publishing at least one service. This is
-  how Dashy discovers what you run.
 - Permission to call `midclt` (root, or `truenas_admin`).
+
+**Tailscale is optional.** With Serve configured, Dashy publishes itself on your
+tailnet and lists the services you chose to publish, each at its tailnet name.
+Without it, Dashy serves on your LAN and lists every app that binds a host port.
+Install it either way and add Tailscale later if you want it.
 
 ## Install
 
@@ -198,7 +202,7 @@ ever contacts a weather service.
 | Config | `<pool>/Applications/dashy/config` — shared settings |
 | Queue | `<pool>/Applications/dashy/queue` — upgrade requests |
 | Cron | two root jobs, every minute: `collect.sh`, `worker.sh` |
-| Serve | one `TCP` entry and one `Web` handler added to your `serve.json` |
+| Serve | one `TCP` entry and one `Web` handler added to your `serve.json`, if you use Tailscale |
 
 `serve.json` is backed up before it is touched.
 
@@ -224,7 +228,8 @@ Everything is optional — the app discovers or asks for all of it.
 | `DASH_PORT` | `8080` (the installer picks a free one) |
 | `TAILNET_HOST` | discovered from `serve.json` |
 | `HOST_NAME` | first label of the tailnet hostname |
-| `HOST_IP` | `127.0.0.1` |
+| `HOST_IP` | `127.0.0.1` — where the app probes from |
+| `LINK_HOST` | the NAS's LAN address — what goes in a link you click |
 | `WEATHER_LAT` / `WEATHER_LON` / `WEATHER_TZ` | unset — use the setup screen instead |
 | `HEXOS_URL` | `https://deck.hexos.com/dash` |
 | `UPDATE_REPO` / `UPDATE_BRANCH` | `Boldestfutura/dashy` / `main` |

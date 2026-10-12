@@ -72,22 +72,41 @@ walk(cfg)' 2>/dev/null | head -1)
     [ -n "$CAND" ] && SERVE="$CAND"
   fi
 fi
-if [ -z "$SERVE" ] || [ ! -f "$SERVE" ]; then
-  info "could not find it automatically."
-  info "it is the file the tailscale app has bind-mounted as TS_SERVE_CONFIG."
-  SERVE="$(ask "path to serve.json" "/mnt/$POOL/appconfig/serve.json")"
-fi
-[ -f "$SERVE" ] || die "no serve.json at $SERVE - set up Tailscale Serve first."
-python3 -c "import json;json.load(open('$SERVE'))" 2>/dev/null || die "$SERVE is not valid JSON."
-info "using $SERVE"
-
-TSHOST=$(python3 -c "
+TSHOST=""
+if [ -n "$SERVE" ] && [ -f "$SERVE" ] && python3 -c "import json;json.load(open('$SERVE'))" 2>/dev/null; then
+  TSHOST=$(python3 -c "
 import json
 cfg=json.load(open('$SERVE'))
 for h in (cfg.get('Web') or {}):
     print(h.rsplit(':',1)[0]); break")
-[ -n "$TSHOST" ] || die "no Web entries in $SERVE - publish at least one service first."
-info "this machine is $TSHOST"
+fi
+
+# Tailscale is how Dashy learns the tailnet name and which services you chose to
+# publish. It is not required. Without it Dashy serves on the LAN and lists every
+# app that binds a host port. Requiring it meant a new user with Tailscale running
+# but nothing published yet just got told to go away, which helped nobody.
+if [ -n "$TSHOST" ]; then
+  TS=1
+  info "using $SERVE"
+  info "this machine is $TSHOST"
+else
+  TS=0
+  if [ -n "$SERVE" ] && [ -f "$SERVE" ]; then
+    info "found $SERVE, but nothing is published in it yet."
+  else
+    info "no Tailscale Serve config found."
+  fi
+  info "that is fine - installing for your LAN instead."
+  info "to publish on your tailnet later, set up Serve and re-run this."
+fi
+
+# What a link in the page should point at. The app probes on 127.0.0.1, but a
+# browser following a link needs an address that means this NAS from elsewhere.
+LAN_IP="${LAN_IP:-$(ip route get 1.1.1.1 2>/dev/null \
+        | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')}"
+[ -n "$LAN_IP" ] || LAN_IP="$(ask "this NAS's LAN address" "")"
+[ -n "$LAN_IP" ] || die "need an address a browser can reach this NAS on."
+info "LAN address $LAN_IP"
 
 # ---------------------------------------------------------------- ports
 say "picking ports"
@@ -99,19 +118,23 @@ if [ -z "$LPORT" ]; then
 fi
 [ -n "$LPORT" ] || die "no free local port in 30800-30899."
 
-TPORT="${TPORT:-}"
-if [ -z "$TPORT" ]; then
-  USED=$(python3 -c "
+TPORT=""
+if [ "$TS" = 1 ]; then
+  if [ -z "${TPORT:-}" ]; then
+    USED=$(python3 -c "
 import json
 cfg=json.load(open('$SERVE'))
 print(' '.join((cfg.get('TCP') or {}).keys()))")
-  for p in $(seq 8443 8499); do
-    case " $USED " in *" $p "*) continue ;; esac
-    TPORT=$p; break
-  done
+    for p in $(seq 8443 8499); do
+      case " $USED " in *" $p "*) continue ;; esac
+      TPORT=$p; break
+    done
+  fi
+  [ -n "$TPORT" ] || die "no free tailnet port in 8443-8499."
+  info "local $LPORT, tailnet $TPORT  ->  https://$TSHOST:$TPORT"
+else
+  info "local $LPORT  ->  http://$LAN_IP:$LPORT"
 fi
-[ -n "$TPORT" ] || die "no free tailnet port in 8443-8499."
-info "local $LPORT, tailnet $TPORT  ->  https://$TSHOST:$TPORT"
 
 # ---------------------------------------------------------------- packaging
 say "how should the app be packaged"
@@ -168,13 +191,15 @@ midclt call -j filesystem.chown \
 
 # ---------------------------------------------------------------- the app
 say "creating the app"
-python3 - "$APP_NAME" "$BASE" "$LPORT" "$SERVE" "$WLAT" "$WLON" "$WTZ" "$MODE" "$IMAGE" <<'PY'
+python3 - "$APP_NAME" "$BASE" "$LPORT" "$SERVE" "$WLAT" "$WLON" "$WTZ" "$MODE" "$IMAGE" "$TS" "$LAN_IP" <<'PY'
 import json, subprocess, sys
-name, base, lport, serve, wlat, wlon, wtz, mode, image = sys.argv[1:10]
+name, base, lport, serve, wlat, wlon, wtz, mode, image, ts, lan_ip = sys.argv[1:12]
 env = {"DASH_PORT": lport, "DASH_DATA": "/data", "DASH_QUEUE": "/queue",
-       "SERVE_JSON": "/serve/serve.json", "HOST_IP": "127.0.0.1",
+       "HOST_IP": "127.0.0.1", "LINK_HOST": lan_ip,
        "DASH_CONFIG": "/config",
        "PYTHONDONTWRITEBYTECODE": "1"}
+if ts == "1":
+    env["SERVE_JSON"] = "/serve/serve.json"
 if wlat and wlon:
     env.update({"WEATHER_LAT": wlat, "WEATHER_LON": wlon})
     if wtz:
@@ -188,9 +213,10 @@ svc = {
     "environment": env,
     "volumes": [base + "/data:/data:ro",
                 base + "/queue:/queue",
-                base + "/config:/config",
-                serve + ":/serve/serve.json:ro"],
+                base + "/config:/config"],
 }
+if ts == "1":
+    svc["volumes"].append(serve + ":/serve/serve.json:ro")
 if mode == "image":
     svc["image"] = image
     # read-write, and not at /app: the entrypoint copies the two cron scripts
@@ -210,6 +236,7 @@ PY
 [ $? -eq 0 ] || die "app.create failed"
 
 # ---------------------------------------------------------------- serve entry
+if [ "$TS" = 1 ]; then
 say "publishing on the tailnet"
 python3 - "$SERVE" "$TSHOST" "$TPORT" "$LPORT" <<'PY'
 import json, shutil, sys, time
@@ -223,6 +250,7 @@ cfg.setdefault("Web", {})["%s:%s" % (host, tport)] = {
 json.dump(cfg, open(path, "w"), indent=1)
 print("   added TCP %s and a Web handler -> 127.0.0.1:%s" % (tport, lport))
 PY
+fi
 
 # ---------------------------------------------------------------- cron
 say "installing the two root cron jobs"
@@ -236,9 +264,10 @@ done
 
 # ---------------------------------------------------------------- done
 say "done"
+if [ "$TS" = 1 ]; then URL="https://$TSHOST:$TPORT"; else URL="http://$LAN_IP:$LPORT"; fi
 cat <<EOF
 
-   Dashy is at   https://$TSHOST:$TPORT
+   Dashy is at   $URL
 
    It takes a minute or two to look right: the pool, temperature and power
    figures come from the cron job, which runs on the minute.
@@ -246,7 +275,6 @@ cat <<EOF
    Packaging  $MODE
    Files      $BASE/app
    Data       $BASE/data
-   Serve      $SERVE   (backed up before the edit)
 
    To remove it again:  ./uninstall.sh
 EOF

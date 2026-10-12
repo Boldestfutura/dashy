@@ -12,13 +12,17 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.8.5"
+APP_VERSION = "0.9.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
 # Loopback is right for the host-networked case and harmless otherwise; a
 # different value only matters if the container cannot reach the host directly.
 HOST_IP = os.environ.get("HOST_IP", "127.0.0.1")
+# HOST_IP is where this process probes from, so 127.0.0.1 is right. LINK_HOST is
+# what goes in a link the browser follows, where 127.0.0.1 would be the viewer's
+# own machine. They only differ on a LAN install, which has no tailnet name to use.
+LINK_HOST = os.environ.get("LINK_HOST", "").strip() or HOST_IP
 
 # Weather is OFF unless coordinates are supplied. There is no geolocation and
 # no IP lookup anywhere in this app: whoever installs it types a latitude and
@@ -882,6 +886,33 @@ def save_prefs(d):
     return True, "saved", clean["rev"]
 
 
+def discover_lan():
+    """No Tailscale Serve, so there is no curated list of what is published and no
+    tailnet to reach it on. Fall back to every app that binds a host port - which
+    collect.sh already records - and link to each on the LAN.
+
+    Tailscale is how Dashy knows what you *chose* to publish. Without it the honest
+    answer is everything that is listening, so that is what this shows."""
+    try:
+        with open(os.path.join(DATA, "apps.json")) as fh:
+            apps = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    out = []
+    for a in apps:
+        ports = sorted(int(p) for p in (a.get("ports") or []) if p)
+        if not ports:
+            continue                      # host networking, or publishes nothing
+        label, desc = KNOWN.get(a.get("name"),
+                                ((a.get("name") or "?").replace("-", " ").title(), ""))
+        out.append({"port": ports[0], "lport": ports[0], "name": label, "desc": desc,
+                    "state": a.get("state"), "app": a.get("name"),
+                    "version": a.get("version"), "update": bool(a.get("update")),
+                    "iconsrc": ("/appicon/" + a["name"]) if a.get("icon") else None})
+    out.sort(key=lambda x: (x["name"] or "").lower())
+    return out
+
+
 def discover():
     """Every tailnet mapping, named from the installed app that owns the local port.
     Nothing is hard-coded, so publishing a new app makes it appear here by itself."""
@@ -889,7 +920,9 @@ def discover():
         with open(SERVE) as fh:
             cfg = json.load(fh)
     except (OSError, ValueError):
-        return []
+        cfg = {}
+    if not (cfg.get("Web") or {}):
+        return discover_lan()
 
     owner = {}
     try:
@@ -952,7 +985,7 @@ def services_loop():
             svc = dict(svc)
             svc["code"] = probe(svc["lport"])
             svc["url"] = ("https://%s:%d/" % (TAILNET, svc["port"])) if TAILNET \
-                         else ("http://%s:%d/" % (HOST_IP, svc["lport"]))
+                         else ("http://%s:%d/" % (LINK_HOST, svc["lport"]))
             found.append(svc)
         with _lock:
             _state["services"] = found
