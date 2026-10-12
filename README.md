@@ -89,8 +89,8 @@ carries them along.
 Override any of its choices with environment variables:
 
 ```sh
-POOL=tank LPORT=30802 TPORT=8455 APP_NAME=dashy ./install.sh
-IMAGE=ghcr.io/you/your-fork:latest ./install.sh
+POOL=tank LPORT=30802 TPORT=8455 APP_NAME=dashy bash install.sh
+IMAGE=ghcr.io/you/your-fork:latest bash install.sh
 ```
 
 Running it again over an existing install repairs it in place and leaves your
@@ -126,17 +126,10 @@ recursive ZFS snapshot of the install, replaces the files and redeploys the
 app. `worker.sh` replaces itself by rename, last, so the copy that is running
 finishes on the old inode.
 
-What "the rest" is depends on how Dashy is packaged. The worker asks the app
-which shape it is rather than guessing:
-
-- **image install** — `app.pull_images`, which pulls the new image and
-  redeploys. The container then copies the new cron scripts out to the host.
-- **file install** — downloads the files from this repository, refuses to go on
-  unless `server.py` actually compiles, and swaps them in. `worker.sh` replaces
-  itself last and by rename, so the copy that is running finishes on the old
-  inode.
-
-Both take a recursive ZFS snapshot of the install first.
+The root worker takes a recursive ZFS snapshot of the install, pulls the new
+image and redeploys. The container then copies the new cron scripts back out to
+the host as it starts, so those stay in step with the app rather than quietly
+rotting at whatever version they were installed at.
 
 If an update goes wrong, the snapshot is called `@preupdate-<timestamp>`:
 
@@ -153,9 +146,8 @@ if it is not `main`) in the app's environment. Both scripts read it.
 
 ### The TrueNAS Apps page
 
-On an **image install** the Apps page offers the update like any other app, and
-clicking it there does the same thing as the dashboard. On a **file install** it
-cannot — there is no image to pull — so updates go through the dashboard.
+The Apps page offers the update like any other app, and clicking it there does
+the same thing as the dashboard — both end up pulling the image.
 
 There is a wrinkle in TrueNAS worth knowing about. It only sweeps the
 registries for newer images when the **Docker service starts**:
@@ -246,7 +238,7 @@ Everything is optional — the app discovers or asks for all of it.
 ## Uninstall
 
 ```sh
-./uninstall.sh
+bash uninstall.sh
 ```
 
 Removes the app, its cron jobs and its Serve entry. It leaves your datasets
