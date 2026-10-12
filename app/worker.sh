@@ -27,38 +27,58 @@ json.dump(d,open(path,"w"))
 PYS
   }
   snote running "setting up Tailscale Serve"
-  ARGS=$(printf '%s' "$REQ" | python3 -c "
+  # The app sends a list of local ports it has actually discovered. Validate
+  # it here too: the queue is a file, and a file is not an argument list.
+  PORTS=$(printf '%s' "$REQ" | python3 -c "
 import json,sys,re
 try: r=json.load(sys.stdin)
 except Exception: raise SystemExit
 host=str(r.get('host') or '').strip()
-# the host goes into a filename-ish key and then into a shell command, so keep
-# it to what a tailnet name can actually contain
-if not re.match(r'^[A-Za-z0-9][A-Za-z0-9.-]{0,252}\$', host): raise SystemExit
-try:
-    tport=int(r.get('tport')); lport=int(r.get('lport'))
-except Exception: raise SystemExit
-if not (1 <= tport <= 65535 and 1 <= lport <= 65535): raise SystemExit
-serve=str(r.get('serve') or '').strip()
-if serve and (not serve.startswith('/mnt/') or '..' in serve): raise SystemExit
-print('%s %d %d %s' % (host, tport, lport, serve or '-'))
+if host and not re.match(r'^[A-Za-z0-9][A-Za-z0-9.-]{0,252}\$', host): raise SystemExit
+out=[]
+for p in (r.get('lports') or [])[:60]:
+    try: p=int(p)
+    except Exception: continue
+    if 1 <= p <= 65535: out.append(str(p))
+if not out: raise SystemExit
+print((host or '-') + ' ' + ' '.join(sorted(set(out), key=int)))
 " 2>/dev/null)
-  if [ -z "$ARGS" ]; then
+  SPATH=$(printf '%s' "$REQ" | python3 -c "
+import json,sys
+try: r=json.load(sys.stdin)
+except Exception: raise SystemExit
+s=str(r.get('serve') or '').strip()
+if s and (not s.startswith('/mnt/') or '..' in s): raise SystemExit
+print(s or '-')
+" 2>/dev/null)
+  if [ -z "$PORTS" ]; then
     snote failed "the request did not make sense"
   else
-    set -- $ARGS
-    SPATH="$4"
-    if [ "$SPATH" = "-" ]; then
+    set -- $PORTS
+    HOST="$1"; shift
+    [ "$HOST" = "-" ] && HOST='${TS_CERT_DOMAIN}'
+    if [ -z "$SPATH" ] || [ "$SPATH" = "-" ]; then
       # no hint from the app, so put it beside the other app config on our pool:
       # /mnt/<pool>/Applications/<app> -> /mnt/<pool>/appconfig
       POOL=${BASE#/mnt/}; POOL=${POOL%%/*}
       SPATH="/mnt/$POOL/appconfig/serve.json"
     fi
-    if python3 "$APP_DIR/serve_setup.py" --host "$1" --tport "$2" --lport "$3" \
-         --serve "$SPATH" > "$D/serve-setup.log" 2>&1; then
-      snote done "published on the tailnet"
-    else
+    : > "$D/serve-setup.log"
+    OK=0; BAD=0
+    for LP in "$@"; do
+      if python3 "$APP_DIR/serve_setup.py" --host "$HOST" --tport auto \
+           --lport "$LP" --serve "$SPATH" >> "$D/serve-setup.log" 2>&1; then
+        OK=$((OK+1))
+      else
+        BAD=$((BAD+1))
+      fi
+    done
+    if [ "$BAD" = 0 ]; then
+      snote done "published $OK"
+    elif [ "$OK" = 0 ]; then
       snote failed "$(tail -1 "$D/serve-setup.log" 2>/dev/null | head -c 120)"
+    else
+      snote done "published $OK, $BAD failed"
     fi
   fi
 fi
@@ -84,66 +104,32 @@ json.dump(d,open(path,"w"))
 PYN
   }
 
-  # ask the app itself which shape it is, rather than guessing from the disk
+  # Dashy is a published image, so an update is a pull. There used to be a
+  # second path for a bind-mounted file install, which meant two ways to update
+  # and a mode to get wrong; the installer only builds image installs now.
+  APPNAME=$(basename -- "$BASE")
   IMAGE=$(midclt call app.config "$APPNAME" 2>/dev/null | python3 -c "
 import json,sys
 try: svc=list(json.load(sys.stdin)['services'].values())[0]
 except Exception: raise SystemExit
 print(svc.get('image') or '')" 2>/dev/null)
 
-  stamp=$(date +%Y%m%d-%H%M%S)
-  ds=${BASE#/mnt/}
-  snap(){ zfs list -H -o name "$ds" >/dev/null 2>&1 && \
-          zfs snapshot -r "$ds@preupdate-$stamp" 2>/dev/null; }
-
   case "$IMAGE" in
     */dashy:*|*/dashy)
-      # ---- image install: the registry has the new version, not the repo ----
       note running "pulling the new image"
-      snap
+      stamp=$(date +%Y%m%d-%H%M%S)
+      ds=${BASE#/mnt/}
+      zfs list -H -o name "$ds" >/dev/null 2>&1 && \
+        zfs snapshot -r "$ds@preupdate-$stamp" 2>/dev/null
       if midclt call -j app.pull_images "$APPNAME" '{"redeploy": true}' >/dev/null 2>&1; then
-        # the container's entrypoint copies the new collect.sh and worker.sh
-        # back out to this directory as it starts, so cron picks them up too
+        # the container's entrypoint copies the new cron scripts back out to
+        # this directory as it starts, so cron picks them up too
         note done "updated"
       else
         note failed "could not pull the image"
-      fi
-      ;;
+      fi ;;
     *)
-      # ---- file install: fetch everything from the repo --------------------
-      note running "updating"
-      TMP=$(mktemp -d)
-      OK=1
-      for f in server.py collect.sh worker.sh entrypoint.sh favicon.png \
-               icon-180.png icon-192.png icon-512.png icon-512-maskable.png; do
-        curl -fsSL -m 60 "$BASEURL/$f" -o "$TMP/$f" 2>/dev/null || OK=0
-      done
-      # A half-downloaded server.py would take the dashboard down, so prove it parses
-      python3 -m py_compile "$TMP/server.py" 2>/dev/null || OK=0
-      [ -s "$TMP/server.py" ] || OK=0
-
-      if [ "$OK" = 1 ]; then
-        snap
-        for f in server.py entrypoint.sh favicon.png icon-180.png icon-192.png \
-                 icon-512.png icon-512-maskable.png collect.sh; do
-          cp "$TMP/$f" "$APP_DIR/$f" 2>/dev/null
-        done
-        # last, and by rename: this script is running from that path right now,
-        # and an atomic swap leaves the running shell reading the old inode
-        mv "$TMP/worker.sh" "$APP_DIR/worker.sh.new" 2>/dev/null && \
-          mv "$APP_DIR/worker.sh.new" "$APP_DIR/worker.sh"
-        chmod +x "$APP_DIR/collect.sh" "$APP_DIR/worker.sh" \
-                 "$APP_DIR/entrypoint.sh" 2>/dev/null
-        if midclt call -j app.redeploy "$APPNAME" >/dev/null 2>&1; then
-          note done "updated"
-        else
-          note done "files updated, restart the app to finish"
-        fi
-      else
-        note failed "download failed, nothing changed"
-      fi
-      rm -rf "$TMP"
-      ;;
+      note failed "this install does not run a Dashy image; update it by hand" ;;
   esac
 fi
 

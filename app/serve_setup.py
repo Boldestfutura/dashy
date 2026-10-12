@@ -15,8 +15,7 @@ Called two ways, both as root:
 
 Run with --dry-run to see every change without making any.
 
-  serve_setup.py --host nas.tail1234.ts.net --tport 8455 --lport 30802 \
-                 --serve /mnt/tank/appconfig/serve.json [--dry-run]
+  serve_setup.py --lport 30802 --serve /mnt/tank/appconfig/serve.json [--dry-run]
 """
 import argparse
 import json
@@ -43,9 +42,13 @@ def die(msg):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", required=True,
-                    help="this machine's tailnet name, or ${TS_CERT_DOMAIN}")
-    ap.add_argument("--tport", type=int, required=True)
+    # The container substitutes ${TS_CERT_DOMAIN} with this node's own name,
+    # verified on 25.10.7 with tailscale 1.4.17. So the default needs nothing
+    # from the user - a tailnet name is accepted but never required.
+    ap.add_argument("--host", default="${TS_CERT_DOMAIN}",
+                    help="tailnet name; the default asks Tailscale itself")
+    ap.add_argument("--tport", default="auto",
+                    help="tailnet port, or 'auto' for the lowest free one")
     ap.add_argument("--lport", type=int, required=True)
     ap.add_argument("--serve", required=True, help="host path for serve.json")
     ap.add_argument("--app", default=TS_APP, help="name of the Tailscale app")
@@ -156,14 +159,44 @@ def main():
         serve = {}
         print("%screate %s" % (tag, serve_path))
 
+    # If this local port is already published, reuse that entry rather than
+    # opening a second door to the same room.
+    existing_key, existing_port = None, None
+    for key, entry in (serve.get("Web") or {}).items():
+        h = (entry.get("Handlers") or {}).get("/") or {}
+        if h.get("Proxy", "").endswith(":%d" % a.lport):
+            existing_key = key
+            try:
+                existing_port = int(key.rsplit(":", 1)[1])
+            except (IndexError, ValueError):
+                pass
+            break
+
+    if str(a.tport).lower() == "auto" and existing_port:
+        tport = existing_port
+        print("   port %d is already published on %d" % (a.lport, tport))
+    elif str(a.tport).lower() == "auto":
+        taken = {int(k) for k in (serve.get("TCP") or {}) if str(k).isdigit()}
+        tport = next((p for p in range(8443, 8500) if p not in taken), 0)
+        if not tport:
+            die("no free tailnet port between 8443 and 8499")
+    else:
+        tport = int(a.tport)
+
+    # Reuse the existing key verbatim when there is one. Writing our own
+    # ${TS_CERT_DOMAIN} key beside a literal hostname key would leave two Web
+    # entries on one port, which is one door too many to the same room.
+    web_key = existing_key if (existing_key and tport == existing_port) \
+              else "%s:%d" % (a.host, tport)
+
     # BOTH halves, every time. A Web handler with no TCP listener is valid JSON
     # that silently never binds, and that one costs an afternoon to find.
     before = json.dumps(serve, sort_keys=True)
-    serve.setdefault("TCP", {})[str(a.tport)] = {"HTTPS": True}
-    serve.setdefault("Web", {})["%s:%d" % (a.host, a.tport)] = {
+    serve.setdefault("TCP", {})[str(tport)] = {"HTTPS": True}
+    serve.setdefault("Web", {})[web_key] = {
         "Handlers": {"/": {"Proxy": "http://127.0.0.1:%d" % a.lport}}}
-    print("   TCP %d  HTTPS" % a.tport)
-    print("   Web %s:%d -> http://127.0.0.1:%d" % (a.host, a.tport, a.lport))
+    print("   TCP %d  HTTPS" % tport)
+    print("   Web %s -> http://127.0.0.1:%d" % (web_key, a.lport))
     serve_changed = json.dumps(serve, sort_keys=True) != before
     if not serve_changed:
         print("   that entry is already there, byte for byte")
@@ -185,9 +218,15 @@ def main():
         print("\n--dry-run: nothing was changed.")
         return
     if not changed and not serve_changed:
-        # Restarting Tailscale drops every tailnet connection on this box for a
-        # few seconds. Not worth doing to achieve nothing.
         print("nothing to do - Serve is already set up this way.")
+        return
+    if not changed:
+        # Tailscale watches TS_SERVE_CONFIG and picks up an edit on its own,
+        # within about a minute (verified 2026-10-13). So a plain publish costs
+        # no restart at all, and restarting would drop every tailnet connection
+        # on this box for nothing. Only a change to the app itself - a new
+        # mount, or the env var - actually needs one.
+        print("published. Tailscale reads this file live, so nothing restarts.")
         return
 
     if changed:

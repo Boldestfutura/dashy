@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.9.5"
+APP_VERSION = "0.10.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -31,13 +31,8 @@ SERVE_HOST_HINT = os.environ.get("SERVE_HOST_PATH", "").strip()
 # no IP lookup anywhere in this app: whoever installs it types a latitude and
 # longitude, or there is no weather. When it is on, this machine (not the
 # browser) calls api.open-meteo.com every 15 minutes with those coordinates.
-WEATHER_LAT = os.environ.get("WEATHER_LAT", "").strip()
-WEATHER_LON = os.environ.get("WEATHER_LON", "").strip()
-WEATHER_TZ = os.environ.get("WEATHER_TZ", "UTC").strip()
 # Open-Meteo returns no place name, and a reverse-geocode call for one string
 # is not worth it - the timezone's last segment is the city in every case here.
-WEATHER_PLACE = os.environ.get(
-    "WEATHER_PLACE", WEATHER_TZ.rsplit("/", 1)[-1].replace("_", " "))
 WEATHER_TTL = 900.0          # 15 min is plenty; the API asks for restraint
 WEATHER_FAIL_TTL = 120.0     # after a failure, back off before retrying
 
@@ -733,15 +728,13 @@ def hourly_from(d, now_iso, span=24):
 
 
 def weather_where():
-    """Coordinates come from the place chosen during setup. The environment
-    variables remain as an override for unattended installs."""
+    """Coordinates come from the town chosen during setup, and nowhere else.
+    Weather is off until someone picks one - there are no built-in coordinates,
+    no IP geolocation and no browser location API."""
     p = (load_prefs() or {}).get("weather") or {}
     if p.get("lat") is not None and p.get("lon") is not None:
         return (str(p["lat"]), str(p["lon"]),
                 p.get("tz") or "UTC", p.get("name") or "")
-    if WEATHER_LAT and WEATHER_LON:
-        return (WEATHER_LAT, WEATHER_LON, WEATHER_TZ or "UTC",
-                WEATHER_PLACE or "")
     return None
 
 
@@ -820,26 +813,41 @@ def installed_apps():
         return set()
 
 
-def request_serve(host, tport):
-    """Ask the root worker to set Tailscale Serve up. The container cannot:
-    no midclt, and the Tailscale app itself has to be edited and redeployed."""
+def request_serve(host=""):
+    """Ask the root worker to publish everything that is not published yet.
+
+    The container cannot do it: no midclt, and on a first run the Tailscale app
+    itself needs a mount and an env var. Choosing "use my tailnet" is one
+    decision, so this is one request covering every unpublished app rather than
+    a queue entry per tile.
+
+    `host` is optional and normally empty: the Tailscale container substitutes
+    ${TS_CERT_DOMAIN} with this node's own name, so nobody has to go and look
+    it up."""
     host = (host or "").strip().lower()
-    if not re.match(r"^[a-z0-9][a-z0-9.-]{0,252}$", host) or "." not in host:
+    if host and (not re.match(r"^[a-z0-9][a-z0-9.-]{0,252}$", host)
+                 or "." not in host):
         return False, "that does not look like a tailnet name"
-    try:
-        tport = int(tport)
-    except (TypeError, ValueError):
-        return False, "bad port"
-    if not 1024 <= tport <= 65535:
-        return False, "port must be 1024-65535"
+
+    # Only ports Dashy has actually discovered, so this cannot be talked into
+    # publishing something arbitrary that happens to be listening.
+    with _lock:
+        svcs = list(_state.get("services") or [])
+    want = sorted({int(s["lport"]) for s in svcs
+                   if s.get("lport") and not s.get("port")})
+    if PORT not in {int(s["lport"]) for s in svcs if s.get("lport")}:
+        want.append(PORT)              # Dashy publishes no ports of its own
+    want = sorted(set(want))
+    if not want:
+        return True, "everything is already published"
     try:
         os.makedirs(QUEUE, exist_ok=True)
         with open(os.path.join(QUEUE, "_serve.req"), "w") as fh:
-            json.dump({"host": host, "tport": tport, "lport": PORT,
+            json.dump({"host": host, "lports": want[:60],
                        "serve": SERVE_HOST_HINT}, fh)
     except OSError as e:
         return False, str(e)
-    return True, "queued"
+    return True, "publishing %d app%s" % (len(want), "" if len(want) == 1 else "s")
 
 
 def detect():
@@ -1118,9 +1126,13 @@ def services_loop():
             svc = dict(svc)
             svc["code"] = probe(svc["lport"])
             path = svc.get("path") or "/"
-            svc["url"] = ("https://%s:%d%s" % (TAILNET, svc["port"], path)) \
-                         if (TAILNET and svc.get("port")) \
-                         else ("http://%s:%d%s" % (LINK_HOST, svc["lport"], path))
+            # Both, always. Which one a tile uses is the viewer's setting, and
+            # sending both means flipping it is instant on every device instead
+            # of waiting for the next poll to recompute a single url.
+            svc["url_lan"] = "http://%s:%d%s" % (LINK_HOST, svc["lport"], path)
+            svc["url_ts"] = ("https://%s:%d%s" % (TAILNET, svc["port"], path)
+                             if (TAILNET and svc.get("port")) else None)
+            svc["url"] = svc["url_ts"] or svc["url_lan"]
             found.append(svc)
         with _lock:
             _state["services"] = found
@@ -1274,10 +1286,10 @@ PAGE = """<!doctype html>
       transition:background .13s ease}
   .mi:hover{background:var(--faint)}
   #mi-self{color:var(--warn)}
-  .pubbtn{margin-top:8px;padding:7px 14px;border:none;border-radius:9px;
-          background:var(--brand);color:#fff;font:inherit;font-size:13px;
-          font-weight:700;cursor:pointer}
-  .pubbtn:disabled{opacity:.5;cursor:default}
+  .opt.col{display:block}
+  .opt.col .seg{margin-top:10px}
+  .seg.sm{margin-top:8px}
+  .seg.sm button{padding:6px 10px;font-size:12.5px}
   .pubmsg{display:block;margin-top:7px;font-size:12px;color:var(--muted)}
   .pubmsg.bad{color:var(--warn)}
   #settings.dot{position:relative}
@@ -1695,11 +1707,12 @@ PAGE = """<!doctype html>
                    placeholder="Type a town&hellip;">
             <div class="cityres" id="m-cityres"></div></div>
           <div class="mrow nas" id="m-serverow" hidden>
-            <span class="ml">Publish on your tailnet</span>
-            <span class="mhint">Tailscale is installed but not publishing yet</span>
-            <input class="fld sm" id="m-tsname" type="text" autocomplete="off"
-                   spellcheck="false" placeholder="nas.tailXXXX.ts.net">
-            <button class="pubbtn" id="m-tsgo" type="button">Publish</button>
+            <span class="ml">App links</span>
+            <span class="mhint">Which address a tile opens</span>
+            <div class="seg sm" id="m-links" role="group" aria-label="App links">
+              <button type="button" data-links="ts" aria-pressed="true">Tailnet</button>
+              <button type="button" data-links="lan" aria-pressed="false">Local</button>
+            </div>
             <span class="pubmsg" id="m-tsmsg"></span></div>
           <div class="mrow nas"><span class="ml">TrueNAS address</span>
             <span class="mhint">Where you open the TrueNAS interface</span>
@@ -1794,15 +1807,15 @@ PAGE = """<!doctype html>
           <span>Open apps by their tailnet address.</span></span>
         <button class="sw2" id="o-ts" role="switch" aria-checked="false"><i></i></button>
       </div>
-      <div class="opt" id="su-serve" hidden>
-        <span class="txt"><b>Publish on your tailnet</b>
-          <span>Tailscale is running here but nothing is published yet. Dashy can
-          set that up. Your tailnet name is in the Tailscale admin console, or run
-          <code>tailscale status</code> on any of your devices.</span>
-          <input class="fld sm" id="su-tsname" type="text" autocomplete="off"
-                 spellcheck="false" placeholder="nas.tailXXXX.ts.net">
-          <button class="pubbtn" id="su-tsgo" type="button">Publish</button>
-          <span class="pubmsg" id="su-tsmsg"></span></span>
+      <div class="opt col" id="su-serve" hidden>
+        <span class="txt"><b>App links</b>
+          <span>Which address a tile opens. Tailnet works from anywhere you are
+          signed in; your local network only works at home.</span></span>
+        <div class="seg" id="su-links" role="group" aria-label="App links">
+          <button type="button" data-links="ts" aria-pressed="true">Tailnet</button>
+          <button type="button" data-links="lan" aria-pressed="false">Local network</button>
+        </div>
+        <span class="pubmsg" id="su-tsmsg"></span>
       </div>
       <div class="opt">
         <span class="txt"><b>OpenClaw<span class="auto" id="a-oc"></span></b>
@@ -2593,61 +2606,64 @@ function paintSelfUpdate(){
   $('mi-selfver').textContent=u.current+' \u2192 '+u.latest;
 }
 
-// Offered only when Tailscale is actually installed and publishing nothing.
+// Which address a tile opens. The server sends both, so this is a repaint and
+// not a round trip - flip it on a phone and the laptop follows within a poll.
+function appURL(s){
+  const want=(prefs.setup||{}).links;
+  if(want==='lan') return s.url_lan || s.url;
+  return s.url_ts || s.url_lan || s.url;
+}
+
+function setLinks(mode){
+  prefs.setup=Object.assign({}, prefs.setup, {links:mode});
+  savePrefs();
+  paintServeOffer();
+  if(openKey==='apps') renderPop(false);
+  build();
+  // choosing the tailnet is also a request to make those addresses exist
+  if(mode==='ts') publishAll();
+}
+
+let publishing=false;
+function publishAll(){
+  if(publishing) return;
+  publishing=true;
+  const msg=(t)=>['su-tsmsg','m-tsmsg'].forEach(id=>{
+    const el=$(id); if(el){ el.textContent=t; el.classList.remove('bad'); } });
+  fetch('/api/serve',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({})})
+    .then(r=>r.json())
+    .then(r=>{ msg(r.ok ? (r.msg||'') : (r.msg||'that did not work'));
+               if(!r.ok) ['su-tsmsg','m-tsmsg'].forEach(id=>{
+                 const el=$(id); if(el) el.classList.add('bad'); }); })
+    .catch(()=>msg('could not reach the NAS'))
+    .finally(()=>{ publishing=false; });
+}
+
+// Offered only when Tailscale is actually installed.
 // The container cannot do any of this itself, so the button drops a request in
 // the queue and the root worker runs the same script install.sh does.
 function paintServeOffer(){
   const det=(data&&data.detected)||{};
   const st=(data&&data.updates&&data.updates._serve)||null;
-  const on=!!det.serve_offer || (st && st.state==='running');
+  // the choice is worth offering whenever Tailscale is here at all, published
+  // or not - it is how you switch back to local addresses too
+  const on=!!det.tailscale;
   ['su-serve','m-serverow'].forEach(id=>{ const el=$(id); if(el) el.hidden=!on; });
   if(!on) return;
-  let msg='', bad=false, busy=false;
-  if(st && st.state==='running'){ msg='Setting it up\u2026 Tailscale restarts, give it a minute.'; busy=true; }
+  const mode=((prefs.setup||{}).links==='lan') ? 'lan' : 'ts';
+  ['su-links','m-links'].forEach(id=>{
+    const g=$(id); if(!g) return;
+    g.querySelectorAll('button').forEach(b=>
+      b.setAttribute('aria-pressed', String(b.dataset.links===mode)));
+  });
+  let msg='', bad=false;
+  if(st && st.state==='running') msg='Publishing\u2026';
   else if(st && st.state==='failed'){ msg=st.msg||'That did not work.'; bad=true; }
-  else if(st && st.state==='done'){ msg='Published. Reload to use the tailnet address.'; }
+  else if(st && st.state==='done' && mode==='ts') msg=st.msg||'';
   ['su-tsmsg','m-tsmsg'].forEach(id=>{
     const el=$(id); if(!el) return;
     el.textContent=msg; el.classList.toggle('bad',bad); });
-  ['su-tsgo','m-tsgo'].forEach(id=>{ const b=$(id); if(b) b.disabled=busy; });
-}
-
-function askPublish(which){
-  const inp=$(which==='su'?'su-tsname':'m-tsname');
-  const msg=$(which==='su'?'su-tsmsg':'m-tsmsg');
-  const host=(inp&&inp.value||'').trim().toLowerCase();
-  if(!host || host.indexOf('.')<0){
-    if(msg){ msg.textContent='Needs the full name, like nas.tail1234.ts.net';
-             msg.classList.add('bad'); }
-    return;
-  }
-  if(msg){ msg.textContent='Asking the NAS\u2026'; msg.classList.remove('bad'); }
-  fetch('/api/serve',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({host:host})})
-    .then(r=>r.json())
-    .then(r=>{ if(msg){ msg.textContent = r.ok
-        ? 'Queued. Tailscale will restart shortly.'
-        : (r.msg||'That did not work.');
-        msg.classList.toggle('bad', !r.ok); } })
-    .catch(()=>{ if(msg){ msg.textContent='Could not reach the NAS.';
-                          msg.classList.add('bad'); } });
-}
-
-// The collector looks every half hour, which is the right cadence for a
-// background check and the wrong one for somebody standing there waiting.
-// This asks now. The menu stays open so the answer lands where you are looking.
-let checking=false;
-function doCheck(){
-  if(checking) return;
-  checking=true;
-  const t=$('mi-checktxt'), m=$('mi-checkmsg');
-  if(t) t.textContent='Checking\u2026';
-  if(m) m.textContent='';
-  fetch('/api/check',{method:'POST'})
-    .then(r=>r.json())
-    .then(r=>{ if(m) m.textContent=r.msg||''; tick(); })
-    .catch(()=>{ if(m) m.textContent='no answer'; })
-    .finally(()=>{ checking=false; if(t) t.textContent='Check for updates'; });
 }
 
 function paintLinks(L){
@@ -2773,7 +2789,7 @@ function rowsApps(){
   const st=data.updates||{};
   if(!list.length) return '<div class="row"><span class="t2">Nothing published yet.</span></div>';
   return '<div class="appgrid">'+list.map(s=>
-    '<a class="apptile" data-up="'+(s.code?'1':'0')+'" href="'+s.url+'" target="_blank" rel="noopener">'+
+    '<a class="apptile" data-up="'+(s.code?'1':'0')+'" href="'+appURL(s)+'" target="_blank" rel="noopener">'+
       '<span class="sdot"></span>'+
       (s.update?'<button class="upd" data-app="'+s.app+'" data-name="'+s.name+'" '+
                  'data-ver="'+(s.version||'')+'" aria-label="Update '+s.name+'"></button>':'')+
@@ -3141,8 +3157,8 @@ document.addEventListener('click',ev=>{
   if(ev.target.closest('#mi-edit')){ closeMenu(); setEditing(true); return; }
   if(ev.target.closest('#mi-ver')){ closeMenu(); openPop('up'); return; }
   if(ev.target.closest('#mi-setup')){ closeMenu(); openSetup(true); return; }
-  if(ev.target.closest('#su-tsgo')){ askPublish('su'); return; }
-  if(ev.target.closest('#m-tsgo')){ askPublish('m'); return; }
+  const lk=ev.target.closest('#su-links button, #m-links button');
+  if(lk){ setLinks(lk.dataset.links); return; }
   if(ev.target.closest('#mi-check')){ doCheck(); return; }
   if(ev.target.closest('#mi-self')){ closeMenu(); askSelfUpdate(); return; }
   const cb=ev.target.closest('.cityres button[data-city]');
@@ -3372,7 +3388,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(min(n, 8192)) or b"{}")
             except (ValueError, TypeError):
                 body = {}
-            ok, msg = request_serve(body.get("host"), body.get("tport") or 8455)
+            ok, msg = request_serve(body.get("host") or "")
             return self._send(200 if ok else 400,
                               json.dumps({"ok": ok, "msg": msg}),
                               "application/json; charset=utf-8")

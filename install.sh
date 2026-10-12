@@ -28,7 +28,12 @@ midclt call system.info >/dev/null 2>&1 || die "midclt call failed - are you roo
 info "ok"
 
 if midclt call app.query "[[\"name\",\"=\",\"$APP_NAME\"]]" 2>/dev/null | grep -q '"name"'; then
-  die "an app called '$APP_NAME' already exists. Remove it first, or set APP_NAME=something-else."
+  info "an app called '$APP_NAME' is already installed."
+  info "this will update its files and settings in place. Your data is untouched."
+  a="$(ask "carry on? (y/n)" "y")"
+  case "$a" in y|Y|yes|YES) REINSTALL=1 ;; *) die "nothing done." ;; esac
+else
+  REINSTALL=0
 fi
 
 # ---------------------------------------------------------------- the pool
@@ -107,16 +112,10 @@ else
     ans="$(ask "set Tailscale Serve up for you? (y/n)" "y")"
     case "$ans" in
       y|Y|yes|YES)
-        info ""
-        info "I need this machine's tailnet name. It is in the Tailscale admin"
-        info "console, or run 'tailscale status' on any of your devices."
-        info "It looks like  machine-name.tailXXXX.ts.net"
-        TSHOST="$(ask "tailnet name" "")"
-        if [ -n "$TSHOST" ]; then
-          TS=2        # set it up after the app exists and the port is known
-        else
-          info "no name given - installing for your LAN instead."
-        fi ;;
+        # Tailscale substitutes ${TS_CERT_DOMAIN} with this node's own name, so
+        # there is nothing to ask for and nothing to type wrong.
+        TSHOST='${TS_CERT_DOMAIN}'
+        TS=2 ;;
       *) info "installing for your LAN. Re-run this later to publish it." ;;
     esac
   else
@@ -161,28 +160,6 @@ else
   info "local $LPORT  ->  http://$LAN_IP:$LPORT"
 fi
 
-# ---------------------------------------------------------------- packaging
-say "how should the app be packaged"
-info "image - pull the published container image. TrueNAS can then update it"
-info "        from the Apps page like any other app."
-info "files - stock python image with this directory mounted in. No registry,"
-info "        and you can edit server.py in place."
-MODE="${INSTALL_MODE:-$(ask "image or files" "image")}"
-case "$MODE" in
-  image|files) ;;
-  *) die "INSTALL_MODE must be 'image' or 'files'" ;;
-esac
-IMAGE="${IMAGE:-ghcr.io/boldestfutura/dashy:latest}"
-[ "$MODE" = image ] && info "using $IMAGE"
-
-# ---------------------------------------------------------------- weather
-say "weather (optional, Open-Meteo, no API key)"
-info "leave blank to skip the weather widget entirely."
-WLAT="${WLAT:-$(ask "latitude"  "")}"
-WLON="${WLON:-$(ask "longitude" "")}"
-WTZ=""
-[ -n "$WLAT" ] && WTZ="${WTZ:-$(ask "timezone" "$(cat /etc/timezone 2>/dev/null || echo UTC)")}"
-
 # ---------------------------------------------------------------- datasets
 say "creating datasets under $BASE_DS"
 zfs list -H -o name "$PARENT" >/dev/null 2>&1 || \
@@ -216,21 +193,19 @@ midclt call -j filesystem.chown \
 
 # ---------------------------------------------------------------- the app
 say "creating the app"
-python3 - "$APP_NAME" "$BASE" "$LPORT" "$SERVE" "$WLAT" "$WLON" "$WTZ" "$MODE" "$IMAGE" "$TS" "$LAN_IP" <<'PY'
+IMAGE="${IMAGE:-ghcr.io/boldestfutura/dashy:latest}"
+info "using $IMAGE"
+python3 - "$APP_NAME" "$BASE" "$LPORT" "$SERVE" "$IMAGE" "$TS" "$LAN_IP" "$REINSTALL" <<'PY'
 import json, subprocess, sys
-name, base, lport, serve, wlat, wlon, wtz, mode, image, ts, lan_ip = sys.argv[1:12]
+name, base, lport, serve, image, ts, lan_ip, reinstall = sys.argv[1:9]
 env = {"DASH_PORT": lport, "DASH_DATA": "/data", "DASH_QUEUE": "/queue",
        "HOST_IP": "127.0.0.1", "LINK_HOST": lan_ip,
        "DASH_CONFIG": "/config",
        "PYTHONDONTWRITEBYTECODE": "1"}
 if ts != "0":
     env["SERVE_JSON"] = "/serve/serve.json"
-# so the dashboard's own "publish on the tailnet" button knows where to put it
+# so the dashboard's own tailnet switch knows where to write
 env["SERVE_HOST_PATH"] = serve
-if wlat and wlon:
-    env.update({"WEATHER_LAT": wlat, "WEATHER_LON": wlon})
-    if wtz:
-        env["WEATHER_TZ"] = wtz
 svc = {
     "container_name": name,
     "restart": "unless-stopped",
@@ -244,23 +219,27 @@ svc = {
 }
 if ts != "0":
     svc["volumes"].append(serve + ":/serve/serve.json:ro")
-if mode == "image":
-    svc["image"] = image
-    # read-write, and not at /app: the entrypoint copies the two cron scripts
-    # back out to the host here, so an image update carries them along
-    svc["volumes"].insert(0, base + "/app:/hostapp")
-else:
-    svc["image"] = "python:3.13-alpine"
-    svc["command"] = ["python", "-u", "/app/server.py"]
-    svc["volumes"].insert(0, base + "/app:/app:ro")
+svc["image"] = image
+# read-write, and not at /app: the entrypoint copies the cron scripts back out
+# to the host here, so an image update carries them along
+svc["volumes"].insert(0, base + "/app:/hostapp")
 compose = {"services": {name: svc}}
-r = subprocess.run(["midclt", "call", "-j", "app.create", json.dumps(
-    {"custom_app": True, "app_name": name, "custom_compose_config": compose})],
-    capture_output=True, text=True)
-print("   app.create rc=%s %s" % (r.returncode, (r.stderr or "").strip()[:160]))
+if reinstall == "1":
+    r = subprocess.run(["midclt", "call", "-j", "app.update", name, json.dumps(
+        {"custom_compose_config": compose})], capture_output=True, text=True)
+    print("   app.update rc=%s %s" % (r.returncode, (r.stderr or "").strip()[:160]))
+    if r.returncode == 0:
+        # app.update applies the compose and leaves the app stopped
+        subprocess.run(["midclt", "call", "-j", "app.start", name],
+                       capture_output=True, text=True)
+else:
+    r = subprocess.run(["midclt", "call", "-j", "app.create", json.dumps(
+        {"custom_app": True, "app_name": name, "custom_compose_config": compose})],
+        capture_output=True, text=True)
+    print("   app.create rc=%s %s" % (r.returncode, (r.stderr or "").strip()[:160]))
 sys.exit(r.returncode)
 PY
-[ $? -eq 0 ] || die "app.create failed"
+[ $? -eq 0 ] || die "could not create the app"
 
 # ---------------------------------------------------------------- serve entry
 if [ "$TS" = 2 ]; then
@@ -296,6 +275,9 @@ fi
 say "installing the two root cron jobs"
 for pair in "collect.sh|$APP_NAME pool stats" "worker.sh|$APP_NAME upgrade worker"; do
   f="${pair%%|*}"; desc="${pair#*|}"
+  if midclt call cronjob.query 2>/dev/null | grep -q "$BASE/app/$f"; then
+    info "already registered: $desc"; continue
+  fi
   midclt call cronjob.create "{\"user\":\"root\",\"command\":\"sh $BASE/app/$f\",
     \"description\":\"$desc\",\"enabled\":true,\"stdout\":false,\"stderr\":false,
     \"schedule\":{\"minute\":\"*\",\"hour\":\"*\",\"dom\":\"*\",\"month\":\"*\",\"dow\":\"*\"}}" \
@@ -312,7 +294,6 @@ cat <<EOF
    It takes a minute or two to look right: the pool, temperature and power
    figures come from the cron job, which runs on the minute.
 
-   Packaging  $MODE
    Files      $BASE/app
    Data       $BASE/data
 
