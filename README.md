@@ -22,7 +22,7 @@ add and remove things.
   queues the upgrade and a recursive ZFS snapshot is taken first. Dashy updates
   itself the same way, straight from this repository.
 - **Make it yours.** Hold a tile to drag it, hide it, or resize it: normal,
-  double width with a sparkline, or 4x — two by two, with a full-height chart. Light, dark or system theme and twelve accent colours.
+  double width with a sparkline, or 4x — two by two, with a full-height chart. Light, dark or system theme and seven accent colours.
   **Layout and theme are stored on the server**, so they follow you to every
   device and apply within seconds without a refresh.
 - **Tailnet or local, your choice.** One switch decides whether a tile opens

@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.12.1"
+APP_VERSION = "0.12.2"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -891,7 +891,9 @@ def layout_path():
 
 _LISTS = ("order", "hidden", "wide")
 _THEMES = ("system", "light", "dark")
-_ACCENTS = ("teal", "blue", "violet", "amber", "rose", "green")
+# Must match ACCENTS in the page. When it did not, every accent added to the
+# page but not to this tuple was accepted by the UI and dropped on save.
+_ACCENTS = ("teal", "blue", "violet", "amber", "yellow", "rose", "green")
 _prefs_cache = {"mtime": None, "data": None}
 
 
@@ -1357,7 +1359,7 @@ PAGE = """<!doctype html>
   .seg button[aria-pressed="true"]{background:var(--panel);color:var(--ink);
                                    box-shadow:0 1px 3px rgba(0,0,0,.12)}
 
-  .sw{display:grid;grid-template-columns:repeat(6,24px);gap:9px;
+  .sw{display:grid;grid-template-columns:repeat(7,24px);gap:8px;
       justify-content:space-between;padding:4px 10px 10px}
   .sw button{width:24px;height:24px;border-radius:50%;border:2px solid transparent;
              cursor:pointer;padding:0;transition:transform .14s ease}
@@ -2008,17 +2010,12 @@ const CARDK=CARDS.map(c=>c.k);
 const PKEY='dashy.prefs.v2';
 const ACCENTS={
   teal:  {light:'#0d9488', dark:'#14b8a6'},
-  green: {light:'#1fa971', dark:'#34d399'},
-  lime:  {light:'#5f9b0f', dark:'#a3d94a'},
-  amber: {light:'#d9820a', dark:'#f0a92c'},
-  orange:{light:'#e2620e', dark:'#fb923c'},
-  rose:  {light:'#e0443a', dark:'#f87171'},
-  pink:  {light:'#d6337e', dark:'#f472b6'},
-  violet:{light:'#6d4aff', dark:'#8b6cff'},
-  indigo:{light:'#4457e0', dark:'#818cf8'},
   blue:  {light:'#2f6df6', dark:'#5b8cff'},
-  sky:   {light:'#0585b5', dark:'#38bdf8'},
-  slate: {light:'#55657a', dark:'#94a3b8'}
+  violet:{light:'#6d4aff', dark:'#8b6cff'},
+  amber: {light:'#d9820a', dark:'#f0a92c'},
+  yellow:{light:'#dcae00', dark:'#fcd34d'},
+  rose:  {light:'#e0443a', dark:'#f87171'},
+  green: {light:'#1fa971', dark:'#34d399'}
 };
 const DEFAULTS={theme:'system', accent:'teal', order:CARDK.slice(), hidden:[], wide:[], size:{},
                 setup:{}, weather:null};
