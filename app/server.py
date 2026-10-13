@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.12.4"
+APP_VERSION = "0.12.5"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1216,7 +1216,7 @@ PAGE = """<!doctype html>
       --ok:#34d399; --warn:#fbbf24; --bad:#f87171;
       --accent:#5b8cff; --brand:#14b8a6;
       --shadow:0 1px 2px rgba(0,0,0,.4), 0 18px 42px -18px rgba(0,0,0,.7);
-      --wash1:30%; --wash2:19%; --wash3:14%;
+      --wash1:30%; --wash2:19%; --wash3:14%; --wash4:13%;
       color-scheme:dark;
     }
   }
@@ -1226,7 +1226,7 @@ PAGE = """<!doctype html>
       --ok:#34d399; --warn:#fbbf24; --bad:#f87171;
       --accent:#5b8cff; --brand:#14b8a6;
       --shadow:0 1px 2px rgba(0,0,0,.4), 0 18px 42px -18px rgba(0,0,0,.7);
-      --wash1:30%; --wash2:19%; --wash3:14%;
+      --wash1:30%; --wash2:19%; --wash3:14%; --wash4:13%;
       color-scheme:dark;
   }
   :root[data-theme="light"]{color-scheme:light}
@@ -1237,18 +1237,34 @@ PAGE = """<!doctype html>
   /* A soft wash of the chosen accent. Fixed and behind everything, so it never
      repaints on scroll, and it follows --brand automatically when the accent
      changes. Lighter in light mode, deeper and cooler in dark. */
-  body::before{content:"";position:fixed;inset:-10%;z-index:-1;pointer-events:none;
+  /* The wash belongs to the root element, because the root's background is
+     what paints the canvas - every pixel of the window, including the strips
+     behind a phone's status bar and the browser's own toolbar. It used to be a
+     fixed pseudo-element inside body, which only ever covers the viewport, so
+     the colour stopped dead at the top and bottom of a phone screen while
+     running happily down both sides. */
+  html{
     background:
       radial-gradient(64% 56% at 6% -2%,
         color-mix(in srgb, var(--brand) var(--wash1,24%), transparent), transparent 72%),
       radial-gradient(58% 50% at 104% 6%,
         color-mix(in srgb, var(--accent) var(--wash2,15%), transparent), transparent 70%),
-      /* a third low on the right, so the page below the cards is not flat grey */
+      /* a third low on the right, so the page below the cards is not flat grey,
+         and a fourth low on the left so the colour wraps all four corners
+         rather than leaving one of them conspicuously plain */
       radial-gradient(56% 44% at 96% 98%,
-        color-mix(in srgb, var(--brand) var(--wash3,11%), transparent), transparent 72%);}
-  :root{--wash1:24%;--wash2:15%;--wash3:11%}
+        color-mix(in srgb, var(--brand) var(--wash3,11%), transparent), transparent 72%),
+      radial-gradient(52% 42% at 2% 102%,
+        color-mix(in srgb, var(--accent) var(--wash4,10%), transparent), transparent 72%),
+      var(--bg);
+    background-attachment:fixed,fixed,fixed,fixed,fixed;
+    background-repeat:no-repeat;
+    min-height:100%;
+  }
+  :root{--wash1:24%;--wash2:15%;--wash3:11%;--wash4:10%}
   body{
-    margin:0;background:var(--bg);color:var(--ink);
+    /* transparent, or it would paint over the root's wash */
+    margin:0;background:transparent;color:var(--ink);
     padding:calc(env(safe-area-inset-top,0px) + 18px) 0 calc(env(safe-area-inset-bottom,0px) + 28px);
     font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
     -webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%;
@@ -1323,8 +1339,16 @@ PAGE = """<!doctype html>
   /* a check that takes two seconds and says nothing looks like a dead button */
   #mi-check[data-state="busy"] svg{animation:spin .85s linear infinite;
                                    transform-origin:50% 50%}
-  #mi-self[data-state="running"] svg{animation:spin 1.1s linear infinite;
-                                     transform-origin:50% 50%}
+  /* a spinner says "busy"; three dots in sequence say "working through it",
+     which is what an update actually is */
+  .dots{display:inline-flex;align-items:center;justify-content:center;
+        gap:3px;width:16px;height:16px;flex:0 0 auto;align-self:center}
+  .dots i{width:4px;height:4px;border-radius:50%;background:currentColor;
+          opacity:.22;animation:blink 1.2s ease-in-out infinite}
+  .dots i:nth-child(2){animation-delay:.2s}
+  .dots i:nth-child(3){animation-delay:.4s}
+  @keyframes blink{0%,66%,100%{opacity:.22}33%{opacity:1}}
+  @media (prefers-reduced-motion:reduce){ .dots i{animation:none;opacity:.6} }
   .mscrim[hidden]{display:none}
   #settings.dot{position:relative}
   #settings.dot::after{content:'';position:absolute;top:5px;right:5px;width:7px;height:7px;
@@ -1747,6 +1771,7 @@ PAGE = """<!doctype html>
           <button class="mi" id="mi-self" type="button" role="menuitem">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
                  stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+            <span class="dots" id="mi-selfdots" hidden><i></i><i></i><i></i></span>
             <span id="mi-selftxt">Update Dashy</span><span class="rt" id="mi-selfver"></span></button>
           <div class="msep"></div>
           <p class="mh">Appearance</p>
@@ -2760,6 +2785,10 @@ function paintSelfUpdate(){
   const gear=$('settings');
   const set=(state, label, right)=>{
     b.dataset.state=state;
+    // swap the arrow for the dots while it is actually doing something
+    const ic=b.querySelector('svg'), dots=$('mi-selfdots');
+    if(ic) ic.style.display = state==='running' ? 'none' : '';
+    if(dots) dots.hidden = state!=='running';
     if(txt) txt.textContent=label;
     if(ver) ver.textContent=right||'';
     if(gear) gear.classList.toggle('dot', state==='ready');
