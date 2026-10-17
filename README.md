@@ -12,8 +12,14 @@ add and remove things.
 ## What it does
 
 - **Live vitals.** CPU, memory, temperatures, pool capacity, disk and network
-  throughput. Every tile opens a detail sheet with per-core figures, drive
-  temperatures, SMART state, throughput history and an uptime record.
+  throughput. The cards stay quiet; the detail is a tap away.
+- **Tap a tile and it says why.** CPU and memory name the processes using
+  them, labelled with the app they belong to, sampled on the host two seconds
+  apart rather than averaged over each process's life. Storage adds scrub
+  state, fragmentation and ZFS's read, write and checksum counters, which are
+  where a failing disk shows up first. Drives carry model, hours and SMART
+  state. Health lists what actually wants you: a Dashy update, app updates,
+  anything not responding, a pool filling up, a drive running warm.
 - **Your apps, found automatically.** Nothing is hard-coded and nothing to
   configure. Every app on the NAS gets a tile, with its real icon, version and
   status. If you use Tailscale Serve, the apps you publish get their tailnet

@@ -111,6 +111,159 @@ for a in apps:
         pass
 PYICON
 
+# --- what is actually using the machine right now. The container cannot see
+# --- host processes (no pid namespace sharing), so sample here. Two reads of
+# --- /proc two seconds apart give a real instantaneous figure; ps would give
+# --- the average since each process started, which is a different question.
+# ---
+# --- A process inside a container has /docker/<id> in its cgroup, and root can
+# --- read that container's metadata to recover the app it belongs to - so a
+# --- spike can be blamed on "plex" rather than on "Plex Media Server".
+python3 - "$D" <<'PYPROC'
+import json, os, sys, time
+
+D = sys.argv[1]
+HZ = os.sysconf("SC_CLK_TCK")
+PAGE = os.sysconf("SC_PAGE_SIZE")
+
+
+def sample():
+    out = {}
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open("/proc/%s/stat" % pid) as f:
+                st = f.read()
+            # comm is parenthesised and may itself contain spaces or brackets
+            head, _, rest = st.rpartition(")")
+            comm = head.partition("(")[2]
+            f = rest.split()
+            out[pid] = (comm, int(f[11]) + int(f[12]), int(f[21]) * PAGE)
+        except Exception:
+            continue
+    return out
+
+
+def appname(pid, cache, root):
+    try:
+        with open("/proc/%s/cgroup" % pid) as f:
+            cg = f.read()
+    except Exception:
+        return ""
+    i = cg.find("/docker/")
+    if i < 0:
+        return ""
+    cid = cg[i + 8:].split("\n")[0].strip().split("/")[0]
+    if len(cid) < 12:
+        return ""
+    if cid in cache:
+        return cache[cid]
+    name = ""
+    try:
+        with open(os.path.join(root, "containers", cid, "config.v2.json")) as f:
+            meta = json.load(f)
+        # Compose records the project, which on TrueNAS is the app name. The
+        # container name is /ix-<app>-<service>-<n>, and an app whose name has
+        # a hyphen in it makes that unsplittable - so only fall back to it.
+        labels = ((meta.get("Config") or {}).get("Labels") or {})
+        name = labels.get("com.docker.compose.project") or ""
+        if not name:
+            raw = (meta.get("Name") or "").lstrip("/")
+            name = raw[3:].rsplit("-", 2)[0] if raw.startswith("ix-") else raw
+    except Exception:
+        name = ""
+    cache[cid] = name
+    return name
+
+
+root = "/var/lib/docker"
+try:
+    import subprocess
+    cfg = json.loads(subprocess.run(["midclt", "call", "docker.config"],
+                                    capture_output=True, text=True, timeout=30).stdout)
+    if cfg.get("dataset"):
+        root = "/mnt/%s/docker" % cfg["dataset"]
+except Exception:
+    pass
+
+a = sample()
+time.sleep(2)
+b = sample()
+
+cache, rows = {}, []
+for pid, (comm, ticks, rss) in b.items():
+    if pid not in a:
+        continue
+    pct = (ticks - a[pid][1]) * 100.0 / (2.0 * HZ)
+    if pct < 0:
+        pct = 0.0
+    rows.append({"pid": int(pid), "comm": comm, "app": appname(pid, cache, root),
+                 "cpu": round(pct, 1), "rss": rss})
+
+rows.sort(key=lambda r: -r["cpu"])
+top_cpu = [r for r in rows if r["cpu"] > 0][:8]
+rows.sort(key=lambda r: -r["rss"])
+top_mem = rows[:8]
+
+tmp = D + "/procs.json.tmp"
+with open(tmp, "w") as f:
+    json.dump({"at": int(time.time()), "cpu": top_cpu, "mem": top_mem,
+               "ncpu": os.cpu_count()}, f)
+os.replace(tmp, D + "/procs.json")
+PYPROC
+
+# --- pool health beyond "ONLINE": scrubs, and the three error counters that
+# --- are the first sign of a disk going. zpool list cannot report any of it.
+python3 - "$D" <<'PYSTATUS'
+import json, os, re, subprocess, sys
+
+D = sys.argv[1]
+out = {}
+try:
+    names = subprocess.run(["zpool", "list", "-Hp", "-o", "name"],
+                           capture_output=True, text=True, timeout=30).stdout.split()
+except Exception:
+    names = []
+
+for name in names:
+    try:
+        txt = subprocess.run(["zpool", "status", name],
+                             capture_output=True, text=True, timeout=60).stdout
+    except Exception:
+        continue
+    rec = {"scan": "", "errors": "", "read": 0, "write": 0, "cksum": 0, "frag": None}
+
+    m = re.search(r"^\s*scan:\s*(.+?)(?=^\s*\w+:|\Z)", txt, re.S | re.M)
+    if m:
+        rec["scan"] = " ".join(m.group(1).split())
+    m = re.search(r"^\s*errors:\s*(.+)$", txt, re.M)
+    if m:
+        rec["errors"] = m.group(1).strip()
+
+    # the per-vdev counters, summed: anything non-zero is worth surfacing
+    for line in txt.splitlines():
+        f = line.split()
+        if len(f) >= 5 and f[1] in ("ONLINE", "DEGRADED", "FAULTED", "OFFLINE",
+                                    "UNAVAIL", "REMOVED"):
+            try:
+                rec["read"] += int(f[2]); rec["write"] += int(f[3]); rec["cksum"] += int(f[4])
+            except ValueError:
+                pass
+    try:
+        frag = subprocess.run(["zpool", "list", "-Hp", "-o", "frag", name],
+                              capture_output=True, text=True, timeout=30).stdout.strip()
+        rec["frag"] = int(frag.rstrip("%")) if frag not in ("", "-") else None
+    except Exception:
+        pass
+    out[name] = rec
+
+tmp = D + "/poolstatus.json.tmp"
+with open(tmp, "w") as f:
+    json.dump(out, f)
+os.replace(tmp, D + "/poolstatus.json")
+PYSTATUS
+
 # --- CPU package power. RAPL is root-only, so sample it here and leave a trail
 # --- the container can read. 25 samples at 2s covers most of each minute.
 E=/sys/class/powercap/intel-rapl:0/energy_uj

@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.13.0"
+APP_VERSION = "0.14.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -538,6 +538,26 @@ def cpu_temp_now():
         return round(int(raw) / 1000.0, 1)
     except ValueError:
         return None
+
+
+def _read_json(name, default):
+    """A file the root cron job writes. Missing or half-written is normal:
+    it is replaced by rename, but it does not exist at all until the first run."""
+    try:
+        return json.loads(_read(os.path.join(DATA, name)) or "null") or default
+    except ValueError:
+        return default
+
+
+def procs_now():
+    """Top processes by CPU and by memory, sampled on the host - the container
+    has its own pid namespace and can see only itself."""
+    return _read_json("procs.json", {})
+
+
+def pool_status():
+    """Scrub state and error counters, which zpool list does not carry."""
+    return _read_json("poolstatus.json", {})
 
 
 def drives_now():
@@ -1179,6 +1199,8 @@ def snapshot():
     out["prefs"] = load_prefs()
     out["detected"] = detect()
     out["selfupdate"] = self_update()
+    out["procs"] = procs_now()
+    out["poolstatus"] = pool_status()
     out["links"] = header_links(svc, (out["prefs"] or {}).get("setup"))
     return out
 
@@ -1537,7 +1559,6 @@ PAGE = """<!doctype html>
   button.card{width:100%;text-align:left;font:inherit;color:inherit;
               cursor:pointer;appearance:none;
               transition:transform .15s ease, border-color .15s ease}
-  .card .meterw{margin-top:auto}
   /* The alarm is the card, not the digit. A red number inside an identical
      white box does not read as "this one needs you". */
   .cardwrap[data-state="warn"] .card{border-color:color-mix(in srgb,var(--warn) 45%,var(--brd));
@@ -1565,8 +1586,6 @@ PAGE = """<!doctype html>
 
   /* margin-top:auto pins the bar to the bottom but guarantees nothing above
      it, so the wrapper keeps the pin and sets a floor on the gap */
-  .meterw{margin-top:auto;padding-top:11px;padding-bottom:2px}
-  .meter{height:3px;border-radius:2px;background:var(--faint);overflow:hidden;flex:0 0 auto}
   .meter.sm{height:3px}
   .meter i{display:block;height:100%;border-radius:2px;background:var(--accent);width:0;
            transition:width .7s cubic-bezier(.4,0,.2,1), background .4s ease}
@@ -1631,6 +1650,31 @@ PAGE = """<!doctype html>
   .sheet-b{overflow-y:auto;padding:6px 0 8px;-webkit-overflow-scrolling:touch;
            overscroll-behavior:contain}
 
+  /* a heading inside a sheet, so a long sheet reads as sections */
+  .shead{margin:14px 16px 4px;font-size:10.5px;font-weight:700;letter-spacing:.085em;
+         text-transform:uppercase;color:var(--muted)}
+  .shead:first-child{margin-top:4px}
+  .shead .t2{display:inline;text-transform:none;letter-spacing:0;font-weight:600}
+  /* one finding: a coloured dot, a sentence, and the detail under it */
+  .srow{display:flex;align-items:flex-start;gap:10px;padding:9px 16px;
+        border-bottom:1px solid var(--faint)}
+  .srow:last-child{border-bottom:none}
+  .srow .l{min-width:0;flex:1 1 auto}
+  .srow .t2{white-space:normal;overflow:visible}
+  .sdotL{width:7px;height:7px;border-radius:50%;flex:0 0 auto;margin-top:5px;
+         background:var(--ok)}
+  .srow[data-level="warn"] .sdotL{background:var(--warn)}
+  .srow[data-level="bad"] .sdotL{background:var(--bad)}
+  .srow[data-level="warn"] .t1{color:var(--warn)}
+  .srow[data-level="bad"] .t1{color:var(--bad)}
+  button.srow{width:100%;background:none;font:inherit;color:inherit;text-align:left;
+              cursor:pointer;border-left:none;border-right:none;border-top:none}
+  button.srow .t1::after{content:" \u203a";color:var(--muted);font-weight:700}
+  .allok{padding:22px 16px 18px;text-align:center}
+  .allok p{margin:0;font-weight:650;font-size:14px}
+  .allok .t2{margin-top:5px;white-space:normal;font-weight:500}
+  .pnote{margin:-2px 16px 11px;font-size:11.5px;color:var(--muted);line-height:1.45}
+  .pnote.bad{color:var(--bad);font-weight:600}
   .row{display:flex;align-items:center;gap:10px;padding:10px 16px;
        border-bottom:1px solid var(--faint)}
   .row:last-child{border-bottom:none}
@@ -1995,19 +2039,6 @@ function rateParts(b){
   return [(b/1e9).toFixed(2),'GB/s'];
 }
 function rate(b){ const p=rateParts(b); return p[1]? p[0]+' '+p[1] : p[0]; }
-/* Cards only carry a bar where a proportion exists, so every one of these is
-   allowed to be missing. */
-function setBar(id, pct, lvl){
-  const el=$(id); if(!el) return;
-  el.style.width=Math.max(0,Math.min(100,pct))+'%';
-  if(lvl) el.dataset.level=lvl;
-}
-function setMeter(el,pct){ if(!el) return;
-  el.style.width=Math.max(0,Math.min(100,pct))+'%'; el.dataset.level=level(pct); }
-// for bars where a FULL bar is the healthy state, like apps up or availability
-function setMeterUp(el,pct){ if(!el) return;
-  el.style.width=Math.max(0,Math.min(100,pct))+'%';
-  el.dataset.level = pct>=99.5 ? 'good' : pct>=90 ? 'warn' : 'bad'; }
 function when(ts){ return new Date(ts*1000).toLocaleDateString([], {day:'numeric',month:'short',year:'2-digit'}); }
 
 
@@ -2016,7 +2047,7 @@ function when(ts){ return new Date(ts*1000).toLocaleDateString([], {day:'numeric
 const CARDS=[
   {k:'health',label:'Health', sec:'system', kind:'health'},
   {k:'cpu',   label:'Processor', sec:'system', trend:1},
-  {k:'mem',   label:'Memory',    sec:'system', bar:1},
+  {k:'mem',   label:'Memory',    sec:'system'},
   {k:'ctemp', label:'CPU temp',  sec:'system', trend:1},
   {k:'net',   label:'Network',   sec:'system', trend:1},
   {k:'dtemp', label:'Drive temps', sec:'storage'}
@@ -2438,7 +2469,7 @@ function cardHTML(c){
   // the one card that answers a question rather than reporting a number
   if(c.kind==='health'){
     return '<div class="cardwrap" data-k="'+c.k+'"><div class="jig">'+
-             '<button class="card hcard" data-pop="up">'+
+             '<button class="card hcard" data-pop="system">'+
                '<p class="lbl">Health</p>'+
                '<p class="hv" id="v-health">\u2013</p>'+
                '<p class="sub" id="s-health"></p>'+
@@ -2451,8 +2482,7 @@ function cardHTML(c){
         '<p class="big" id="v-'+c.k+'">\u2013</p></div>'+
       '<p class="sub" id="s-'+c.k+'"></p>'
     : '<p class="big" id="v-'+c.k+'">\u2013</p><p class="sub" id="s-'+c.k+'"></p>';
-  const body = head + (c.bar
-    ? '<div class="meterw"><div class="meter"><i id="m-'+c.k+'"></i></div></div>' : '');
+  const body = head;
   const spark = c.trend
     ? '<div class="sparkwrap"><svg class="spark" id="k-'+c.k+
       '" preserveAspectRatio="none" viewBox="0 0 160 20"></svg></div>' : '';
@@ -2472,7 +2502,7 @@ function cardHTML(c){
    to know. */
 function poolCards(){
   return ((data&&data.pools)||[]).map(p=>({
-    k:'pool-'+p.name, label:p.name, sec:'storage', bar:1, pop:'store', pool:p.name}));
+    k:'pool-'+p.name, label:p.name, sec:'storage', pop:'store', pool:p.name}));
 }
 function layoutSig(){
   const pools=((data&&data.pools)||[]).map(p=>p.name).join(',');
@@ -2595,14 +2625,12 @@ function paint(d){
 
   if(d.cpu!==null && d.cpu!==undefined){
     $('v-cpu').innerHTML=d.cpu.toFixed(0)+'<small>%</small>';
-    setMeter($('m-cpu'), d.cpu);
   }
   $('s-cpu').textContent=d.cores+' threads'+(d.power?' \\u00b7 '+d.power+' W':'');
 
   if(d.mem){
     const p=(d.mem.apps_pct!==undefined)?d.mem.apps_pct:d.mem.pct;
     $('v-mem').innerHTML=p.toFixed(0)+'<small>%</small>';
-    setMeter($('m-mem'), p);
     $('s-mem').textContent=ram(d.mem.apps!==undefined?d.mem.apps:d.mem.used)+' of '+ram(d.mem.total)
       +(d.mem.arc?' \\u00b7 '+ram(d.mem.arc)+' cache':'');
   }
@@ -2610,8 +2638,6 @@ function paint(d){
   if(d.cpu_temp!==null && d.cpu_temp!==undefined){
     $('v-ctemp').innerHTML=d.cpu_temp.toFixed(0)+'<small>\\u00b0C</small>';
     $('v-ctemp').style.color=d.cpu_temp>=85?'var(--bad)':d.cpu_temp>=75?'var(--warn)':'';
-    const w=Math.max(4,Math.min(100,(d.cpu_temp-25)/70*100));
-    setBar('m-ctemp', w, d.cpu_temp>=85?'bad':d.cpu_temp>=75?'warn':'ok');
   }
   const ct=d.core_temps||[];
   $('s-ctemp').textContent=ct.length? ct.length+' cores' : 'package sensor';
@@ -2623,8 +2649,6 @@ function paint(d){
     $('v-dtemp').innerHTML=(lo===hi?lo:lo+'\\u2013'+hi)+'<small>\\u00b0C</small>';
     $('v-dtemp').style.color=worst==='bad'?'var(--bad)':worst==='warn'?'var(--warn)':'';
     $('s-dtemp').textContent=dr.length+' drives';
-    const w=Math.max(4,Math.min(100,(hi-20)/45*100));
-    setBar('m-dtemp', w, worst);
   }
 
   (d.pools||[]).forEach(p=>{
@@ -2637,7 +2661,6 @@ function paint(d){
     $('s-'+k).textContent = (health && health!=='ONLINE')
       ? health
       : used[0]+' of '+tot[0]+tot[1]+' \u00b7 '+p.pct.toFixed(0)+'% full';
-    setBar('m-'+k, p.pct, p.pct>=90?'bad':p.pct>=85?'warn':'ok');
     const w=document.querySelector('.cardwrap[data-k="'+k+'"]');
     if(w) w.dataset.state = (health && health!=='ONLINE') ? 'bad'
                           : p.pct>=90 ? 'warn' : '';
@@ -3039,6 +3062,23 @@ function memBreakdown(){
       '<span class="val">'+ram(m.total-apps)+'</span></div>';
 }
 
+// zpool list says ONLINE and nothing else. The counters below it are where
+// a disk on its way out shows up first.
+function poolNote(name){
+  const st = (data.poolstatus || {})[name];
+  if (!st) return '';
+  const bits = [];
+  const sw = scrubWord(st);
+  if (sw) bits.push(sw);
+  if (st.frag !== null && st.frag !== undefined) bits.push(st.frag + '% fragmented');
+  const errs = (st.read||0) + (st.write||0) + (st.cksum||0);
+  const bad = errs > 0 || (st.errors && st.errors !== 'No known data errors');
+  if (errs) bits.push(st.read + ' read / ' + st.write + ' write / ' + st.cksum + ' checksum errors');
+  else if (st.errors) bits.push(st.errors.toLowerCase());
+  if (!bits.length) return '';
+  return '<p class="pnote'+(bad ? ' bad' : '')+'">'+bits.join('  \u00b7  ')+'</p>';
+}
+
 function rowsPools(){
   return (data.pools||[]).map(p=>{
     const ok=(p.health||'').toUpperCase()==='ONLINE', lv=level(p.pct);
@@ -3047,8 +3087,9 @@ function rowsPools(){
       '<span class="t2">'+disk(p.used)+' used \\u00b7 '+disk(p.free)+' free of '+disk(p.size)+'</span></span>'+
       '<span class="smart '+(ok?'ok':'bad')+'">'+(p.health||'?')+'</span>'+
       '<span class="val" data-level="'+lv+'">'+p.pct.toFixed(0)+'%</span></div>'+
-      '<div class="stackbar" style="height:10px;margin:0 16px 12px">'+
-        '<i style="width:'+p.pct+'%;background:'+col+'"></i></div>';
+      '<div class="stackbar" style="height:10px;margin:0 16px 8px">'+
+        '<i style="width:'+p.pct+'%;background:'+col+'"></i></div>'+
+      poolNote(p.name);
   }).join('') || '<div class="row"><span class="t2">No pool data.</span></div>';
 }
 
@@ -3064,6 +3105,163 @@ function rowsDrives(){
       '<span class="val"'+(x.level?' data-level="'+x.level+'"':'')+'>'+
         (typeof x.temp==='number'?x.temp+'\\u00b0':'\\u2013')+'</span></div>';
   }).join('') || '<div class="row"><span class="t2">No drive data.</span></div>';
+}
+
+// Sampled on the host by the cron job: the container has its own pid
+// namespace and can see nothing but itself.
+// Load is the one number that says whether the machine is keeping up: it
+// counts what is waiting, not what is busy. Against the core count it reads
+// as a ratio rather than a bare figure.
+function loadRow(){
+  const l = data.load || [];
+  if (!l.length) return '';
+  const n = (data.procs && data.procs.ncpu) || (data.cpu_cores || 0);
+  const lv = n ? (l[0] >= n ? 'bad' : l[0] >= n * .7 ? 'warn' : 'ok') : '';
+  return '<div class="row"><span class="l"><span class="t1">Load average</span>'+
+    '<span class="t2">'+l.map(x=>x.toFixed(2)).join('  \u00b7  ')+
+    '  over 1, 5 and 15 min'+(n ? ' \u00b7 '+n+' cores' : '')+'</span></span>'+
+    '<span class="val"'+(lv ? ' data-level="'+lv+'"' : '')+'>'+l[0].toFixed(2)+'</span></div>';
+}
+
+function rowsProcs(kind){
+  const pr = data.procs || {};
+  const list = (kind === 'cpu' ? pr.cpu : pr.mem) || [];
+  if (!list.length)
+    return '<div class="row"><span class="t2">No process data yet — '+
+           'the collector writes it once a minute.</span></div>';
+  const age = pr.at ? Math.max(0, Math.round(Date.now()/1000 - pr.at)) : null;
+  const head = '<p class="shead">Using the most '+
+    (kind === 'cpu' ? 'CPU <span class="t2">% of one core</span>' : 'memory')+
+    (age !== null ? ' <span class="t2">'+(age < 90 ? 'just now' : agoWord(age))+'</span>' : '')+'</p>';
+  return head + list.map(r => {
+    const val = kind === 'cpu' ? r.cpu.toFixed(0)+'%' : ram(r.rss);
+    const side = kind === 'cpu' ? ram(r.rss)+' resident' : r.cpu.toFixed(0)+'% CPU';
+    return '<div class="row">'+
+      (r.app ? '<span class="tag">'+esc(r.app)+'</span>' : '')+
+      '<span class="l"><span class="t1">'+esc(r.comm)+'</span>'+
+      '<span class="t2">pid '+r.pid+' · '+side+'</span></span>'+
+      '<span class="val">'+val+'</span></div>';
+  }).join('');
+}
+
+function agoWord(sec){
+  if (sec < 90) return 'just now';
+  if (sec < 5400) return Math.round(sec/60)+' min ago';
+  if (sec < 172800) return Math.round(sec/3600)+' h ago';
+  const d = Math.round(sec/86400);
+  if (d < 14) return d+' days ago';
+  if (d < 60) return Math.round(d/7)+' weeks ago';
+  return Math.round(d/30.4)+' months ago';
+}
+
+// Everything the dashboard knows that wants a human decision, in one place.
+// The Health tile used to open the uptime record, which answered a question
+// nobody asked of it.
+function rowsSystem(){
+  const out = [];
+  const svc = data.services || [];
+  const down = svc.filter(s => !s.code);
+  const upd = svc.filter(s => s.update);
+  const su = data.selfupdate || {};
+  const pools = data.pools || [];
+  const drives = data.drives || [];
+  const ps = data.poolstatus || {};
+
+  if (su.available)
+    out.push(srow('bad', 'Dashy ' + su.latest + ' is available',
+                  'You are on ' + (su.current || data.version) +
+                  '. Install it from the settings pane.'));
+
+  if (upd.length)
+    out.push(srow('warn', upd.length === 1 ? upd[0].name + ' has an update'
+                                           : upd.length + ' apps have updates',
+                  upd.map(s => s.name).join(', ')));
+
+  if (down.length)
+    out.push(srow('bad', down.length === 1 ? down[0].name + ' is not responding'
+                                           : down.length + ' apps are not responding',
+                  down.map(s => s.name).join(', ')));
+
+  pools.forEach(p => {
+    const st = ps[p.name] || {};
+    const health = (p.health || '').toUpperCase();
+    if (health && health !== 'ONLINE')
+      out.push(srow('bad', p.name + ' is ' + health, 'Check the pool in TrueNAS.'));
+    else if (p.pct >= 90)
+      out.push(srow('bad', p.name + ' is ' + p.pct.toFixed(0) + '% full',
+                    disk(p.free) + ' left of ' + disk(p.size)));
+    else if (p.pct >= 85)
+      out.push(srow('warn', p.name + ' is ' + p.pct.toFixed(0) + '% full',
+                    disk(p.free) + ' left of ' + disk(p.size), 'pool'));
+    const errs = (st.read || 0) + (st.write || 0) + (st.cksum || 0);
+    if (errs)
+      out.push(srow('bad', p.name + ' has logged errors',
+                    st.read + ' read, ' + st.write + ' write, ' + st.cksum + ' checksum'));
+    if (st.errors && st.errors !== 'No known data errors')
+      out.push(srow('bad', p.name + ': ' + st.errors, ''));
+  });
+
+  drives.filter(d => d.ok === false).forEach(d =>
+    out.push(srow('bad', d.dev + ' failed its SMART check',
+                  (d.model || '') + (d.hours ? ' · ' + (d.hours/8766).toFixed(1) + ' yrs on' : ''),
+                  )));
+  drives.filter(d => d.level === 'bad').forEach(d =>
+    out.push(srow('bad', d.dev + ' is running hot', d.temp + '°C')));
+  drives.filter(d => d.level === 'warn').forEach(d =>
+    out.push(srow('warn', d.dev + ' is warm', d.temp + '°C')));
+
+  const head = out.length
+    ? '<p class="shead">' + out.length + (out.length === 1 ? ' thing wants' : ' things want') +
+      ' your attention</p>'
+    : '<div class="allok"><p>Nothing needs you.</p>' +
+      '<p class="t2">Every app is answering, every pool is online and no drive is warm.</p></div>';
+
+  // what is normal, so the sheet says something either way
+  const normal = [];
+  normal.push(srow('ok', 'Dashy ' + data.version,
+                   su.checked ? 'Checked for updates ' + agoWord(Math.max(0, Math.round(Date.now()/1000 - su.checked))) : ''));
+  normal.push(srow('ok', svc.length + ' apps installed',
+                   (svc.length - down.length) + ' responding'));
+  pools.forEach(p => {
+    const st = ps[p.name] || {};
+    normal.push(srow('ok', p.name + ' · ' + p.pct.toFixed(0) + '% full',
+                     scrubWord(st)));
+  });
+  if (data.uptime || data.uptime === 0)
+    normal.push(srow('ok', 'Up ' + upWord(data.uptime),
+                     'See the uptime record', 'up'));
+
+  return head + out.join('') +
+         '<p class="shead">Everything else</p>' + normal.join('');
+}
+
+// "scrub repaired 0B in 00:14:39 with 0 errors on Sun Oct 11 00:14:40 2026"
+// is accurate and unreadable. Keep the part that answers "is it healthy and
+// when was it last checked".
+function scrubWord(st){
+  const s = st.scan || '';
+  if (!s) return '';
+  let m = s.match(/scrub in progress.*?(\\d+(?:\\.\\d+)?)% done/);
+  if (m) return 'Scrub running · ' + m[1] + '% done';
+  m = s.match(/scrub repaired (\\S+) in \\S+ with (\\d+) errors on (.+)$/);
+  if (m) {
+    const when = new Date(m[3]);
+    const ago = isNaN(when) ? m[3] : agoWord(Math.round((Date.now() - when) / 1000));
+    return (m[2] === '0' ? 'Last scrub clean' : 'Last scrub found ' + m[2] + ' errors') +
+           ' · ' + ago;
+  }
+  if (/none requested/.test(s)) return 'Never scrubbed';
+  return s.length > 90 ? s.slice(0, 90) + '…' : s;
+}
+
+function srow(level, title, sub, pop){
+  const tag = pop ? 'button type="button" data-pop="' + pop + '"' : 'div';
+  return '<' + (pop ? tag : 'div') + ' class="srow' + (pop ? ' go' : '') +
+    '" data-level="' + level + '">' +
+    '<i class="sdotL"></i>' +
+    '<span class="l"><span class="t1">' + title + '</span>' +
+    (sub ? '<span class="t2">' + sub + '</span>' : '') + '</span>' +
+    '</' + (pop ? 'button' : 'div') + '>';
 }
 
 function rowsApps(){
@@ -3203,13 +3401,14 @@ function uptimeChart(){
 }
 
 const POPS={
-  cpu:   ()=>['CPU', powerChart()+
+  system:()=>['System', rowsSystem()],
+  cpu:   ()=>['CPU', loadRow()+powerChart()+
             (data.power!==null&&data.power!==undefined
               ? '<div class="row"><span class="l"><span class="t1">Package power</span>'+
                 '<span class="t2">whole chip \\u2014 this CPU reports no per-core figure</span></span>'+
                 '<span class="val">'+data.power+' W</span></div>' : '')+
-            rowsCores()],
-  mem:   ()=>['Memory', memChart()+memBreakdown()],
+            rowsProcs('cpu')+rowsCores()],
+  mem:   ()=>['Memory', memChart()+memBreakdown()+rowsProcs('mem')],
   ctemp: ()=>['Temperature by core',  rowsCoreTemps()],
   dtemp: ()=>['Drive temperatures',   rowsDrives()],
   store: ()=>['Storage', ioChart()+rowsIo()+rowsPools()],
