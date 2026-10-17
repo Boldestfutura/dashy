@@ -21,8 +21,12 @@ add and remove things.
 - **Updates from the dashboard.** Apps with an update show a marker; tapping it
   queues the upgrade and a recursive ZFS snapshot is taken first. Dashy updates
   itself the same way, straight from this repository.
-- **Make it yours.** Hold a tile to drag it, hide it, or resize it: normal,
-  double width with a sparkline, or 4x — two by two, with a full-height chart. Light, dark or system theme and seven accent colours.
+- **Grouped by what it is.** System, Storage and Apps, each under its own
+  heading, with a Health card that leads and says in words whether anything
+  needs you. A pool gets its own card rather than one aggregate number.
+- **Make it yours.** Hold a tile to resize or remove it: normal, double width
+  with a sparkline, or 4x — two by two, with a full-height chart. Light, dark
+  or system theme and seven accent colours.
   **Layout and theme are stored on the server**, so they follow you to every
   device and apply within seconds without a refresh.
 - **Tailnet or local, your choice.** One switch decides whether a tile opens
@@ -35,7 +39,7 @@ add and remove things.
 | ![Phone](docs/03-phone.png) | ![Apps](docs/04-apps.png) |
 | On a phone | Apps, with versions and update markers |
 | ![Settings](docs/05-settings.png) | ![Arrange](docs/06-arrange.png) |
-| Settings | Hold a tile to arrange: drag to reorder, **×** removes |
+| Settings | Hold a tile to arrange: **2×** resizes, **×** removes |
 
 ![An update waiting](docs/07-update.png)
 

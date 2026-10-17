@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.12.5"
+APP_VERSION = "0.13.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1216,7 +1216,6 @@ PAGE = """<!doctype html>
       --ok:#34d399; --warn:#fbbf24; --bad:#f87171;
       --accent:#5b8cff; --brand:#14b8a6;
       --shadow:0 1px 2px rgba(0,0,0,.4), 0 18px 42px -18px rgba(0,0,0,.7);
-      --wash1:30%; --wash2:19%; --wash3:14%; --wash4:13%;
       color-scheme:dark;
     }
   }
@@ -1226,7 +1225,6 @@ PAGE = """<!doctype html>
       --ok:#34d399; --warn:#fbbf24; --bad:#f87171;
       --accent:#5b8cff; --brand:#14b8a6;
       --shadow:0 1px 2px rgba(0,0,0,.4), 0 18px 42px -18px rgba(0,0,0,.7);
-      --wash1:30%; --wash2:19%; --wash3:14%; --wash4:13%;
       color-scheme:dark;
   }
   :root[data-theme="light"]{color-scheme:light}
@@ -1237,34 +1235,9 @@ PAGE = """<!doctype html>
   /* A soft wash of the chosen accent. Fixed and behind everything, so it never
      repaints on scroll, and it follows --brand automatically when the accent
      changes. Lighter in light mode, deeper and cooler in dark. */
-  /* The wash belongs to the root element, because the root's background is
-     what paints the canvas - every pixel of the window, including the strips
-     behind a phone's status bar and the browser's own toolbar. It used to be a
-     fixed pseudo-element inside body, which only ever covers the viewport, so
-     the colour stopped dead at the top and bottom of a phone screen while
-     running happily down both sides. */
-  html{
-    background:
-      radial-gradient(64% 56% at 6% -2%,
-        color-mix(in srgb, var(--brand) var(--wash1,24%), transparent), transparent 72%),
-      radial-gradient(58% 50% at 104% 6%,
-        color-mix(in srgb, var(--accent) var(--wash2,15%), transparent), transparent 70%),
-      /* a third low on the right, so the page below the cards is not flat grey,
-         and a fourth low on the left so the colour wraps all four corners
-         rather than leaving one of them conspicuously plain */
-      radial-gradient(56% 44% at 96% 98%,
-        color-mix(in srgb, var(--brand) var(--wash3,11%), transparent), transparent 72%),
-      radial-gradient(52% 42% at 2% 102%,
-        color-mix(in srgb, var(--accent) var(--wash4,10%), transparent), transparent 72%),
-      var(--bg);
-    background-attachment:fixed,fixed,fixed,fixed,fixed;
-    background-repeat:no-repeat;
-    min-height:100%;
-  }
-  :root{--wash1:24%;--wash2:15%;--wash3:11%;--wash4:10%}
+  html{background:var(--bg);min-height:100%}
   body{
-    /* transparent, or it would paint over the root's wash */
-    margin:0;background:transparent;color:var(--ink);
+    margin:0;background:var(--bg);color:var(--ink);
     padding:calc(env(safe-area-inset-top,0px) + 18px) 0 calc(env(safe-area-inset-bottom,0px) + 28px);
     font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
     -webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%;
@@ -1278,6 +1251,8 @@ PAGE = """<!doctype html>
   .id h1{font-size:clamp(20px,4.4vw,26px);margin:0;letter-spacing:-.02em;font-weight:700;
          display:flex;align-items:baseline;gap:8px;min-width:0}
   .id h1 .host{font-size:12.5px;font-weight:600;color:var(--muted);letter-spacing:0}
+  .beta{font-size:9.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
+        color:var(--muted);margin:1px 0 0}
   .id p{margin:1px 0 0;font-size:12.5px;color:var(--muted);
         overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .mark{width:34px;height:34px;flex:0 0 auto;border-radius:9px;
@@ -1406,11 +1381,6 @@ PAGE = """<!doctype html>
   body.editing .cardwrap:nth-child(2n) > .jig{animation-name:jigB}
   body.editing .cardwrap:nth-child(3n) > .jig{animation-delay:-.09s}
   body.editing .cardwrap:nth-child(5n) > .jig{animation-delay:-.17s}
-  body.editing .cardwrap.drag{z-index:40;pointer-events:none}
-  body.editing .cardwrap.drag > .jig{animation:none;transform:scale(1.06);
-                              opacity:.92}
-  body.editing .cardwrap.drag .card{box-shadow:0 18px 40px -12px rgba(0,0,0,.45)}
-  body.editing .cardwrap.slot{opacity:.35}
   @media (prefers-reduced-motion:reduce){
     body.editing .cardwrap > .jig{animation:none}
     .cardwrap{transition:none !important}
@@ -1486,12 +1456,12 @@ PAGE = """<!doctype html>
   .cardwrap[data-w="4"]{grid-column:span 2;grid-row:span 2}
   .cardwrap[data-w="4"] .jig,
   .cardwrap[data-w="4"] .card{min-height:100%}
-  .spark{margin-top:10px;height:46px;width:100%;display:block;overflow:visible}
-  .cardwrap[data-w="1"] .spark{display:none}
+  .spark{margin-top:0;height:20px;width:100%;display:block;overflow:visible}
+  .cardwrap[data-w="2"] .spark{height:40px}
   /* the container has a fixed height, so a taller chart drew straight out
      through the bottom of the card. Give it the room it is asking for. */
   .cardwrap[data-w="4"] .spark{margin-top:14px;height:132px}
-  .card .sparkwrap{margin-top:auto;padding-top:8px}
+  .card .sparkwrap{margin-top:auto;padding-top:10px;padding-bottom:1px}
   .cardwrap[data-w="2"] .card{min-height:168px}
 
 
@@ -1555,33 +1525,52 @@ PAGE = """<!doctype html>
   .setup .skip{display:block;width:100%;margin-top:8px;padding:8px;background:none;
                border:none;color:var(--muted);font:inherit;font-size:12.5px;cursor:pointer}
 
-  .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(178px,1fr));
-        grid-auto-rows:minmax(146px,auto)}
+  /* Structure comes from grouping, not from size. A section heading costs
+     eleven pixels and does more than any amount of typographic shouting. */
+  .sec{margin-bottom:22px}
+  .sec h2{font-size:11px;font-weight:700;letter-spacing:.085em;text-transform:uppercase;
+          color:var(--muted);margin:0 0 9px 2px}
+  .grid{display:grid;gap:9px;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));
+        grid-auto-rows:minmax(84px,auto)}
 
   .card{position:relative;background:var(--panel);border:1px solid var(--brd);
-        border-radius:var(--r);box-shadow:var(--shadow);padding:15px 16px;
-        min-height:146px;display:flex;flex-direction:column;align-items:stretch;
-        -webkit-backdrop-filter:blur(16px) saturate(165%);backdrop-filter:blur(16px) saturate(165%)}
+        border-radius:var(--r);padding:11px 12px;
+        min-height:84px;display:flex;flex-direction:column;align-items:stretch}
   button.card{width:100%;text-align:left;font:inherit;color:inherit;
               cursor:pointer;appearance:none;
               transition:transform .15s ease, border-color .15s ease}
-  .card .meter{margin-top:auto}
+  .card .meterw{margin-top:auto}
+  /* The alarm is the card, not the digit. A red number inside an identical
+     white box does not read as "this one needs you". */
+  .cardwrap[data-state="warn"] .card{border-color:color-mix(in srgb,var(--warn) 45%,var(--brd));
+    background:color-mix(in srgb,var(--warn) 6%,var(--panel))}
+  .cardwrap[data-state="bad"] .card{border-color:color-mix(in srgb,var(--bad) 50%,var(--brd));
+    background:color-mix(in srgb,var(--bad) 7%,var(--panel))}
   button.card:hover{border-color:color-mix(in srgb,var(--accent) 45%,var(--brd))}
-  button.card::after{content:"\\203a";position:absolute;top:13px;right:14px;
-                     font-size:19px;line-height:1;color:var(--muted);opacity:.55;
-                     transition:opacity .15s ease, transform .15s ease}
+  button.card::after{content:"";}
   button.card:hover::after{opacity:1;transform:translateX(2px)}
 
-  .lbl{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);
-       font-weight:650;margin:0 0 7px;text-align:left;align-self:flex-start}
-  .big{font-size:clamp(25px,5.4vw,31px);font-weight:700;letter-spacing:-.025em;margin:0;
-       font-variant-numeric:tabular-nums;line-height:1.05}
-  .big small{font-size:14px;font-weight:600;color:var(--muted);margin-left:3px;letter-spacing:0}
-  .sub{margin:5px 0 0;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;text-align:left}
+  /* Sentence case, not shouting caps, and no giant number. A card that is
+     three times the size of its neighbour claims to be three times as
+     important, which was never true of CPU against a pool at 90%. */
+  .hcard .hv{font-size:14px;font-weight:620;letter-spacing:-.01em;margin:4px 0 0;
+             line-height:1.3;text-align:left}
+  .hcard .hfoot{font-size:11px;color:var(--muted);margin:auto 0 0;padding-top:6px;text-align:left}
+  .cardwrap[data-state="warn"] .hcard .hv{color:var(--warn)}
+  .cardwrap[data-state="bad"] .hcard .hv{color:var(--bad)}
+  .lbl{font-size:11px;letter-spacing:.02em;color:var(--muted);
+       font-weight:600;margin:0;text-align:left;align-self:flex-start}
+  .big{font-size:19px;font-weight:620;letter-spacing:-.015em;margin:3px 0 0;
+       font-variant-numeric:tabular-nums;line-height:1.2}
+  .big small{font-size:12px;font-weight:500;color:var(--muted);margin-left:2px;letter-spacing:0}
+  .sub{margin:1px 0 0;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums;text-align:left}
 
-  .meter{height:7px;border-radius:999px;background:var(--faint);overflow:hidden;margin-top:11px;flex:0 0 auto}
-  .meter.sm{height:5px;margin-top:5px}
-  .meter i{display:block;height:100%;border-radius:999px;background:var(--accent);width:0;
+  /* margin-top:auto pins the bar to the bottom but guarantees nothing above
+     it, so the wrapper keeps the pin and sets a floor on the gap */
+  .meterw{margin-top:auto;padding-top:11px;padding-bottom:2px}
+  .meter{height:3px;border-radius:2px;background:var(--faint);overflow:hidden;flex:0 0 auto}
+  .meter.sm{height:3px}
+  .meter i{display:block;height:100%;border-radius:2px;background:var(--accent);width:0;
            transition:width .7s cubic-bezier(.4,0,.2,1), background .4s ease}
   .meter i[data-level="warn"]{background:var(--warn)}
   .meter i[data-level="bad"]{background:var(--bad)}
@@ -1676,26 +1665,23 @@ PAGE = """<!doctype html>
   .ubtn.yes{background:var(--warn);color:#2a1c00;border-color:transparent}
   .ubtn:disabled{opacity:.6;cursor:default}
 
-  .appgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));
-           gap:9px;padding:12px 16px 14px}
+  .appgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(134px,1fr));gap:9px}
+  .sheet .appgrid{padding:12px 16px 14px}
   .apptile{position:relative;text-decoration:none;color:inherit;display:flex;
-           flex-direction:column;justify-content:flex-end;gap:2px;min-height:74px;
-           padding:10px 11px;border-radius:14px;border:1px solid var(--brd);
-           background:var(--faint);transition:transform .14s ease,border-color .14s ease}
-  .apptile:hover{transform:translateY(-2px);
-                 border-color:color-mix(in srgb,var(--accent) 45%,var(--brd))}
-  .apptile .sdot{position:absolute;top:11px;right:11px;width:8px;height:8px;border-radius:50%;
-                 background:var(--bad)}
-  .apptile .aico{position:absolute;top:9px;left:10px;width:22px;height:22px;border-radius:6px;
-                 object-fit:contain;display:block}
+           flex-direction:column;gap:6px;background:var(--panel);
+           border:1px solid var(--brd);border-radius:var(--r);
+           padding:11px 12px;min-height:84px;transition:border-color .15s ease}
+  .apptile:hover{border-color:color-mix(in srgb,var(--accent) 40%,var(--brd))}
+  .apptile .sdot{position:absolute;top:13px;right:12px;width:6px;height:6px;
+                 border-radius:50%;background:var(--muted);opacity:.5}
+  .apptile[data-up="1"] .sdot{background:var(--ok);opacity:1}
+  .apptile[data-up="0"]{opacity:.62}
+  .apptile .aico{width:22px;height:22px;border-radius:6px;object-fit:cover;flex:0 0 auto}
   .apptile .aico.mono{display:flex;align-items:center;justify-content:center;color:#fff;
-                      font-size:12px;font-weight:700;letter-spacing:-.02em}
-  .apptile[data-up="1"] .sdot{background:var(--ok)}
-  .apptile[data-up="0"]{opacity:.6}
-  .apptile .an{font-size:13px;font-weight:650;line-height:1.2;
+                      font-size:10px;font-weight:700}
+  .apptile .an{font-size:12.5px;font-weight:600;line-height:1.2;margin-top:auto;
                overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .apptile .ap{font-size:10px;color:var(--muted);font-variant-numeric:tabular-nums;
-               overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .apptile .ap{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
   .apptile .upd{position:absolute;top:24px;right:5px;cursor:pointer;appearance:none;
                 width:21px;height:21px;display:flex;align-items:center;justify-content:center;
                 padding:0;line-height:1;color:var(--warn);border-radius:50%;
@@ -1745,7 +1731,8 @@ PAGE = """<!doctype html>
         <path d="M6.5 19h4L13 12l3.5 11 3-8 1.5 4h4.5" fill="none" stroke="#fff"
               stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
-      <div style="min-width:0"><h1>Dashy<span class="host" id="host"></span></h1><p id="sub">loading&hellip;</p></div>
+      <div style="min-width:0"><h1>Dashy<span class="host" id="host"></span></h1>
+        <p class="beta">beta</p></div>
     </div>
     <div class="hdr-r">
       <button class="wx" id="wx" hidden type="button" data-pop="wx"
@@ -1842,12 +1829,12 @@ PAGE = """<!doctype html>
   </header>
 
   <div class="editbar" id="editbar">
-    <span>Drag to reorder. <b>2\u00d7</b> resizes, <b>\u00d7</b> removes. Removed tiles stay here, faded, with a <b>+</b>.</span>
+    <span><b>2\u00d7</b> resizes, <b>\u00d7</b> removes. Removed cards stay here, faded, with a <b>+</b>.</span>
     <button class="rst" id="eb-reset" type="button">Reset</button>
     <button class="done" id="eb-done" type="button">Done</button>
   </div>
 
-  <div class="grid" id="vitals"></div>
+  <div id="vitals"></div>
 
 </div>
 
@@ -2010,6 +1997,13 @@ function rateParts(b){
   return [(b/1e9).toFixed(2),'GB/s'];
 }
 function rate(b){ const p=rateParts(b); return p[1]? p[0]+' '+p[1] : p[0]; }
+/* Cards only carry a bar where a proportion exists, so every one of these is
+   allowed to be missing. */
+function setBar(id, pct, lvl){
+  const el=$(id); if(!el) return;
+  el.style.width=Math.max(0,Math.min(100,pct))+'%';
+  if(lvl) el.dataset.level=lvl;
+}
 function setMeter(el,pct){ if(!el) return;
   el.style.width=Math.max(0,Math.min(100,pct))+'%'; el.dataset.level=level(pct); }
 // for bars where a FULL bar is the healthy state, like apps up or availability
@@ -2022,14 +2016,14 @@ function when(ts){ return new Date(ts*1000).toLocaleDateString([], {day:'numeric
 // Every card declared once. Order and visibility come from saved prefs, so
 // rearranging is a re-render rather than a special case per card.
 const CARDS=[
-  {k:'cpu',   label:'CPU'},
-  {k:'mem',   label:'Memory'},
-  {k:'ctemp', label:'CPU temp'},
-  {k:'dtemp', label:'Disk temp'},
-  {k:'store', label:'Storage'},
-  {k:'net',   label:'Network'},
-  {k:'apps',  label:'Apps',   dot:'apps-dot'}
+  {k:'health',label:'Health', sec:'system', kind:'health'},
+  {k:'cpu',   label:'Processor', sec:'system', trend:1},
+  {k:'mem',   label:'Memory',    sec:'system', bar:1},
+  {k:'ctemp', label:'CPU temp',  sec:'system', trend:1},
+  {k:'net',   label:'Network',   sec:'system', trend:1},
+  {k:'dtemp', label:'Drive temps', sec:'storage'}
 ];
+const SECTIONS=[['system','System'],['storage','Storage'],['apps','Apps']];
 const CARDK=CARDS.map(c=>c.k);
 
 /* ---------- preferences ------------------------------------------------
@@ -2050,6 +2044,7 @@ const DEFAULTS={theme:'system', accent:'teal', order:CARDK.slice(), hidden:[], w
                 setup:{}, weather:null};
 let prefs=Object.assign({}, DEFAULTS);
 let lastTick=0;
+let builtSig='';
 let footUp=['\u2013',''], footNote='', footIssue=false;
 
 function loadPrefs(){
@@ -2435,14 +2430,27 @@ function resetLayout(){
 }
 
 function cardHTML(c){
-  const body = c.dot
+  // the one card that answers a question rather than reporting a number
+  if(c.kind==='health'){
+    return '<div class="cardwrap" data-k="'+c.k+'"><div class="jig">'+
+             '<button class="card hcard" data-pop="up">'+
+               '<p class="lbl">Health</p>'+
+               '<p class="hv" id="v-health">\u2013</p>'+
+               '<p class="sub" id="s-health"></p>'+
+               '<p class="hfoot" id="f-health"></p>'+
+             '</button>'+
+           '</div></div>';
+  }
+  const head = c.dot
     ? '<div class="bigrow"><i class="pdot ok" id="'+c.dot+'"></i>'+
         '<p class="big" id="v-'+c.k+'">\u2013</p></div>'+
       '<p class="sub" id="s-'+c.k+'"></p>'
-    : '<p class="big" id="v-'+c.k+'">\u2013</p><p class="sub" id="s-'+c.k+'"></p>'+
-      '<div class="meter"><i id="m-'+c.k+'"></i></div>';
-  const spark='<div class="sparkwrap"><svg class="spark" id="k-'+c.k+
-              '" preserveAspectRatio="none" viewBox="0 0 300 46"></svg></div>';
+    : '<p class="big" id="v-'+c.k+'">\u2013</p><p class="sub" id="s-'+c.k+'"></p>';
+  const body = head + (c.bar
+    ? '<div class="meterw"><div class="meter"><i id="m-'+c.k+'"></i></div></div>' : '');
+  const spark = c.trend
+    ? '<div class="sparkwrap"><svg class="spark" id="k-'+c.k+
+      '" preserveAspectRatio="none" viewBox="0 0 160 20"></svg></div>' : '';
   const tools='<div class="cardtools">'+
       '<button type="button" class="wbtn" data-wide="'+c.k+'" aria-label="Change size"></button>'+
       '<span class="hint">hold to drag</span>'+
@@ -2457,14 +2465,53 @@ function cardHTML(c){
          '</div>';
 }
 
+/* The pools are not known until the first poll, so the Storage section is
+   built from the data rather than declared. One card per pool: "2 pools, 60%
+   full" hid which pool was the full one, which is the only thing you wanted
+   to know. */
+function poolCards(){
+  return ((data&&data.pools)||[]).map(p=>({
+    k:'pool-'+p.name, label:p.name, sec:'storage', bar:1, pool:p.name}));
+}
+function layoutSig(){
+  const pools=((data&&data.pools)||[]).map(p=>p.name).join(',');
+  const apps=((data&&data.services)||[]).map(s=>s.name).join(',');
+  return pools+'|'+apps;
+}
+
 function build(){
   const by={}; CARDS.forEach(c=>by[c.k]=c);
   // hidden cards stay in the DOM so paint() can keep writing to their ids;
   // CSS hides them. Dropping them would mean guarding every $() in paint().
-  $('vitals').innerHTML = prefs.order.map(k=>by[k]).filter(Boolean).map(cardHTML).join('');
+  // pools first, then the thermometer: which pool is full is the question,
+  // how warm the drives are is the footnote
+  // A saved order from an older version has no 'health' in it, and anything
+  // unknown gets appended - which would put the one card that says whether
+  // anything is wrong at the bottom. It leads, always.
+  let base=prefs.order.map(k=>by[k]).filter(Boolean);
+  CARDS.forEach(c=>{ if(base.indexOf(c)<0) base.push(c); });
+  base=base.filter(c=>c.k!=='health');
+  if(by.health) base.unshift(by.health);
+  const order=base.filter(c=>c.sec!=='storage')
+                  .concat(poolCards())
+                  .concat(base.filter(c=>c.sec==='storage'));
+  $('vitals').innerHTML = SECTIONS.map(([id,title])=>{
+    if(id==='apps') return appsSection();
+    const cards=order.filter(c=>c.sec===id);
+    if(!cards.length) return '';
+    return '<div class="sec" data-sec="'+id+'"><h2>'+title+'</h2>'+
+           '<div class="grid">'+cards.map(cardHTML).join('')+'</div></div>';
+  }).join('');
   applyHidden();
   applyWidths();
+  builtSig=layoutSig();
   built=true;
+}
+
+function appsSection(){
+  const list=(data&&data.services)||[];
+  if(!list.length) return '';
+  return '<div class="sec" data-sec="apps"><h2>Apps</h2>'+rowsApps()+'</div>';
 }
 
 function applyWidths(){
@@ -2490,10 +2537,9 @@ function drawSparks(d){
     if(!el) continue;
     const wrap=el.closest('.cardwrap');
     const w=wrap ? wrap.dataset.w : '1';
-    if(w!=='2' && w!=='4'){ el.innerHTML=''; continue; }
     const [rows, colour, cap]=SPARKS[k](d);
-    // a card with four times the room earns more than four times the line
-    const h = w==='4' ? 132 : 46;
+    // every card that has history shows it; the bigger sizes just get more room
+    const h = w==='4' ? 112 : (w==='2' ? 40 : 20);
     // the viewBox is written into the markup, so it has to follow the height
     // or the path simply draws out through the bottom of the card
     el.setAttribute('viewBox', '0 0 300 '+h);
@@ -2543,7 +2589,7 @@ function paint(d){
   const relayout=adoptPrefs(d.prefs);
   if(!setupShown && setupNeeded()){ setupShown=true; openSetup(false); }
   if(!built) build();
-  else if(relayout){ build(); }
+  else if(relayout || layoutSig()!==builtSig){ build(); }
   data=d;
 
   if(d.cpu!==null && d.cpu!==undefined){
@@ -2564,8 +2610,7 @@ function paint(d){
     $('v-ctemp').innerHTML=d.cpu_temp.toFixed(0)+'<small>\\u00b0C</small>';
     $('v-ctemp').style.color=d.cpu_temp>=85?'var(--bad)':d.cpu_temp>=75?'var(--warn)':'';
     const w=Math.max(4,Math.min(100,(d.cpu_temp-25)/70*100));
-    $('m-ctemp').style.width=w+'%';
-    $('m-ctemp').dataset.level=d.cpu_temp>=85?'bad':d.cpu_temp>=75?'warn':'ok';
+    setBar('m-ctemp', w, d.cpu_temp>=85?'bad':d.cpu_temp>=75?'warn':'ok');
   }
   const ct=d.core_temps||[];
   $('s-ctemp').textContent=ct.length? ct.length+' cores' : 'package sensor';
@@ -2578,18 +2623,24 @@ function paint(d){
     $('v-dtemp').style.color=worst==='bad'?'var(--bad)':worst==='warn'?'var(--warn)':'';
     $('s-dtemp').textContent=dr.length+' drives';
     const w=Math.max(4,Math.min(100,(hi-20)/45*100));
-    $('m-dtemp').style.width=w+'%'; $('m-dtemp').dataset.level=worst;
+    setBar('m-dtemp', w, worst);
   }
 
-  const pools=d.pools||[];
-  if(pools.length){
-    const free=pools.reduce((a,p)=>a+p.free,0), size=pools.reduce((a,p)=>a+p.size,0);
-    const pct=size? (size-free)/size*100 : 0;
-    const fp=diskParts(free);
-    $('v-store').innerHTML=fp[0]+'<small>'+fp[1]+' free</small>';
-    $('s-store').textContent=pools.length+' pools \\u00b7 '+pct.toFixed(0)+'% full';
-    setMeter($('m-store'), pct);
-  }
+  (d.pools||[]).forEach(p=>{
+    const k='pool-'+p.name;
+    const v=$('v-'+k); if(!v) return;
+    const fp=diskParts(p.free);
+    v.innerHTML=fp[0]+'<small>'+fp[1]+' free</small>';
+    const used=diskParts(p.size-p.free), tot=diskParts(p.size);
+    const health=(p.health||'').toUpperCase();
+    $('s-'+k).textContent = (health && health!=='ONLINE')
+      ? health
+      : used[0]+' of '+tot[0]+tot[1]+' \u00b7 '+p.pct.toFixed(0)+'% full';
+    setBar('m-'+k, p.pct, p.pct>=90?'bad':p.pct>=85?'warn':'ok');
+    const w=document.querySelector('.cardwrap[data-k="'+k+'"]');
+    if(w) w.dataset.state = (health && health!=='ONLINE') ? 'bad'
+                          : p.pct>=90 ? 'warn' : '';
+  })
 
   const nets=(d.net||[]).filter(n=>n.down!==null && n.down!==undefined);
   const primary=nets.slice().sort((a,b)=>(b.rx+b.tx)-(a.rx+a.tx))[0];
@@ -2606,23 +2657,19 @@ function paint(d){
     hist.forEach(h=>{ peak=Math.max(peak,h[1]+h[2]); });
     const total=primary.down+primary.up;
     peak=Math.max(peak,total);
+    // throughput has no ceiling, so Network shows its trend line instead of a
+    // bar scaled against an invented peak
     const el=$('m-net');
-    el.style.width=Math.max(3,Math.min(100, Math.sqrt(total/peak)*100)).toFixed(1)+'%';
-    const split=total? (primary.down/total*100) : 50;
-    const soft=18;
-    el.style.background='linear-gradient(90deg, var(--accent) 0%, var(--accent) '+
-      Math.max(0,split-soft).toFixed(1)+'%, var(--brand) '+
-      Math.min(100,split+soft).toFixed(1)+'%, var(--brand) 100%)';
+    if(el){
+      el.style.width=Math.max(3,Math.min(100, Math.sqrt(total/peak)*100)).toFixed(1)+'%';
+      const split=total? (primary.down/total*100) : 50;
+      const soft=18;
+      el.style.background='linear-gradient(90deg, var(--accent) 0%, var(--accent) '+
+        Math.max(0,split-soft).toFixed(1)+'%, var(--brand) '+
+        Math.min(100,split+soft).toFixed(1)+'%, var(--brand) 100%)';
+    }
   }
 
-  const svc=d.services||[];
-  const upn=svc.filter(s=>s.code).length, bad=svc.length-upn;
-  $('v-apps').textContent=upn;
-  $('apps-dot').className='pdot '+(bad?'warn':'ok');
-  const upd=svc.filter(s=>s.update).length;
-  $('s-apps').innerHTML = bad
-    ? '<span class="bigrow"><i class="pdot warn" style="width:7px;height:7px"></i>'+bad+' not responding</span>'
-    : (upd ? upd+' update'+(upd>1?'s':'')+' available' : 'all responding');
 
   const upp=durParts(d.uptime);
   footUp=upp;
@@ -2642,7 +2689,7 @@ function paint(d){
 
 
   $('host').textContent=d.host||'';
-  $('sub').textContent=headline(d);
+  paintHealth(d);
   drawSparks(d);
   paintWeather(d.weather);
   paintLinks(d.links||{});
@@ -2895,6 +2942,39 @@ function paintLinks(L){
 }
 
 // the single most pressing thing about the machine, worst first
+/* How bad is it, in one word. The card colours itself from this, which is
+   the whole point: an amber border reads as "this one" far faster than an
+   amber digit inside an identical white box. */
+function severity(d){
+  const pools=d.pools||[], drives=d.drives||[], svc=d.services||[];
+  if(pools.some(p=>(p.health||'').toUpperCase()!=='ONLINE')) return 'bad';
+  if(drives.some(x=>x.ok===false)) return 'bad';
+  if(drives.some(x=>x.level==='bad')) return 'bad';
+  if(svc.some(s=>!s.code)) return 'warn';
+  if(pools.some(p=>p.pct>=85)) return 'warn';
+  if(drives.some(x=>x.level==='warn')) return 'warn';
+  return 'ok';
+}
+
+function paintHealth(d){
+  const sev=severity(d), msg=headline(d);
+  const wrap=document.querySelector('.cardwrap[data-k="health"]');
+  if(wrap) wrap.dataset.state = sev==='ok' ? '' : sev;
+  const v=$('v-health'); if(v) v.textContent = sev==='ok' ? 'All systems normal' : msg;
+  const sb=$('s-health');
+  if(sb) sb.textContent = sev==='ok' ? '' : 'everything else normal';
+  const f=$('f-health');
+  if(f) f.textContent = (d.uptime||d.uptime===0) ? ('up '+upWord(d.uptime)) : '';
+}
+
+function upWord(sec){
+  const d=Math.floor(sec/86400);
+  if(d>=2) return d+' days';
+  const h=Math.floor(sec/3600);
+  if(h>=2) return h+' hours';
+  return Math.max(1,Math.floor(sec/60))+' min';
+}
+
 function headline(d){
   const pools=d.pools||[], drives=d.drives||[], svc=d.services||[];
   const sick=pools.find(p=>(p.health||'').toUpperCase()!=='ONLINE');
@@ -3225,29 +3305,21 @@ async function askUpdate(app,name,ver){
 }
 
 
-/* ---------- long press to enter jiggle, then drag to reorder -------------
-   Pointer Events rather than HTML5 drag-and-drop: the latter is unusable on
-   touch. The tile follows the finger with a transform, and the tile under the
-   finger is found by hit-testing, so reordering is live rather than on drop. */
+/* ---------- long press to arrange --------------------------------------
+   A hold puts the page into arrange mode, where each card carries its size
+   button and its remove badge. Dragging to reorder was removed: once the
+   cards are grouped into System / Storage / Apps, a tile dragged out of its
+   section would have to stop being what the section says it is.          */
 const HOLD_MS=450, HOLD_SLOP=10;
-let hold=null, drag=null;
-
-function wrapsInOrder(){
-  return [].slice.call(document.querySelectorAll('#vitals .cardwrap'))
-           .filter(el=>el.dataset.off!=='1' || document.body.classList.contains('editing'));
-}
+let hold=null;
 
 function onDown(ev){
   if(ev.button!==undefined && ev.button!==0) return;
   const wrap=ev.target.closest('#vitals .cardwrap');
   if(!wrap) return;
-  if(ev.target.closest('.cardtools button')) return;   // the controls are not handles
-  const start={x:ev.clientX, y:ev.clientY};
-  if(document.body.classList.contains('editing')){
-    beginDrag(wrap, ev); return;
-  }
-  // not editing yet: a long press enters jiggle mode on this tile
-  hold={wrap, start, id:ev.pointerId, t:setTimeout(()=>{
+  if(ev.target.closest('.cardtools button, .xbtn')) return;   // controls are not handles
+  if(document.body.classList.contains('editing')) return;
+  hold={wrap, start:{x:ev.clientX, y:ev.clientY}, id:ev.pointerId, t:setTimeout(()=>{
     hold=null;
     setEditing(true);
     if(navigator.vibrate) navigator.vibrate(12);
@@ -3256,113 +3328,17 @@ function onDown(ev){
 
 function cancelHold(){ if(hold){ clearTimeout(hold.t); hold=null; } }
 
-function beginDrag(wrap, ev){
-  const r=wrap.getBoundingClientRect();
-  drag={wrap, id:ev.pointerId,
-        dx:ev.clientX-r.left, dy:ev.clientY-r.top, w:r.width, h:r.height,
-        moved:false};
-  wrap.setPointerCapture && wrap.setPointerCapture(ev.pointerId);
-  wrap.classList.add('drag');
-  positionDrag(ev.clientX, ev.clientY);
-}
-
-function positionDrag(cx, cy){
-  if(!drag) return;
-  const g=$('vitals').getBoundingClientRect();
-  drag.wrap.style.position='fixed';
-  drag.wrap.style.left=(cx-drag.dx)+'px';
-  drag.wrap.style.top=(cy-drag.dy)+'px';
-  drag.wrap.style.width=drag.w+'px';
-  drag.wrap.style.height=drag.h+'px';
-  drag.wrap.style.margin='0';
-}
-
 function onMove(ev){
-  if(hold){
-    const dx=Math.abs(ev.clientX-hold.start.x), dy=Math.abs(ev.clientY-hold.start.y);
-    if(dx>HOLD_SLOP || dy>HOLD_SLOP) cancelHold();     // a scroll, not a press
-    return;
-  }
-  if(!drag) return;
-  ev.preventDefault();
-  drag.moved=true;
-  positionDrag(ev.clientX, ev.clientY);
-
-  // which tile is under the finger?
-  const over=document.elementsFromPoint(ev.clientX, ev.clientY)
-    .map(e=>e.closest && e.closest('#vitals .cardwrap'))
-    .find(e=>e && e!==drag.wrap);
-  if(!over) return;
-  const list=wrapsInOrder();
-  const from=list.indexOf(drag.wrap), to=list.indexOf(over);
-  if(from<0 || to<0 || from===to) return;
-  // move it in the DOM straight away so the gap follows the finger, and let
-  // the tiles it displaced slide rather than jump
-  slide(()=>{ if(from<to) over.after(drag.wrap); else over.before(drag.wrap); });
-  commitOrderFromDOM();
+  if(!hold) return;
+  const dx=Math.abs(ev.clientX-hold.start.x), dy=Math.abs(ev.clientY-hold.start.y);
+  if(dx>HOLD_SLOP || dy>HOLD_SLOP) cancelHold();      // a scroll, not a press
 }
 
-/* The tiles that get pushed aside should travel, the way app icons do on a
-   phone home screen. The grid gives no control over that, so: measure where
-   everything is, do the move, then put each tile back where it was with a
-   transform and release it on the next frame. It animates from the old place
-   to the new one without the layout ever being in an intermediate state.
-
-   This is why the wobble moved onto the inner card - a running animation wins
-   against an inline transform, so the two cannot share an element. */
-const SLIDE_MS=210;
-function slide(mutate){
-  const items=wrapsInOrder().filter(el=>el!==drag.wrap);
-  const before=new Map();
-  items.forEach(el=>before.set(el, el.getBoundingClientRect()));
-
-  mutate();
-
-  items.forEach(el=>{
-    const b=before.get(el), a=el.getBoundingClientRect();
-    const dx=b.left-a.left, dy=b.top-a.top;
-    if(!dx && !dy) return;
-    el.style.transition='none';
-    el.style.transform='translate('+dx+'px,'+dy+'px)';
-  });
-  // one reflow for the lot, then let them all go together
-  void document.body.offsetWidth;
-  items.forEach(el=>{
-    if(!el.style.transform) return;
-    el.style.transition='transform '+SLIDE_MS+'ms cubic-bezier(.2,.75,.3,1)';
-    el.style.transform='';
-  });
-}
-
-function clearSlides(){
-  [].slice.call(document.querySelectorAll('#vitals .cardwrap')).forEach(el=>{
-    el.style.transition=''; el.style.transform='';
-  });
-}
-
-function onUp(ev){
-  cancelHold();
-  if(!drag) return;
-  const w=drag.wrap;
-  w.classList.remove('drag');
-  w.style.position=w.style.left=w.style.top=w.style.width=w.style.height=w.style.margin='';
-  drag=null;
-  clearSlides();
-  commitOrderFromDOM();
-  savePrefs();
-}
-
-function commitOrderFromDOM(){
-  const ks=[].slice.call(document.querySelectorAll('#vitals .cardwrap'))
-              .map(el=>el.dataset.k).filter(Boolean);
-  if(ks.length===prefs.order.length) prefs.order=ks;
-  applyHidden();
-}
 
 document.addEventListener('pointerdown', onDown);
-document.addEventListener('pointermove', onMove, {passive:false});
-document.addEventListener('pointerup', onUp);
-document.addEventListener('pointercancel', onUp);
+document.addEventListener('pointermove', onMove, {passive:true});
+document.addEventListener('pointerup', cancelHold);
+document.addEventListener('pointercancel', cancelHold);
 // a press that turns into a scroll must not arm the hold
 document.addEventListener('scroll', cancelHold, {passive:true});
 
