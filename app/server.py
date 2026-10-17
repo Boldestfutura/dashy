@@ -1200,7 +1200,7 @@ PAGE = """<!doctype html>
 <style>
   :root{
     color-scheme:light dark;
-    --bg:#f5f6f8; --panel:rgba(255,255,255,.76); --brd:rgba(16,20,28,.09);
+    --bg:#f5f6f8; --panel:#ffffff; --brd:rgba(16,20,28,.09);
     --ink:#0f1218; --muted:#6a7280; --faint:rgba(16,20,28,.06);
     --ok:#1fa971; --warn:#e0a32e; --bad:#e0443a;
     --accent:#2f6df6; --brand:#0d9488;
@@ -1211,7 +1211,7 @@ PAGE = """<!doctype html>
      has explicitly chosen light), once for an explicit dark choice */
   @media (prefers-color-scheme:dark){
     :root:not([data-theme="light"]){
-      --bg:#0a0c10; --panel:rgba(23,27,34,.76); --brd:rgba(255,255,255,.09);
+      --bg:#0a0c10; --panel:#171b22; --brd:rgba(255,255,255,.09);
       --ink:#eef1f5; --muted:#949cab; --faint:rgba(255,255,255,.06);
       --ok:#34d399; --warn:#fbbf24; --bad:#f87171;
       --accent:#5b8cff; --brand:#14b8a6;
@@ -1220,7 +1220,7 @@ PAGE = """<!doctype html>
     }
   }
   :root[data-theme="dark"]{
-      --bg:#0a0c10; --panel:rgba(23,27,34,.76); --brd:rgba(255,255,255,.09);
+      --bg:#0a0c10; --panel:#171b22; --brd:rgba(255,255,255,.09);
       --ink:#eef1f5; --muted:#949cab; --faint:rgba(255,255,255,.06);
       --ok:#34d399; --warn:#fbbf24; --bad:#f87171;
       --accent:#5b8cff; --brand:#14b8a6;
@@ -1397,7 +1397,7 @@ PAGE = """<!doctype html>
             -webkit-touch-callout:none}
   .cardwrap .card{width:100%}
   .cardtools{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
-             gap:7px;background:color-mix(in srgb,var(--panel) 86%,transparent);
+             gap:7px;background:color-mix(in srgb,var(--panel) 97%,transparent);
              border-radius:var(--r);z-index:3}
   body.editing .cardtools{display:flex}
   .cardtools button{width:30px;height:30px;border-radius:9px;border:1px solid var(--brd);
@@ -1416,8 +1416,6 @@ PAGE = """<!doctype html>
         box-shadow:0 1px 3px rgba(0,0,0,.34),0 0 0 .5px rgba(0,0,0,.12)}
   body.editing .xbtn{display:flex}
   .cardwrap[data-off="1"] .xbtn{color:var(--ok);font-weight:700}
-  .cardtools .hint{position:absolute;bottom:8px;left:0;right:0;text-align:center;
-                   font-size:10px;color:var(--muted);font-weight:600;pointer-events:none}
   .cardwrap[data-off="1"] .card,
   .cardwrap[data-off="1"] .cardtools{opacity:.34}
   body:not(.editing) .cardwrap[data-off="1"]{display:none}
@@ -1774,7 +1772,7 @@ PAGE = """<!doctype html>
           <button class="mi" id="mi-edit" type="button" role="menuitem">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
                  stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.6"/></svg>
-            Rearrange cards</button>
+            Resize or remove cards</button>
           <div class="msep"></div>
           <p class="mh">Integrations</p>
           <div class="mrow"><span class="ml">Tailscale</span>
@@ -2429,6 +2427,13 @@ function resetLayout(){
   savePrefs(); build(); if(data) paint(data);
 }
 
+function cardTools(k){
+  return '<div class="cardtools">'+
+      '<button type="button" class="wbtn" data-wide="'+k+'" aria-label="Change size"></button>'+
+    '</div>'+
+    '<button type="button" class="xbtn" data-eye="'+k+'" aria-label="Remove"></button>';
+}
+
 function cardHTML(c){
   // the one card that answers a question rather than reporting a number
   if(c.kind==='health'){
@@ -2438,7 +2443,7 @@ function cardHTML(c){
                '<p class="hv" id="v-health">\u2013</p>'+
                '<p class="sub" id="s-health"></p>'+
                '<p class="hfoot" id="f-health"></p>'+
-             '</button>'+
+             '</button>'+cardTools(c.k)+
            '</div></div>';
   }
   const head = c.dot
@@ -2451,14 +2456,10 @@ function cardHTML(c){
   const spark = c.trend
     ? '<div class="sparkwrap"><svg class="spark" id="k-'+c.k+
       '" preserveAspectRatio="none" viewBox="0 0 160 20"></svg></div>' : '';
-  const tools='<div class="cardtools">'+
-      '<button type="button" class="wbtn" data-wide="'+c.k+'" aria-label="Change size"></button>'+
-      '<span class="hint">hold to drag</span>'+
-    '</div>'+
-    '<button type="button" class="xbtn" data-eye="'+c.k+'" aria-label="Remove"></button>';
+  const tools=cardTools(c.k);
   return '<div class="cardwrap" data-k="'+c.k+'">'+
            '<div class="jig">'+
-             '<button class="card" data-pop="'+c.k+'">'+
+             '<button class="card" data-pop="'+(c.pop||c.k)+'">'+
                '<p class="lbl">'+c.label+'</p>'+body+spark+
              '</button>'+tools+
            '</div>'+
@@ -2471,7 +2472,7 @@ function cardHTML(c){
    to know. */
 function poolCards(){
   return ((data&&data.pools)||[]).map(p=>({
-    k:'pool-'+p.name, label:p.name, sec:'storage', bar:1, pool:p.name}));
+    k:'pool-'+p.name, label:p.name, sec:'storage', bar:1, pop:'store', pool:p.name}));
 }
 function layoutSig(){
   const pools=((data&&data.pools)||[]).map(p=>p.name).join(',');

@@ -36,8 +36,8 @@ add and remove things.
 
 | | |
 |:--:|:--:|
-| ![Phone](docs/03-phone.png) | ![Apps](docs/04-apps.png) |
-| On a phone | Apps, with versions and update markers |
+| ![Phone](docs/03-phone.png) | ![Storage detail](docs/04-detail.png) |
+| On a phone | Every card opens a detail sheet |
 | ![Settings](docs/05-settings.png) | ![Arrange](docs/06-arrange.png) |
 | Settings | Hold a tile to arrange: **2×** resizes, **×** removes |
 
