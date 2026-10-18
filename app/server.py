@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.16.0"
+APP_VERSION = "0.17.0"
 APP_NAME = "Overlook"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1263,18 +1263,23 @@ PAGE = """<!doctype html>
 <style>
   :root{
     color-scheme:light dark;
-    --bg:#f5f6f8; --panel:#ffffff; --brd:rgba(16,20,28,.09);
+    --bg:#eaeeff; --panel:#ffffff; --surf:#fbfcff; --brd:rgba(16,20,28,.09);
     --ink:#0f1218; --muted:#6a7280; --faint:rgba(16,20,28,.06);
     --ok:#1fa971; --warn:#e0a32e; --bad:#e0443a;
     --accent:#2f6df6; --brand:#0d9488;
     --shadow:0 1px 2px rgba(16,20,28,.04), 0 12px 30px -14px rgba(16,20,28,.20);
-    --r:18px;
+    /* M3's shape scale rather than one radius everywhere. Mixing round and
+       square is the point: uniform corners read as a template, varied ones
+       read as a designed thing. */
+    --r-xs:8px; --r-sm:12px; --r-md:16px; --r-lg:22px; --r-xl:28px;
+    --r-full:999px;
+    --r:var(--r-xl);
   }
   /* dark palette twice: once for "follow the system" (suppressed when the user
      has explicitly chosen light), once for an explicit dark choice */
   @media (prefers-color-scheme:dark){
     :root:not([data-theme="light"]){
-      --bg:#0a0c10; --panel:#171b22; --brd:rgba(255,255,255,.09);
+      --bg:#0f111b; --panel:#171b22; --surf:#1b1e2b; --brd:rgba(255,255,255,.09);
       --ink:#eef1f5; --muted:#949cab; --faint:rgba(255,255,255,.06);
       --ok:#34d399; --warn:#fbbf24; --bad:#f87171;
       --accent:#5b8cff; --brand:#14b8a6;
@@ -1283,7 +1288,7 @@ PAGE = """<!doctype html>
     }
   }
   :root[data-theme="dark"]{
-      --bg:#0a0c10; --panel:#171b22; --brd:rgba(255,255,255,.09);
+      --bg:#0f111b; --panel:#171b22; --surf:#1b1e2b; --brd:rgba(255,255,255,.09);
       --ink:#eef1f5; --muted:#949cab; --faint:rgba(255,255,255,.06);
       --ok:#34d399; --warn:#fbbf24; --bad:#f87171;
       --accent:#5b8cff; --brand:#14b8a6;
@@ -1322,7 +1327,7 @@ PAGE = """<!doctype html>
         box-shadow:0 4px 12px -5px var(--brand)}
 
   .hdr-r{display:flex;align-items:center;gap:8px;justify-content:flex-end}
-  .wx{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border-radius:999px;
+  .wx{display:inline-flex;align-items:center;gap:8px;padding:8px 15px;border-radius:var(--r-full);
       background:var(--faint);border:1px solid var(--brd);font-size:12.5px;font-weight:600;
       color:var(--ink);font-family:inherit;cursor:pointer;
       transition:border-color .15s ease,transform .15s ease}
@@ -1333,7 +1338,7 @@ PAGE = """<!doctype html>
   /* the condition words are the first thing to go when it gets tight */
   @media (max-width:480px){.wx .c{display:none}}
   .ibtn{width:34px;height:34px;flex:0 0 auto;display:inline-flex;align-items:center;
-        justify-content:center;border-radius:10px;background:var(--faint);
+        justify-content:center;border-radius:var(--r-full);background:var(--faint);
         border:1px solid var(--brd);color:var(--muted);text-decoration:none;
         transition:color .15s ease,border-color .15s ease,transform .15s ease}
   .ibtn:hover{color:var(--ink);border-color:var(--muted);transform:translateY(-1px)}
@@ -1491,9 +1496,9 @@ PAGE = """<!doctype html>
            background:var(--panel);border:1px solid var(--brd);border-radius:14px;
            font-size:13px;font-weight:600;box-shadow:var(--shadow)}
   body.editing .editbar{display:flex}
-  .editbar .done{margin-left:auto;padding:7px 14px;border-radius:9px;border:none;
+  .editbar .done{margin-left:auto;padding:9px 18px;border-radius:var(--r-full);border:none;
                  background:var(--brand);color:#fff;font:inherit;font-weight:700;cursor:pointer}
-  .editbar .rst{padding:7px 12px;border-radius:9px;border:1px solid var(--brd);
+  .editbar .rst{padding:9px 16px;border-radius:var(--r-full);border:1px solid var(--brd);
                 background:none;color:var(--muted);font:inherit;font-weight:600;cursor:pointer}
 
 
@@ -1527,7 +1532,11 @@ PAGE = """<!doctype html>
   /* the container has a fixed height, so a taller chart drew straight out
      through the bottom of the card. Give it the room it is asking for. */
   .cardwrap[data-w="4"] .spark{margin-top:14px;height:132px}
-  .card .sparkwrap{margin-top:auto;padding-top:10px;padding-bottom:1px}
+  /* A 28px corner cuts the ends off anything drawn to the card's edge, so
+     the trend line is inset far enough to clear it. Looked like a rendering
+     fault at the old flush position. */
+  .card .sparkwrap{margin-top:auto;padding-top:10px;padding-bottom:4px;
+                   margin-left:-4px;margin-right:-4px}
   .cardwrap[data-w="2"] .card{min-height:168px}
 
 
@@ -1599,15 +1608,19 @@ PAGE = """<!doctype html>
   .grid{display:grid;gap:9px;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));
         grid-auto-rows:minmax(84px,auto)}
 
-  .card{position:relative;background:var(--panel);border:1px solid var(--brd);
-        border-radius:var(--r);padding:11px 12px;
-        min-height:84px;display:flex;flex-direction:column;align-items:stretch}
+  /* Filled, not outlined. In M3 a surface is defined by its tone; a border
+     and a drop shadow are both ways of faking separation that colour does
+     better. --surf is a tonal step up from the page, so the card reads as
+     raised without anything being drawn around it. */
+  .card{position:relative;background:var(--surf);border:none;
+        border-radius:var(--r-xl);padding:14px 15px;
+        min-height:92px;display:flex;flex-direction:column;align-items:stretch}
   button.card{width:100%;text-align:left;font:inherit;color:inherit;
               cursor:pointer;appearance:none;
               transition:transform .15s ease, border-color .15s ease}
   /* The alarm is the card, not the digit. A red number inside an identical
      white box does not read as "this one needs you". */
-  .cardwrap[data-state="warn"] .card{border-color:color-mix(in srgb,var(--warn) 45%,var(--brd));
+  .cardwrap[data-state="warn"] .card{
     background:color-mix(in srgb,var(--warn) 6%,var(--panel))}
   .cardwrap[data-state="bad"] .card{border-color:color-mix(in srgb,var(--bad) 50%,var(--brd));
     background:color-mix(in srgb,var(--bad) 7%,var(--panel))}
@@ -1752,7 +1765,7 @@ PAGE = """<!doctype html>
   .smart.ok{color:var(--ok);background:color-mix(in srgb,var(--ok) 15%,transparent)}
   .smart.bad{color:var(--bad);background:color-mix(in srgb,var(--bad) 18%,transparent)}
   .smart.unk{color:var(--muted);background:var(--faint)}
-  .ubtn{flex:1;appearance:none;border:1px solid var(--brd);border-radius:12px;padding:12px 0;
+  .ubtn{flex:1;appearance:none;border:1px solid var(--brd);border-radius:var(--r-full);padding:13px 0;
         font:inherit;font-weight:650;font-size:14px;cursor:pointer}
   .ubtn.no{background:var(--faint);color:var(--ink)}
   .ubtn.yes{background:var(--warn);color:#2a1c00;border-color:transparent}
@@ -1760,9 +1773,11 @@ PAGE = """<!doctype html>
 
   .appgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(134px,1fr));gap:9px}
   .sheet .appgrid{padding:12px 16px 14px}
+  /* Deliberately a smaller corner than the metric cards above them: the
+     shape is what separates the two groups now that nothing is outlined. */
   .apptile{position:relative;text-decoration:none;color:inherit;display:flex;
-           flex-direction:column;gap:6px;background:var(--panel);
-           border:1px solid var(--brd);border-radius:var(--r);
+           flex-direction:column;gap:6px;background:var(--surf);
+           border:none;border-radius:var(--r-md);
            padding:11px 12px;min-height:84px;transition:border-color .15s ease}
   .apptile:hover{border-color:color-mix(in srgb,var(--accent) 40%,var(--brd))}
   .apptile .sdot{position:absolute;top:13px;right:12px;width:6px;height:6px;
@@ -1819,17 +1834,17 @@ PAGE = """<!doctype html>
 <div class="wrap">
   <header>
     <div class="id">
-      <!-- Ridgelines receding, with the sun behind. Three fills at different
-           opacities rather than one stroke: the depth is the point, and it is
-           what survives being shrunk to a 16px favicon. -->
+      <!-- Binoculars. A lookout, not a landscape and not a search box: the
+           twin circles are the only shape here that still reads as itself at
+           24px, which is the size it spends most of its life at. -->
       <svg class="mark" viewBox="0 0 48 48" role="img" aria-label="Overlook">
         <rect width="48" height="48" rx="12" fill="var(--brand)"/>
-        <g fill="#fff">
-          <circle cx="33" cy="13" r="4.2" opacity=".55"/>
-          <path d="M2 30c6-1 9-7 14-7s7 4 12 4 9-5 14-5 4 1 6 2v12H2V30Z" opacity=".32"/>
-          <path d="M2 36c5-2 8-9 13-9s8 6 13 6 9-6 14-6 4 2 6 3v12H2v-6Z" opacity=".6"/>
-          <path d="M2 42c6-3 10-8 15-8s9 7 14 7 10-4 15-4v9H2v-4Z"/>
+        <g stroke="#fbfcff" fill="none">
+          <circle cx="15" cy="27" r="9.5" stroke-width="3.4"/>
+          <circle cx="33" cy="27" r="9.5" stroke-width="3.4"/>
+          <path d="M22.5 24.5h3" stroke-width="3" stroke-linecap="round"/>
         </g>
+        <path d="M10 17.5 13 9h7l1.5 8.5M38 17.5 35 9h-7l-1.5 8.5" fill="#fbfcff"/>
       </svg>
       <div style="min-width:0"><h1>Overlook<span class="host" id="host"></span></h1>
         <p class="beta">beta</p></div>
@@ -2307,12 +2322,18 @@ function applySurfaces(brandHex, dark){
   const k=Math.max(0.3, Math.min(1, src.C/0.13));
   const C=(x)=>x*k;
   if(dark){
-    r.setProperty('--bg',    tone(src, 0.180, C(0.022)));
-    r.setProperty('--panel', tone(src, 0.255, C(0.028)));
-    r.setProperty('--faint', tone(src, 0.315, C(0.034)));
-    r.setProperty('--brd',   tone(src, 0.350, C(0.040)));
-    r.setProperty('--muted', tone(src, 0.690, C(0.034)));
-    r.setProperty('--ink',   tone(src, 0.950, C(0.016)));
+    // Chroma is far less visible at low lightness than at high, so the dark
+    // scheme needs roughly double the number to read as the same colour.
+    // Matching the light values left dark mode looking like plain charcoal.
+    r.setProperty('--bg',    tone(src, 0.182, C(0.045)));
+    r.setProperty('--panel', tone(src, 0.258, C(0.052)));
+    r.setProperty('--faint', tone(src, 0.318, C(0.058)));
+    r.setProperty('--brd',   tone(src, 0.352, C(0.066)));
+    r.setProperty('--muted', tone(src, 0.690, C(0.050)));
+    r.setProperty('--ink',   tone(src, 0.950, C(0.022)));
+    // the card surface: one tonal step up from the page, which is what makes
+    // a borderless card read as raised
+    r.setProperty('--surf',  tone(src, 0.262, C(0.055)));
   }else{
     r.setProperty('--bg',    tone(src, 0.952, C(0.024)));
     r.setProperty('--panel', tone(src, 0.994, C(0.008)));
@@ -2320,6 +2341,7 @@ function applySurfaces(brandHex, dark){
     r.setProperty('--brd',   tone(src, 0.872, C(0.038)));
     r.setProperty('--muted', tone(src, 0.522, C(0.040)));
     r.setProperty('--ink',   tone(src, 0.192, C(0.038)));
+    r.setProperty('--surf',  tone(src, 0.988, C(0.014)));
   }
   // the accent itself keeps all of its chroma
   r.setProperty('--accent', brandHex);
