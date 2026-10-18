@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.15.0"
+APP_VERSION = "0.15.1"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1612,6 +1612,11 @@ PAGE = """<!doctype html>
   .cardwrap[data-state="bad"] .hcard .hv{color:var(--bad)}
   .lbl{font-size:11px;letter-spacing:.02em;color:var(--muted);
        font-weight:600;margin:0;text-align:left;align-self:flex-start}
+  .vmico{width:22px;height:22px;border-radius:6px;flex:0 0 auto;color:#fff;
+         display:inline-flex;align-items:center;justify-content:center}
+  .vmico svg{width:13px;height:13px}
+  .vmlbl{display:flex;align-items:center;gap:7px}
+  .vmlbl span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .vmstate{font-size:16px;font-weight:650;letter-spacing:.01em}
   .big{font-size:19px;font-weight:620;letter-spacing:-.015em;margin:3px 0 0;
        font-variant-numeric:tabular-nums;line-height:1.2}
@@ -2577,6 +2582,16 @@ function build(){
 
 // One card per VM. A VM is either on or it is not, so the card leads with
 // that rather than with a number.
+function vmIcon(name){
+  const h=hueOf(name||'vm');
+  return '<span class="vmico" style="background:hsl('+h+' 42% 46%)" aria-hidden="true">'+
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '+
+         'stroke-linecap="round" stroke-linejoin="round">'+
+      '<rect x="2.5" y="4" width="19" height="12" rx="2"/>'+
+      '<path d="M8 20h8M12 16v4"/>'+
+    '</svg></span>';
+}
+
 function vmsSection(){
   const list=(data&&data.vms)||[];
   if(!list.length) return '';
@@ -2586,8 +2601,9 @@ function vmsSection(){
       const sub=[v.cpus?v.cpus+(v.cpus===1?' cpu':' cpus'):'',
                  v.memory?ram(v.memory*1024*1024):''].filter(Boolean).join(' \u00b7 ');
       return '<div class="cardwrap" data-k="vm-'+v.id+'"'+(run?'':' data-state="warn"')+'>'+
-        '<div class="jig"><button class="card" data-pop="vm-'+v.id+'">'+
-          '<p class="lbl">'+esc(v.name||('VM '+v.id))+'</p>'+
+        '<div class="jig"><button class="card vmcard" data-pop="vm-'+v.id+'">'+
+          '<p class="lbl vmlbl">'+vmIcon(v.name)+
+            '<span>'+esc(v.name||('VM '+v.id))+'</span></p>'+
           '<p class="big vmstate">'+(run?'Running':esc(title1(v.state||'Stopped')))+'</p>'+
           '<p class="sub">'+esc(sub)+'</p>'+
         '</button></div></div>';
