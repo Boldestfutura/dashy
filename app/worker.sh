@@ -187,8 +187,13 @@ try: svc=list(json.load(sys.stdin)['services'].values())[0]
 except Exception: raise SystemExit
 print(svc.get('image') or '')" 2>/dev/null)
 
+  # Both names: the product is Overlook but the published image is still
+  # ghcr.io/boldestfutura/dashy until that migration happens. Matching only
+  # the new name made the worker refuse to update a correctly installed app
+  # with "update it by hand", which is exactly the kind of breakage a rename
+  # causes when identifiers and branding are changed in one sweep.
   case "$IMAGE" in
-    */overlook:*|*/overlook)
+    */overlook:*|*/overlook|*/dashy:*|*/dashy)
       note running "taking a snapshot" 5
       stamp=$(date +%Y%m%d-%H%M%S)
       ds=${BASE#/mnt/}
@@ -236,7 +241,7 @@ while True:
         note failed "could not pull the image"
       fi ;;
     *)
-      note failed "this install does not run a Overlook image; update it by hand" ;;
+      note failed "this install does not run an Overlook image; update it by hand" ;;
   esac
 fi
 
