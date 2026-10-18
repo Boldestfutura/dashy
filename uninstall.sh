@@ -2,7 +2,7 @@
 # Removes Overlook: the app, its cron jobs and its Serve entry.
 # The datasets are left alone - deleting data is your call, not the script's.
 set -uo pipefail
-APP_NAME="${APP_NAME:-overlook}"
+APP_NAME="${APP_NAME:-dashy}"
 
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 info() { printf '   %s\n' "$*"; }

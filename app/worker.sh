@@ -161,7 +161,7 @@ fi
 if [ -f "$Q/_self.req" ]; then
   rm -f "$Q/_self.req"
   APPNAME=$(basename "$BASE")
-  REPO="${UPDATE_REPO:-Boldestfutura/overlook}"
+  REPO="${UPDATE_REPO:-Boldestfutura/dashy}"
   BRANCH="${UPDATE_BRANCH:-main}"
   BASEURL="https://raw.githubusercontent.com/$REPO/$BRANCH/app"
   note(){ python3 - "$1" "$2" "$S" "${3:-}" <<'PYN'

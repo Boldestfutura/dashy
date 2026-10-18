@@ -349,7 +349,7 @@ date +%s > "$D/pools.stamp"
 # --- can only ever run what the registry has, and CI publishes that a minute
 # --- or so behind the push - so asking GitHub would offer an update that is
 # --- not installable yet. Ask whichever one is actually the source.
-REPO="${UPDATE_REPO:-Boldestfutura/overlook}"
+REPO="${UPDATE_REPO:-Boldestfutura/dashy}"
 BRANCH="${UPDATE_BRANCH:-main}"
 STAMP="$D/selfupdate.stamp"
 NOW=$(date +%s)

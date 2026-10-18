@@ -67,7 +67,7 @@ HEXOS_URL = os.environ.get("HEXOS_URL", "https://deck.hexos.com/dash")
 
 # Where this install gets its own updates. The check is done by the cron job,
 # not by the container, and it is a plain file read here.
-UPDATE_REPO = os.environ.get("UPDATE_REPO", "Boldestfutura/overlook")
+UPDATE_REPO = os.environ.get("UPDATE_REPO", "Boldestfutura/dashy")
 UPDATE_BRANCH = os.environ.get("UPDATE_BRANCH", "main")
 
 # Only used to pretty up names and add a one-liner. Anything not listed still

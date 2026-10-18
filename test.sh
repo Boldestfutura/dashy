@@ -8,7 +8,7 @@
 # Exit code is the number of failures, so CI can use it.
 set -uo pipefail
 
-APP_NAME="${APP_NAME:-overlook}"
+APP_NAME="${APP_NAME:-dashy}"
 PASS=0; FAIL=0; SKIP=0
 
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; PASS=$((PASS+1)); }

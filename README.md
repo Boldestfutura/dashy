@@ -9,6 +9,11 @@ add and remove things.
 > **Early days.** This is pre-1.0 and still finding its shape. It runs happily
 > every day on the NAS it was built for, but expect things to move around.
 
+> **The app is called Overlook; the repository, image and TrueNAS app id are
+> still `dashy`.** The rename happened first and the migration of those
+> identifiers is deliberate follow-up work, because moving them breaks
+> self-update for anyone already installed.
+
 ## What it does
 
 - **Live vitals.** CPU, memory, temperatures, pool capacity, disk and network
@@ -83,7 +88,7 @@ Over SSH as `root` or `truenas_admin`, or in the TrueNAS web UI under
 Clone it anywhere you can write, and run it with `bash` rather than `./`:
 
 ```sh
-git clone https://github.com/Boldestfutura/overlook.git
+git clone https://github.com/Boldestfutura/dashy.git
 cd overlook
 bash install.sh
 ```
@@ -107,7 +112,7 @@ carries them along.
 Override any of its choices with environment variables:
 
 ```sh
-POOL=tank LPORT=30802 TPORT=8455 APP_NAME=overlook bash install.sh
+POOL=tank LPORT=30802 TPORT=8455 APP_NAME=dashy bash install.sh
 IMAGE=ghcr.io/you/your-fork:latest bash install.sh
 ```
 
@@ -157,7 +162,7 @@ midclt call -j app.redeploy overlook
 ```
 
 On an image install you can also just pin the old tag — every release is
-published as `ghcr.io/boldestfutura/overlook:<version>`, not only `:latest`.
+published as `ghcr.io/boldestfutura/dashy:<version>`, not only `:latest`.
 
 To track a fork instead, set `UPDATE_REPO=you/your-fork` (and `UPDATE_BRANCH`
 if it is not `main`) in the app's environment. Both scripts read it.
@@ -213,7 +218,7 @@ ever contacts a weather service.
 | Thing | Where |
 |---|---|
 | App | a custom app, host networking, one published port |
-| Image | `ghcr.io/boldestfutura/overlook` (image installs only) |
+| Image | `ghcr.io/boldestfutura/dashy` (image installs only) |
 | Code | `<pool>/Applications/overlook/app` |
 | Data | `<pool>/Applications/overlook/data` — written by cron, read by the app |
 | Config | `<pool>/Applications/overlook/config` — shared settings |
@@ -249,8 +254,8 @@ Everything is optional — the app discovers or asks for all of it.
 | `HOST_IP` | `127.0.0.1` — where the app probes from |
 | `LINK_HOST` | the NAS's LAN address — what goes in a link you click |
 | `HEXOS_URL` | `https://deck.hexos.com/dash` |
-| `IMAGE` | `ghcr.io/boldestfutura/overlook:latest` (installer only) |
-| `UPDATE_REPO` / `UPDATE_BRANCH` | `Boldestfutura/overlook` / `main` |
+| `IMAGE` | `ghcr.io/boldestfutura/dashy:latest` (installer only) |
+| `UPDATE_REPO` / `UPDATE_BRANCH` | `Boldestfutura/dashy` / `main` |
 | `IMAGE_UPDATE_SWEEP` | `1` — nudge TrueNAS to re-check image registries |
 
 ## Uninstall

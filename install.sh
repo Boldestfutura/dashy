@@ -11,7 +11,7 @@
 set -uo pipefail
 
 REPO="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-APP_NAME="${APP_NAME:-overlook}"
+APP_NAME="${APP_NAME:-dashy}"
 
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 info() { printf '   %s\n' "$*"; }
@@ -231,7 +231,7 @@ midclt call -j filesystem.chown \
 
 # ---------------------------------------------------------------- the app
 say "creating the app"
-IMAGE="${IMAGE:-ghcr.io/boldestfutura/overlook:latest}"
+IMAGE="${IMAGE:-ghcr.io/boldestfutura/dashy:latest}"
 info "using $IMAGE"
 python3 - "$APP_NAME" "$BASE" "$LPORT" "$SERVE" "$IMAGE" "$TS" "$LAN_IP" "$REINSTALL" <<'PY'
 import json, subprocess, sys
