@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.15.2"
+APP_VERSION = "0.15.3"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1617,7 +1617,6 @@ PAGE = """<!doctype html>
   .vmico svg{width:13px;height:13px}
   .vmlbl{display:flex;align-items:center;gap:7px}
   .vmlbl span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .vmstate{font-size:16px;font-weight:650;letter-spacing:.01em}
   .big{font-size:19px;font-weight:620;letter-spacing:-.015em;margin:3px 0 0;
        font-variant-numeric:tabular-nums;line-height:1.2}
   .big small{font-size:12px;font-weight:500;color:var(--muted);margin-left:2px;letter-spacing:0}
@@ -2091,7 +2090,7 @@ const CARDS=[
   {k:'net',   label:'Network',   sec:'system', trend:1},
   {k:'dtemp', label:'Drive temps', sec:'storage'}
 ];
-const SECTIONS=[['system','System'],['storage','Storage'],['vms','Virtual machines'],['apps','Apps']];
+const SECTIONS=[['system','System'],['storage','Storage'],['apps','Apps'],['vms','Virtual machines']];
 const CARDK=CARDS.map(c=>c.k);
 
 /* ---------- preferences ------------------------------------------------
@@ -2582,6 +2581,10 @@ function build(){
 
 // One card per VM. A VM is either on or it is not, so the card leads with
 // that rather than with a number.
+function vmName(v){
+  return String((v && v.name) || ('VM ' + (v && v.id))).replace(/_/g, ' ');
+}
+
 function vmIcon(name){
   const h=hueOf(name||'vm');
   return '<span class="vmico" style="background:hsl('+h+' 42% 46%)" aria-hidden="true">'+
@@ -2602,9 +2605,9 @@ function vmsSection(){
                  v.memory?ram(v.memory*1024*1024):''].filter(Boolean).join(' \u00b7 ');
       return '<div class="cardwrap" data-k="vm-'+v.id+'"'+(run?'':' data-state="warn"')+'>'+
         '<div class="jig"><button class="card vmcard" data-pop="vm-'+v.id+'">'+
-          '<p class="lbl vmlbl">'+vmIcon(v.name)+
-            '<span>'+esc(v.name||('VM '+v.id))+'</span></p>'+
-          '<p class="big vmstate">'+(run?'Running':esc(title1(v.state||'Stopped')))+'</p>'+
+          '<p class="lbl vmlbl">'+vmIcon(vmName(v))+
+            '<span>'+esc(vmName(v))+'</span></p>'+
+          '<p class="big">'+(run?'Running':esc(title1(v.state||'Stopped')))+'</p>'+
           '<p class="sub">'+esc(sub)+'</p>'+
         '</button></div></div>';
     }).join('')+'</div></div>';
@@ -2648,7 +2651,7 @@ function vmSheet(id){
     'hypervisor, so this is queued for the root job and runs within a '+
     'minute.</span></div>';
 
-  return [v.name||('VM '+v.id), rows+controls];
+  return [vmName(v), rows+controls];
 }
 
 function appsSection(){

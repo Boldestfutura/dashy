@@ -31,7 +31,7 @@ add and remove things.
   it has been given. Tapping one offers start, stop and restart; the container
   cannot reach the hypervisor, so the request goes to the same root worker
   that performs app upgrades and runs within a minute.
-- **Grouped by what it is.** System, Storage, Virtual machines and Apps, each under its own
+- **Grouped by what it is.** System, Storage, Apps and Virtual machines, each under its own
   heading, with a Health card that leads and says in words whether anything
   needs you. A pool gets its own card rather than one aggregate number.
 - **Make it yours.** Hold a tile to resize or remove it: normal, double width
