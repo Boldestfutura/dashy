@@ -168,6 +168,10 @@ def appname(pid, cache, root):
         # a hyphen in it makes that unsplittable - so only fall back to it.
         labels = ((meta.get("Config") or {}).get("Labels") or {})
         name = labels.get("com.docker.compose.project") or ""
+        # TrueNAS names every compose project ix-<app>; that prefix is an
+        # implementation detail and should not reach the dashboard.
+        if name.startswith("ix-"):
+            name = name[3:]
         if not name:
             raw = (meta.get("Name") or "").lstrip("/")
             name = raw[3:].rsplit("-", 2)[0] if raw.startswith("ix-") else raw
