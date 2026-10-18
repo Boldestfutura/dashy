@@ -1,5 +1,5 @@
 #!/bin/sh
-# Processes upgrade requests Dashy drops in the queue. Runs as root from cron.
+# Processes upgrade requests Overlook drops in the queue. Runs as root from cron.
 # A request is a file named <app>.req; the app name is validated against the
 # installed app list before anything is run.
 # Paths derive from this script's own location, so the app works wherever the
@@ -153,7 +153,7 @@ except Exception: print('UNKNOWN')" 2>/dev/null)
   fi
 fi
 
-# --- a request to update Dashy itself ---------------------------------------
+# --- a request to update Overlook itself ---------------------------------------
 # Two install shapes, and the update differs between them:
 #   image  - the app runs a published container image, so pull a new one
 #   files  - the app runs a stock python image with this directory mounted in,
@@ -161,7 +161,7 @@ fi
 if [ -f "$Q/_self.req" ]; then
   rm -f "$Q/_self.req"
   APPNAME=$(basename "$BASE")
-  REPO="${UPDATE_REPO:-Boldestfutura/dashy}"
+  REPO="${UPDATE_REPO:-Boldestfutura/overlook}"
   BRANCH="${UPDATE_BRANCH:-main}"
   BASEURL="https://raw.githubusercontent.com/$REPO/$BRANCH/app"
   note(){ python3 - "$1" "$2" "$S" "${3:-}" <<'PYN'
@@ -177,7 +177,7 @@ json.dump(d,open(path,"w"))
 PYN
   }
 
-  # Dashy is a published image, so an update is a pull. There used to be a
+  # Overlook is a published image, so an update is a pull. There used to be a
   # second path for a bind-mounted file install, which meant two ways to update
   # and a mode to get wrong; the installer only builds image installs now.
   APPNAME=$(basename -- "$BASE")
@@ -188,7 +188,7 @@ except Exception: raise SystemExit
 print(svc.get('image') or '')" 2>/dev/null)
 
   case "$IMAGE" in
-    */dashy:*|*/dashy)
+    */overlook:*|*/overlook)
       note running "taking a snapshot" 5
       stamp=$(date +%Y%m%d-%H%M%S)
       ds=${BASE#/mnt/}
@@ -236,7 +236,7 @@ while True:
         note failed "could not pull the image"
       fi ;;
     *)
-      note failed "this install does not run a Dashy image; update it by hand" ;;
+      note failed "this install does not run a Overlook image; update it by hand" ;;
   esac
 fi
 

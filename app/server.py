@@ -12,8 +12,8 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.15.3"
-APP_NAME = "Dashy"
+APP_VERSION = "0.16.0"
+APP_NAME = "Overlook"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
 # Loopback is right for the host-networked case and harmless otherwise; a
@@ -67,7 +67,7 @@ HEXOS_URL = os.environ.get("HEXOS_URL", "https://deck.hexos.com/dash")
 
 # Where this install gets its own updates. The check is done by the cron job,
 # not by the container, and it is a plain file read here.
-UPDATE_REPO = os.environ.get("UPDATE_REPO", "Boldestfutura/dashy")
+UPDATE_REPO = os.environ.get("UPDATE_REPO", "Boldestfutura/overlook")
 UPDATE_BRANCH = os.environ.get("UPDATE_BRANCH", "main")
 
 # Only used to pretty up names and add a one-liner. Anything not listed still
@@ -84,8 +84,12 @@ KNOWN = {
     "sparkyfitness":  ("SparkyFitness",  "Workouts and food"),
     "slskd":          ("Soulseek",       "slskd"),
     "tally":          ("Tally",          "Scoreboard"),
-    "dashboard":      ("Dashy",          "This page"),
-    "dashy":          ("Dashy",          "This page"),
+    # Three keys for one app: it was "dashboard", then "dashy", and is now
+    # "overlook". An install that predates a rename still carries the old
+    # name, and should still recognise itself.
+    "dashboard":      ("Overlook",       "This page"),
+    "dashy":          ("Overlook",       "This page"),
+    "overlook":       ("Overlook",       "This page"),
     "rust-desk":      ("RustDesk",       "Remote desktop"),
 }
 # host-networked apps publish no ports, so they cannot be matched by owner
@@ -341,7 +345,7 @@ def _fetch_latest(repo):
     try:
         req = urllib.request.Request(
             "https://raw.githubusercontent.com/%s/%s/app/server.py"
-            % (repo, UPDATE_BRANCH), headers={"User-Agent": "dashy"})
+            % (repo, UPDATE_BRANCH), headers={"User-Agent": "overlook"})
         with urllib.request.urlopen(req, timeout=20) as r:
             for line in r.read(200000).decode("utf-8", "replace").splitlines():
                 if line.startswith("APP_VERSION"):
@@ -352,9 +356,9 @@ def _fetch_latest(repo):
 
 
 def _getjson(url, headers=None):
-    req = urllib.request.Request(url, headers=headers or {"User-Agent": "dashy"})
+    req = urllib.request.Request(url, headers=headers or {"User-Agent": "overlook"})
     if headers:
-        req.add_header("User-Agent", "dashy")
+        req.add_header("User-Agent", "overlook")
     with urllib.request.urlopen(req, timeout=20) as r:
         return json.loads(r.read(1 << 20))
 
@@ -881,14 +885,14 @@ def request_serve(host=""):
                  or "." not in host):
         return False, "that does not look like a tailnet name"
 
-    # Only ports Dashy has actually discovered, so this cannot be talked into
+    # Only ports Overlook has actually discovered, so this cannot be talked into
     # publishing something arbitrary that happens to be listening.
     with _lock:
         svcs = list(_state.get("services") or [])
     want = sorted({int(s["lport"]) for s in svcs
                    if s.get("lport") and not s.get("port")})
     if PORT not in {int(s["lport"]) for s in svcs if s.get("lport")}:
-        want.append(PORT)              # Dashy publishes no ports of its own
+        want.append(PORT)              # Overlook publishes no ports of its own
     want = sorted(set(want))
     if not want:
         return True, "everything is already published"
@@ -945,7 +949,11 @@ _LISTS = ("order", "hidden", "wide")
 _THEMES = ("system", "light", "dark")
 # Must match ACCENTS in the page. When it did not, every accent added to the
 # page but not to this tuple was accepted by the UI and dropped on save.
-_ACCENTS = ("teal", "blue", "violet", "amber", "yellow", "rose", "green")
+# The four current names, plus the seven they replaced: a client that has not
+# reloaded yet still sends the old one, and silently discarding it on save is
+# exactly how tile layouts were lost before.
+_ACCENTS = ("dusk", "harbour", "heather", "granite",
+            "teal", "blue", "violet", "amber", "yellow", "rose", "green")
 _prefs_cache = {"mtime": None, "data": None}
 
 
@@ -1122,7 +1130,7 @@ def discover():
     """Every installed app, plus whatever Serve says about how to reach it.
 
     Serve used to BE the list, which meant publishing one app hid all the
-    others - install Dashy on a fresh Tailscale setup and the dashboard showed
+    others - install Overlook on a fresh Tailscale setup and the dashboard showed
     exactly one tile, itself. Serve answers "what address", not "what exists".
     The app list comes from the NAS; anything you do not want, hide."""
     pub = serve_map()
@@ -1161,7 +1169,7 @@ def discover():
                     "iconsrc": ("/appicon/" + a["name"]) if a.get("icon") else None})
 
     # Published ports that belong to no installed app: the TrueNAS UI on 443,
-    # and Dashy itself, which publishes nothing because it runs host networking.
+    # and Overlook itself, which publishes nothing because it runs host networking.
     for lport, tport in pub.items():
         if lport in claimed:
             continue
@@ -1246,11 +1254,11 @@ PAGE = """<!doctype html>
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#f5f6f8" id="tc">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Dashy">
+<meta name="apple-mobile-web-app-title" content="Overlook">
 <link rel="icon" href="/favicon.png" sizes="32x32" type="image/png">
 <link rel="apple-touch-icon" href="/icon-180.png">
 <link rel="manifest" href="/manifest.webmanifest">
-<title>Dashy</title>
+<title>Overlook</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='2' y='2' width='28' height='28' rx='8.5' fill='%230d9488'/%3E%3Cpath d='M6.5 19h4L13 12l3.5 11 3-8 1.5 4h4.5' fill='none' stroke='%23ffffff' stroke-width='2.3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
   :root{
@@ -1412,13 +1420,18 @@ PAGE = """<!doctype html>
   .seg button[aria-pressed="true"]{background:var(--panel);color:var(--ink);
                                    box-shadow:0 1px 3px rgba(0,0,0,.12)}
 
-  .sw{display:grid;grid-template-columns:repeat(7,24px);gap:8px;
-      justify-content:space-between;padding:4px 10px 10px}
-  .sw button{width:24px;height:24px;border-radius:50%;border:2px solid transparent;
+  /* Four named colours rather than seven anonymous dots: the name is what
+     makes a choice repeatable when you come back to it a month later. */
+  .sw{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;
+      justify-items:center;padding:4px 10px 12px}
+  .swatch{display:flex;flex-direction:column;align-items:center;gap:6px}
+  .sw button{width:26px;height:26px;border-radius:50%;border:2px solid transparent;
              cursor:pointer;padding:0;transition:transform .14s ease}
   .sw button:hover{transform:scale(1.12)}
   .sw button[aria-pressed="true"]{border-color:var(--ink);
                                   box-shadow:0 0 0 2px var(--panel) inset}
+  .swname{font-size:10.5px;font-weight:600;color:var(--muted);letter-spacing:.01em}
+  .swatch:has(button[aria-pressed="true"]) .swname{color:var(--ink)}
 
   /* ---- rearrange mode -------------------------------------------------- */
   /* iOS-style wobble. Two keyframe sets and a per-tile delay so the tiles are
@@ -1806,12 +1819,19 @@ PAGE = """<!doctype html>
 <div class="wrap">
   <header>
     <div class="id">
-      <svg class="mark" viewBox="0 0 32 32" role="img" aria-label="Dashy">
-        <rect width="32" height="32" rx="8.5" fill="var(--brand)"/>
-        <path d="M6.5 19h4L13 12l3.5 11 3-8 1.5 4h4.5" fill="none" stroke="#fff"
-              stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
+      <!-- Ridgelines receding, with the sun behind. Three fills at different
+           opacities rather than one stroke: the depth is the point, and it is
+           what survives being shrunk to a 16px favicon. -->
+      <svg class="mark" viewBox="0 0 48 48" role="img" aria-label="Overlook">
+        <rect width="48" height="48" rx="12" fill="var(--brand)"/>
+        <g fill="#fff">
+          <circle cx="33" cy="13" r="4.2" opacity=".55"/>
+          <path d="M2 30c6-1 9-7 14-7s7 4 12 4 9-5 14-5 4 1 6 2v12H2V30Z" opacity=".32"/>
+          <path d="M2 36c5-2 8-9 13-9s8 6 13 6 9-6 14-6 4 2 6 3v12H2v-6Z" opacity=".6"/>
+          <path d="M2 42c6-3 10-8 15-8s9 7 14 7 10-4 15-4v9H2v-4Z"/>
+        </g>
       </svg>
-      <div style="min-width:0"><h1>Dashy<span class="host" id="host"></span></h1>
+      <div style="min-width:0"><h1>Overlook<span class="host" id="host"></span></h1>
         <p class="beta">beta</p></div>
     </div>
     <div class="hdr-r">
@@ -1839,7 +1859,7 @@ PAGE = """<!doctype html>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
                  stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
             <span class="dots" id="mi-selfdots" hidden><i></i><i></i><i></i></span>
-            <span id="mi-selftxt">Update Dashy</span><span class="rt" id="mi-selfver"></span></button>
+            <span id="mi-selftxt">Update Overlook</span><span class="rt" id="mi-selfver"></span></button>
           <div class="msep"></div>
           <p class="mh">Appearance</p>
           <div class="seg" id="seg-theme" role="group" aria-label="Theme">
@@ -1921,12 +1941,12 @@ PAGE = """<!doctype html>
 <div class="setup" id="setup" hidden>
   <div class="setupcard">
     <button class="back" id="su-back" hidden type="button">&lsaquo; Back</button>
-    <svg class="mark" viewBox="0 0 32 32" role="img" aria-label="Dashy">
+    <svg class="mark" viewBox="0 0 32 32" role="img" aria-label="Overlook">
       <rect width="32" height="32" rx="8.5" fill="var(--brand)"/>
       <path d="M6.5 19h4L13 12l3.5 11 3-8 1.5 4h4.5" fill="none" stroke="#fff"
             stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
-    <h2 id="su-h">Welcome to Dashy</h2>
+    <h2 id="su-h">Welcome to Overlook</h2>
     <p class="lede" id="su-lede">A dashboard for your NAS that finds your apps
       on its own.</p>
 
@@ -2094,20 +2114,26 @@ const SECTIONS=[['system','System'],['storage','Storage'],['apps','Apps'],['vms'
 const CARDK=CARDS.map(c=>c.k);
 
 /* ---------- preferences ------------------------------------------------
-   Per device, in localStorage. Dashy has no login, so there is nowhere else
+   Per device, in localStorage. Overlook has no login, so there is nowhere else
    sensible to put them, and every read is guarded: private windows and
    blocked site data both throw rather than return null.                   */
-const PKEY='dashy.prefs.v2';
+const PKEY='overlook.prefs.v2';
+/* Four, deliberately. Amber, red and green already mean warn, bad and ok, so
+   an accent that strays into them reads as an alert that is not there. These
+   all sit in the blue-to-stone range, which is where the name lives too. */
 const ACCENTS={
-  teal:  {light:'#0d9488', dark:'#14b8a6'},
-  blue:  {light:'#2f6df6', dark:'#5b8cff'},
-  violet:{light:'#6d4aff', dark:'#8b6cff'},
-  amber: {light:'#d9820a', dark:'#f0a92c'},
-  yellow:{light:'#dcae00', dark:'#fcd34d'},
-  rose:  {light:'#e0443a', dark:'#f87171'},
-  green: {light:'#1fa971', dark:'#34d399'}
+  dusk:    {light:'#4a57c8', dark:'#7d87e6', name:'Dusk'},
+  harbour: {light:'#1d7391', dark:'#49a7c6', name:'Harbour'},
+  heather: {light:'#7b57ad', dark:'#a583d6', name:'Heather'},
+  granite: {light:'#51606e', dark:'#8c9bab', name:'Granite'}
 };
-const DEFAULTS={theme:'system', accent:'teal', order:CARDK.slice(), hidden:[], wide:[], size:{},
+
+/* Seven colours became four, so a saved choice may no longer exist. Map it to
+   the nearest survivor rather than silently dropping someone back to default. */
+const ACCENT_WAS={teal:'harbour', blue:'dusk', violet:'heather',
+                  amber:'granite', yellow:'granite', rose:'heather', green:'harbour'};
+function migrateAccent(a){ return ACCENTS[a] ? a : (ACCENT_WAS[a] || 'dusk'); }
+const DEFAULTS={theme:'system', accent:'dusk', order:CARDK.slice(), hidden:[], wide:[], size:{},
                 setup:{}, weather:null};
 let prefs=Object.assign({}, DEFAULTS);
 let lastTick=0;
@@ -2121,7 +2147,7 @@ function loadPrefs(){
     try{
       const d=JSON.parse(raw)||{};
       if(['system','light','dark'].indexOf(d.theme)>=0) prefs.theme=d.theme;
-      if(ACCENTS[d.accent]) prefs.accent=d.accent;
+      if(d.accent) prefs.accent=migrateAccent(d.accent);
       if(Array.isArray(d.hidden)) prefs.hidden=d.hidden.filter(k=>CARDK.indexOf(k)>=0);
       if(Array.isArray(d.wide)) prefs.wide=d.wide.filter(k=>CARDK.indexOf(k)>=0);
       if(d.size && typeof d.size==='object') prefs.size=cleanSize(d.size);
@@ -2200,8 +2226,9 @@ function adoptPrefs(P){
   if(P.setup && typeof P.setup==='object') prefs.setup=P.setup;
   if(P.weather && typeof P.weather==='object') prefs.weather=P.weather;
   if(P.theme && P.theme!==prefs.theme){ prefs.theme=P.theme; applyTheme(); }
-  if(P.accent && ACCENTS[P.accent] && P.accent!==prefs.accent){
-    prefs.accent=P.accent; applyAccent();
+  const inc=P.accent && migrateAccent(P.accent);
+  if(inc && inc!==prefs.accent){
+    prefs.accent=inc; applyAccent();
   }
   try{ localStorage.setItem(PKEY, JSON.stringify(prefs)); }catch(e){}
   return layoutChanged;
@@ -2219,12 +2246,93 @@ function applyTheme(){
   document.querySelectorAll('#seg-theme button').forEach(b=>
     b.setAttribute('aria-pressed', String(b.dataset.theme===prefs.theme)));
 }
+/* ---------- tonal surfaces -------------------------------------------------
+   Material 3's idea, done with arithmetic rather than a library: every
+   surface is the chosen colour at a different tone, with most of its chroma
+   taken out. The background, the cards, the borders and the muted text all
+   carry a trace of the accent, so picking Heather does not just recolour the
+   icon - it tilts the whole page.
+
+   OKLCH rather than HSL. HSL's lightness is not perceptual, so the same L
+   across two hues gives two visibly different greys, and the neutrals come
+   out blotchy. The conversion below is the standard sRGB <-> Oklab matrices.
+   Kept short on purpose: this runs on every theme change.                */
+
+function srgbToLinear(c){ return c<=0.04045 ? c/12.92 : Math.pow((c+0.055)/1.055, 2.4); }
+function linearToSrgb(c){ return c<=0.0031308 ? c*12.92 : 1.055*Math.pow(c, 1/2.4)-0.055; }
+
+function hexToOklch(hex){
+  const h=hex.replace('#','');
+  const r=srgbToLinear(parseInt(h.slice(0,2),16)/255),
+        g=srgbToLinear(parseInt(h.slice(2,4),16)/255),
+        b=srgbToLinear(parseInt(h.slice(4,6),16)/255);
+  const l=Math.cbrt(0.4122214708*r+0.5363325363*g+0.0514459929*b),
+        m=Math.cbrt(0.2119034982*r+0.6806995451*g+0.1073969566*b),
+        s2=Math.cbrt(0.0883024619*r+0.2817188376*g+0.6299787005*b);
+  const L=0.2104542553*l+0.7936177850*m-0.0040720468*s2,
+        A=1.9779984951*l-2.4285922050*m+0.4505937099*s2,
+        B=0.0259040371*l+0.7827717662*m-0.8086757660*s2;
+  return {L, C:Math.sqrt(A*A+B*B), h:Math.atan2(B,A)};
+}
+
+function oklchToHex(L,C,h){
+  const A=Math.cos(h)*C, B=Math.sin(h)*C;
+  const l=Math.pow(L+0.3963377774*A+0.2158037573*B,3),
+        m=Math.pow(L-0.1055613458*A-0.0638541728*B,3),
+        s2=Math.pow(L-0.0894841775*A-1.2914855480*B,3);
+  const to=v=>{
+    const n=Math.round(Math.max(0,Math.min(1,linearToSrgb(v)))*255);
+    return n.toString(16).padStart(2,'0');
+  };
+  return '#'+to( 4.0767416621*l-3.3077115913*m+0.2309699292*s2)
+            +to(-1.2684380046*l+2.6097574011*m-0.3413193965*s2)
+            +to(-0.0041960863*l-0.7034186147*m+1.7076147010*s2);
+}
+
+/* tone: 0 = black, 1 = white. c: absolute chroma, NOT a fraction of the
+   source. A fraction looks right in theory and vanishes in practice - the
+   accents sit around C 0.15, so even a tenth of that is invisible across a
+   large surface. These are the values that actually read as tinted. */
+function tone(src, t, c){
+  return oklchToHex(t, c, src.h);
+}
+
+function applySurfaces(brandHex, dark){
+  const src=hexToOklch(brandHex);
+  const r=document.documentElement.style;
+  /* Scale by how saturated the accent itself is, so a deliberately muted
+     colour produces muted surfaces. Without this Granite - the near-neutral
+     option - came out as blue as Dusk, which defeats the point of offering
+     it. 0.13 is roughly where the vivid accents sit. */
+  const k=Math.max(0.3, Math.min(1, src.C/0.13));
+  const C=(x)=>x*k;
+  if(dark){
+    r.setProperty('--bg',    tone(src, 0.180, C(0.022)));
+    r.setProperty('--panel', tone(src, 0.255, C(0.028)));
+    r.setProperty('--faint', tone(src, 0.315, C(0.034)));
+    r.setProperty('--brd',   tone(src, 0.350, C(0.040)));
+    r.setProperty('--muted', tone(src, 0.690, C(0.034)));
+    r.setProperty('--ink',   tone(src, 0.950, C(0.016)));
+  }else{
+    r.setProperty('--bg',    tone(src, 0.952, C(0.024)));
+    r.setProperty('--panel', tone(src, 0.994, C(0.008)));
+    r.setProperty('--faint', tone(src, 0.928, C(0.032)));
+    r.setProperty('--brd',   tone(src, 0.872, C(0.038)));
+    r.setProperty('--muted', tone(src, 0.522, C(0.040)));
+    r.setProperty('--ink',   tone(src, 0.192, C(0.038)));
+  }
+  // the accent itself keeps all of its chroma
+  r.setProperty('--accent', brandHex);
+}
+
 function applyAccent(){
   // an inline custom property beats both palette blocks, so one value wins
   // in either theme; the light/dark pair keeps it legible in both
-  const a=ACCENTS[prefs.accent]||ACCENTS.teal;
-  document.documentElement.style.setProperty('--brand', isDark()?a.dark:a.light);
-  document.querySelectorAll('#sw-accent button').forEach(b=>
+  const a=ACCENTS[prefs.accent]||ACCENTS.dusk;
+  const dark=isDark(), brand=dark?a.dark:a.light;
+  document.documentElement.style.setProperty('--brand', brand);
+  applySurfaces(brand, dark);
+  document.querySelectorAll('#sw-accent button, #su-accent button').forEach(b=>
     b.setAttribute('aria-pressed', String(b.dataset.accent===prefs.accent)));
   paintBrowserChrome();
 }
@@ -2262,9 +2370,12 @@ function paintBrowserChrome(){
 }
 
 function buildSwatches(){
-  $('sw-accent').innerHTML=Object.keys(ACCENTS).map(k=>
-    '<button type="button" data-accent="'+k+'" aria-label="'+k+'" aria-pressed="false" '+
-    'style="background:'+ACCENTS[k].light+'"></button>').join('');
+  const html=Object.keys(ACCENTS).map(k=>
+    '<span class="swatch"><button type="button" data-accent="'+k+'" '+
+    'aria-label="'+ACCENTS[k].name+'" aria-pressed="false" '+
+    'style="background:'+ACCENTS[k].light+'"></button>'+
+    '<span class="swname">'+ACCENTS[k].name+'</span></span>').join('');
+  ['sw-accent','su-accent'].forEach(id=>{ const el=$(id); if(el) el.innerHTML=html; });
 }
 
 
@@ -2350,7 +2461,7 @@ function setupGo(step){
   $('su-skip').hidden = step!==0 || $('su-skip').dataset.never==='1';
 
   if(step===0){
-    $('su-h').textContent='Welcome to Dashy';
+    $('su-h').textContent='Welcome to Overlook';
     $('su-lede').textContent='A dashboard for your NAS that finds your apps on its own.';
     $('su-go').textContent='Get started';
   }
@@ -2480,7 +2591,7 @@ function migrateSizes(){
 function toggleWide(k){
   const n=nextSize(k);
   if(n===1) delete prefs.size[k]; else prefs.size[k]=n;
-  // keep the old flat list in step, so a device still on an older Dashy shows
+  // keep the old flat list in step, so a device still on an older Overlook shows
   // a resized card as wide rather than losing the setting entirely
   prefs.wide=CARDK.filter(c=>sizeOf(c)>=2);
   savePrefs(); applyWidths(); applyHidden();
@@ -2837,7 +2948,7 @@ function paint(d){
   paintLinks(d.links||{});
   // uptime lives in the settings pane now; the home screen stays clean
   const mv=$('mi-ver');
-  mv.innerHTML='<span>'+(d.app||'Dashy')+' v'+d.version+'</span>'+
+  mv.innerHTML='<span>'+(d.app||'Overlook')+' v'+d.version+'</span>'+
     '<span class="rt"><i class="pdot '+(footIssue?'warn':'ok')+'"></i>up '+
     footUp[0]+' '+footUp[1]+'</span>';
   mv.title = footIssue && footNote ? footNote : '';
@@ -3286,7 +3397,7 @@ function rowsSystem(){
   const ps = data.poolstatus || {};
 
   if (su.available)
-    out.push(srow('bad', 'Dashy ' + su.latest + ' is available',
+    out.push(srow('bad', 'Overlook ' + su.latest + ' is available',
                   'You are on ' + (su.current || data.version) +
                   '. Install it from the settings pane.'));
 
@@ -3336,7 +3447,7 @@ function rowsSystem(){
 
   // what is normal, so the sheet says something either way
   const normal = [];
-  normal.push(srow('ok', 'Dashy ' + data.version,
+  normal.push(srow('ok', 'Overlook ' + data.version,
                    su.checked ? 'Checked for updates ' + agoWord(Math.max(0, Math.round(Date.now()/1000 - su.checked))) : ''));
   normal.push(srow('ok', svc.length + ' apps installed',
                    (svc.length - down.length) + ' responding'));
@@ -3594,7 +3705,7 @@ function closePop(){
 
 async function askSelfUpdate(){
   const u=(data && data.selfupdate) || {};
-  $('sh-t').textContent='Update Dashy';
+  $('sh-t').textContent='Update Overlook';
   $('sh-s').textContent='';
   $('sh-b').innerHTML=
     '<div class="row"><span class="l"><span class="t1">'+esc(u.current||'')+
@@ -3602,7 +3713,7 @@ async function askSelfUpdate(){
       '<span class="t2">from '+esc(u.repo||'the repository')+'</span></span></div>'+
     '<div class="row"><span class="t2 wrap">The new files are downloaded and '+
       'checked before anything is replaced, and a ZFS snapshot is taken first. '+
-      'Dashy restarts, so the page will go quiet for a few seconds.</span></div>'+
+      'Overlook restarts, so the page will go quiet for a few seconds.</span></div>'+
     '<div class="m-row" style="padding:12px 16px 14px;display:flex;gap:10px">'+
       '<button class="ubtn no" id="u-no">Cancel</button>'+
       '<button class="ubtn yes" id="su-yes">Update</button></div>';
@@ -3790,7 +3901,7 @@ applyTheme();
 // the shared layout is authoritative; the local copy is only a fallback for
 // first paint and for when the server has no writable config mount
 
-$('mi-ver').textContent='Dashy';
+$('mi-ver').textContent='Overlook';
 // a system theme change has to re-pick the accent shade too
 if(darkMQ){
   const onScheme=()=>{ if(prefs.theme==='system') applyAccent(); };

@@ -1,8 +1,8 @@
-# Dashy is stdlib-only Python, so there is nothing to install and nothing to
+# Overlook is stdlib-only Python, so there is nothing to install and nothing to
 # compile - the image is the stock interpreter with the app copied in.
 FROM python:3.13-alpine
 
-LABEL org.opencontainers.image.title="Dashy" \
+LABEL org.opencontainers.image.title="Overlook" \
       org.opencontainers.image.description="A self-discovering dashboard for TrueNAS SCALE" \
       org.opencontainers.image.licenses="MIT"
 
