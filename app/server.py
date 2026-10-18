@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.17.1"
+APP_VERSION = "0.17.2"
 APP_NAME = "Overlook"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1273,7 +1273,7 @@ PAGE = """<!doctype html>
        read as a designed thing. */
     --r-xs:8px; --r-sm:12px; --r-md:16px; --r-lg:22px; --r-xl:28px;
     --r-full:999px;
-    --r:var(--r-xl);
+    --r:var(--r-md);
   }
   /* dark palette twice: once for "follow the system" (suppressed when the user
      has explicitly chosen light), once for an explicit dark choice */
@@ -1471,7 +1471,7 @@ PAGE = """<!doctype html>
   .cardwrap .card{width:100%}
   .cardtools{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
              gap:7px;background:color-mix(in srgb,var(--panel) 97%,transparent);
-             border-radius:var(--r);z-index:3}
+             border-radius:var(--r-md);z-index:3}
   body.editing .cardtools{display:flex}
   .cardtools button{width:30px;height:30px;border-radius:9px;border:1px solid var(--brd);
                     background:var(--bg);color:var(--ink);font-size:14px;line-height:1;
@@ -1532,11 +1532,10 @@ PAGE = """<!doctype html>
   /* the container has a fixed height, so a taller chart drew straight out
      through the bottom of the card. Give it the room it is asking for. */
   .cardwrap[data-w="4"] .spark{margin-top:14px;height:132px}
-  /* A 28px corner cuts the ends off anything drawn to the card's edge, so
-     the trend line is inset far enough to clear it. Looked like a rendering
-     fault at the old flush position. */
-  .card .sparkwrap{margin-top:auto;padding-top:10px;padding-bottom:4px;
-                   margin-left:-4px;margin-right:-4px}
+  /* Inset enough to clear the card's corner radius: drawn flush, the curve
+     gets clipped at both ends and reads as a rendering fault. */
+  .card .sparkwrap{margin-top:auto;padding-top:10px;padding-bottom:3px;
+                   margin-left:-2px;margin-right:-2px}
   .cardwrap[data-w="2"] .card{min-height:168px}
 
 
@@ -1613,7 +1612,7 @@ PAGE = """<!doctype html>
      better. --surf is a tonal step up from the page, so the card reads as
      raised without anything being drawn around it. */
   .card{position:relative;background:var(--surf);border:none;
-        border-radius:var(--r-xl);padding:14px 15px;
+        border-radius:var(--r-md);padding:14px 15px;
         min-height:92px;display:flex;flex-direction:column;align-items:stretch}
   button.card{width:100%;text-align:left;font:inherit;color:inherit;
               cursor:pointer;appearance:none;
@@ -1777,7 +1776,7 @@ PAGE = """<!doctype html>
      shape is what separates the two groups now that nothing is outlined. */
   .apptile{position:relative;text-decoration:none;color:inherit;display:flex;
            flex-direction:column;gap:6px;background:var(--surf);
-           border:none;border-radius:var(--r-md);
+           border:none;border-radius:var(--r-sm);
            padding:11px 12px;min-height:84px;transition:border-color .15s ease}
   .apptile:hover{border-color:color-mix(in srgb,var(--accent) 40%,var(--brd))}
   .apptile .sdot{position:absolute;top:13px;right:12px;width:6px;height:6px;
@@ -3122,9 +3121,17 @@ function paintSelfUpdate(){
   const age=(st && st.t) ? (Date.now()/1000 - st.t) : 1e9;
   if(st && st.state==='running' && age < 900)
     return set('running','Updating\u2026', st.pct ? st.pct+'%' : (st.msg||''));
+  // An available update outranks a stale failure. The other order looks
+  // reasonable - show the most recent thing that happened - but it means one
+  // failed attempt hides a working update for an hour, with no way to retry.
+  // That happened for real: the worker refused an install it did not
+  // recognise, and the row then suppressed the fixed version behind it.
+  if(u && u.available)
+    return set('ready','Update to '+u.latest,
+               (st && st.state==='failed' && age < 3600)
+                 ? 'last attempt failed' : u.current+' \u2192 '+u.latest);
   if(st && st.state==='failed' && age < 3600)
     return set('idle','Install update', st.msg||'that did not work');
-  if(u && u.available) return set('ready','Update to '+u.latest, u.current+' \u2192 '+u.latest);
   if(st && st.state==='done' && age < 3600) return set('idle','Install update','just updated');
   set('idle','Install update', u ? 'up to date' : 'not checked yet');
 }
