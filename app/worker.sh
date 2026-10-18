@@ -83,6 +83,76 @@ print(s or '-')
   fi
 fi
 
+# --- a request to start, stop or restart a VM ---------------------------
+# The container cannot reach midclt, so the dashboard drops the request here.
+# Both the id and the action are validated against the installed VM list
+# before anything runs: the queue is a file, and a file is not an argument.
+if [ -f "$Q/_vm.req" ]; then
+  VMREQ=$(cat "$Q/_vm.req" 2>/dev/null)
+  rm -f "$Q/_vm.req"
+  vnote(){ python3 - "$1" "$2" "$S" <<'PYV'
+import json,sys,time
+st,msg,path=sys.argv[1],sys.argv[2],sys.argv[3]
+try: d=json.load(open(path))
+except Exception: d={}
+d["_vm"]={"state":st,"msg":msg,"t":int(time.time())}
+json.dump(d,open(path,"w"))
+PYV
+  }
+  PARSED=$(printf '%s' "$VMREQ" | python3 -c "
+import json,sys
+try: r=json.load(sys.stdin)
+except Exception: raise SystemExit
+a=str(r.get('action') or '')
+if a not in ('start','stop','restart'): raise SystemExit
+try: i=int(r.get('id'))
+except Exception: raise SystemExit
+print('%d %s' % (i, a))
+" 2>/dev/null)
+
+  if [ -z "$PARSED" ]; then
+    vnote failed "that request did not make sense"
+  else
+    set -- $PARSED
+    VMID="$1"; VMACT="$2"
+    # the id has to be a VM that actually exists
+    VMNAME=$(midclt call vm.query "[[\"id\",\"=\",$VMID]]" 2>/dev/null | python3 -c "
+import json,sys
+try: print(json.load(sys.stdin)[0]['name'])
+except Exception: pass" 2>/dev/null)
+    if [ -z "$VMNAME" ]; then
+      vnote failed "no such VM"
+    else
+      vnote running "$VMACT $VMNAME"
+      case "$VMACT" in
+        start)   midclt call vm.start "$VMID" >/dev/null 2>&1 ;;
+        stop)    timeout 120 midclt call -j vm.stop "$VMID" >/dev/null 2>&1 ;;
+        restart)
+          # vm.restart exists but has been unreliable here; stop, wait for it
+          # to really be STOPPED, then start. Starting a VM that is still
+          # shutting down leaves it off.
+          timeout 120 midclt call -j vm.stop "$VMID" >/dev/null 2>&1
+          i=0
+          while [ $i -lt 25 ]; do
+            st=$(midclt call vm.query "[[\"id\",\"=\",$VMID]]" 2>/dev/null | python3 -c "
+import json,sys
+try: print((json.load(sys.stdin)[0].get('status') or {}).get('state'))
+except Exception: pass" 2>/dev/null)
+            [ "$st" = "STOPPED" ] && break
+            sleep 3; i=$((i+1))
+          done
+          midclt call vm.start "$VMID" >/dev/null 2>&1 ;;
+      esac
+      sleep 3
+      NOW=$(midclt call vm.query "[[\"id\",\"=\",$VMID]]" 2>/dev/null | python3 -c "
+import json,sys
+try: print((json.load(sys.stdin)[0].get('status') or {}).get('state'))
+except Exception: print('UNKNOWN')" 2>/dev/null)
+      vnote done "$VMNAME is $NOW"
+    fi
+  fi
+fi
+
 # --- a request to update Dashy itself ---------------------------------------
 # Two install shapes, and the update differs between them:
 #   image  - the app runs a published container image, so pull a new one
@@ -178,6 +248,13 @@ for f in "$Q"/*.req; do
   [ -e "$f" ] || continue
   app=$(basename "$f" .req)
   rm -f "$f"
+
+  # _self and _serve are handled above, by name. If one turns up here it is a
+  # request that arrived while its own block was still running, and it must
+  # not be mistaken for an app: app.query would not find it and the loop would
+  # record "no such app" against a key the dashboard reads as a failed update,
+  # which then hides the real one.
+  case "$app" in _*) continue ;; esac
 
   # only ever act on an app that actually exists
   known=$(midclt call app.query "[[\"name\",\"=\",\"$app\"]]" 2>/dev/null | head -c 20)

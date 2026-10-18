@@ -27,7 +27,11 @@ add and remove things.
 - **Updates from the dashboard.** Apps with an update show a marker; tapping it
   queues the upgrade and a recursive ZFS snapshot is taken first. Dashy updates
   itself the same way, straight from this repository.
-- **Grouped by what it is.** System, Storage and Apps, each under its own
+- **Virtual machines.** Every VM on the box, whether it is running, and what
+  it has been given. Tapping one offers start, stop and restart; the container
+  cannot reach the hypervisor, so the request goes to the same root worker
+  that performs app upgrades and runs within a minute.
+- **Grouped by what it is.** System, Storage, Virtual machines and Apps, each under its own
   heading, with a Health card that leads and says in words whether anything
   needs you. A pool gets its own card rather than one aggregate number.
 - **Make it yours.** Hold a tile to resize or remove it: normal, double width

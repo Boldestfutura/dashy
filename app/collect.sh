@@ -182,8 +182,18 @@ try:
     import subprocess
     cfg = json.loads(subprocess.run(["midclt", "call", "docker.config"],
                                     capture_output=True, text=True, timeout=30).stdout)
-    if cfg.get("dataset"):
-        root = "/mnt/%s/docker" % cfg["dataset"]
+    ds = cfg.get("dataset")
+    if ds:
+        # Ask ZFS where the dataset actually is. Assuming /mnt/<dataset> is
+        # wrong on TrueNAS: HDDs/ix-apps mounts at /mnt/.ix-apps, so the
+        # lookup silently opened a path that did not exist and every process
+        # came back with no app name.
+        mp = subprocess.run(["zfs", "get", "-H", "-o", "value", "mountpoint", ds],
+                            capture_output=True, text=True, timeout=30).stdout.strip()
+        if mp and mp not in ("-", "none", "legacy"):
+            root = os.path.join(mp, "docker")
+        else:
+            root = "/mnt/%s/docker" % ds
 except Exception:
     pass
 
@@ -263,6 +273,51 @@ with open(tmp, "w") as f:
     json.dump(out, f)
 os.replace(tmp, D + "/poolstatus.json")
 PYSTATUS
+
+# --- virtual machines. The container has no midclt, so the names, states and
+# --- sizes come from here like everything else.
+python3 - "$D" <<'PYVM'
+import json, os, subprocess, sys
+
+D = sys.argv[1]
+out = []
+try:
+    vms = json.loads(subprocess.run(["midclt", "call", "vm.query"],
+                                    capture_output=True, text=True, timeout=60).stdout)
+except Exception:
+    vms = []
+
+for v in vms if isinstance(vms, list) else []:
+    st = v.get("status") or {}
+    devs = v.get("devices") or []
+    kinds = {}
+    for d in devs:
+        a = d.get("attributes") or {}
+        k = d.get("dtype") or a.get("dtype") or "?"
+        kinds[k] = kinds.get(k, 0) + 1
+    # vcpus x cores x threads is the real total; the UI should not have to
+    # know that TrueNAS splits it three ways
+    cpus = (v.get("vcpus") or 1) * (v.get("cores") or 1) * (v.get("threads") or 1)
+    out.append({
+        "id": v.get("id"),
+        "name": v.get("name"),
+        "description": v.get("description") or "",
+        "state": st.get("state") or "UNKNOWN",
+        "cpus": cpus,
+        "memory": v.get("memory"),
+        "autostart": bool(v.get("autostart")),
+        "devices": kinds,
+        "usb": [(d.get("attributes") or {}).get("device")
+                for d in devs
+                if (d.get("dtype") or (d.get("attributes") or {}).get("dtype")) == "USB"],
+    })
+
+out.sort(key=lambda x: (x.get("name") or "").lower())
+tmp = D + "/vms.json.tmp"
+with open(tmp, "w") as f:
+    json.dump(out, f)
+os.replace(tmp, D + "/vms.json")
+PYVM
 
 # --- CPU package power. RAPL is root-only, so sample it here and leave a trail
 # --- the container can read. 25 samples at 2s covers most of each minute.

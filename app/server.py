@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.14.0"
+APP_VERSION = "0.15.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -553,6 +553,38 @@ def procs_now():
     """Top processes by CPU and by memory, sampled on the host - the container
     has its own pid namespace and can see only itself."""
     return _read_json("procs.json", {})
+
+
+def vms_now():
+    """Virtual machines, written by the root cron job - the container has no
+    midclt of its own."""
+    return _read_json("vms.json", [])
+
+
+def request_vm(vm_id, action):
+    """Ask the root worker to start, stop or restart a VM.
+
+    Validated here as well as in the worker. The worker checks the id against
+    the installed list because it is the thing holding root; this check is
+    only so an obvious mistake fails fast with a sensible message."""
+    if action not in ("start", "stop", "restart"):
+        return False, "unknown action"
+    try:
+        vm_id = int(vm_id)
+    except (TypeError, ValueError):
+        return False, "bad VM id"
+    known = {v.get("id") for v in vms_now()}
+    if vm_id not in known:
+        return False, "no such VM"
+    try:
+        os.makedirs(QUEUE, exist_ok=True)
+        tmp = os.path.join(QUEUE, "_vm.req.tmp")
+        with open(tmp, "w") as fh:
+            json.dump({"id": vm_id, "action": action}, fh)
+        os.replace(tmp, os.path.join(QUEUE, "_vm.req"))
+    except OSError as exc:
+        return False, "could not queue it: %s" % exc
+    return True, "queued"
 
 
 def pool_status():
@@ -1201,6 +1233,7 @@ def snapshot():
     out["selfupdate"] = self_update()
     out["procs"] = procs_now()
     out["poolstatus"] = pool_status()
+    out["vms"] = vms_now()
     out["links"] = header_links(svc, (out["prefs"] or {}).get("setup"))
     return out
 
@@ -1579,6 +1612,7 @@ PAGE = """<!doctype html>
   .cardwrap[data-state="bad"] .hcard .hv{color:var(--bad)}
   .lbl{font-size:11px;letter-spacing:.02em;color:var(--muted);
        font-weight:600;margin:0;text-align:left;align-self:flex-start}
+  .vmstate{font-size:16px;font-weight:650;letter-spacing:.01em}
   .big{font-size:19px;font-weight:620;letter-spacing:-.015em;margin:3px 0 0;
        font-variant-numeric:tabular-nums;line-height:1.2}
   .big small{font-size:12px;font-weight:500;color:var(--muted);margin-left:2px;letter-spacing:0}
@@ -2052,7 +2086,7 @@ const CARDS=[
   {k:'net',   label:'Network',   sec:'system', trend:1},
   {k:'dtemp', label:'Drive temps', sec:'storage'}
 ];
-const SECTIONS=[['system','System'],['storage','Storage'],['apps','Apps']];
+const SECTIONS=[['system','System'],['storage','Storage'],['vms','Virtual machines'],['apps','Apps']];
 const CARDK=CARDS.map(c=>c.k);
 
 /* ---------- preferences ------------------------------------------------
@@ -2505,9 +2539,10 @@ function poolCards(){
     k:'pool-'+p.name, label:p.name, sec:'storage', pop:'store', pool:p.name}));
 }
 function layoutSig(){
+  const vms=((data&&data.vms)||[]).map(v=>v.id+':'+v.state).join(',');
   const pools=((data&&data.pools)||[]).map(p=>p.name).join(',');
   const apps=((data&&data.services)||[]).map(s=>s.name).join(',');
-  return pools+'|'+apps;
+  return pools+'|'+apps+'|'+vms;
 }
 
 function build(){
@@ -2528,6 +2563,7 @@ function build(){
                   .concat(base.filter(c=>c.sec==='storage'));
   $('vitals').innerHTML = SECTIONS.map(([id,title])=>{
     if(id==='apps') return appsSection();
+    if(id==='vms') return vmsSection();
     const cards=order.filter(c=>c.sec===id);
     if(!cards.length) return '';
     return '<div class="sec" data-sec="'+id+'"><h2>'+title+'</h2>'+
@@ -2537,6 +2573,66 @@ function build(){
   applyWidths();
   builtSig=layoutSig();
   built=true;
+}
+
+// One card per VM. A VM is either on or it is not, so the card leads with
+// that rather than with a number.
+function vmsSection(){
+  const list=(data&&data.vms)||[];
+  if(!list.length) return '';
+  return '<div class="sec" data-sec="vms"><h2>Virtual machines</h2><div class="grid">'+
+    list.map(v=>{
+      const run=(v.state||'').toUpperCase()==='RUNNING';
+      const sub=[v.cpus?v.cpus+(v.cpus===1?' cpu':' cpus'):'',
+                 v.memory?ram(v.memory*1024*1024):''].filter(Boolean).join(' \u00b7 ');
+      return '<div class="cardwrap" data-k="vm-'+v.id+'"'+(run?'':' data-state="warn"')+'>'+
+        '<div class="jig"><button class="card" data-pop="vm-'+v.id+'">'+
+          '<p class="lbl">'+esc(v.name||('VM '+v.id))+'</p>'+
+          '<p class="big vmstate">'+(run?'Running':esc(title1(v.state||'Stopped')))+'</p>'+
+          '<p class="sub">'+esc(sub)+'</p>'+
+        '</button></div></div>';
+    }).join('')+'</div></div>';
+}
+
+function title1(s){ s=String(s||'').toLowerCase(); return s.charAt(0).toUpperCase()+s.slice(1); }
+
+// The sheet is where the power controls live, so they cannot be hit by a
+// stray tap on the dashboard.
+function vmSheet(id){
+  const v=((data&&data.vms)||[]).find(x=>String(x.id)===String(id));
+  if(!v) return ['Virtual machine','<div class="row"><span class="t2">Gone.</span></div>'];
+  const run=(v.state||'').toUpperCase()==='RUNNING';
+  const st=(data&&data.updates&&data.updates._vm)||null;
+  const busy = st && st.state==='running' && (Date.now()/1000 - (st.t||0)) < 300;
+
+  const rows=
+    srow(run?'ok':'warn', run?'Running':title1(v.state||'Stopped'),
+         (v.autostart?'Starts with the server':'Does not start automatically'))+
+    '<div class="row"><span class="l"><span class="t1">Allocated</span>'+
+      '<span class="t2">'+(v.cpus||'?')+' cpu'+(v.cpus===1?'':'s')+
+      (v.memory?' \u00b7 '+ram(v.memory*1024*1024)+' memory':'')+'</span></span></div>'+
+    (v.usb&&v.usb.length
+      ? '<div class="row"><span class="l"><span class="t1">USB passed through</span>'+
+        '<span class="t2">'+v.usb.map(esc).join(', ')+'</span></span></div>' : '')+
+    (v.description
+      ? '<div class="row"><span class="t2 wrap">'+esc(v.description)+'</span></div>' : '')+
+    (st && (Date.now()/1000-(st.t||0) < 600)
+      ? '<div class="row"><span class="t2">'+esc(st.msg||'')+'</span></div>' : '');
+
+  const btn=(act,label,cls)=>
+    '<button class="ubtn '+cls+'" data-vm="'+v.id+'" data-vmact="'+act+'"'+
+    (busy?' disabled':'')+'>'+label+'</button>';
+  const controls='<div class="m-row" style="padding:12px 16px 14px;display:flex;gap:10px">'+
+    // Neither action on a running VM gets the emphasised style: highlighting
+    // one would nudge a choice that should be deliberate. Start is safe, so
+    // it keeps it.
+    (run ? btn('stop','Stop','no')+btn('restart','Restart','no')
+         : btn('start','Start','yes'))+'</div>'+
+    '<div class="row"><span class="t2 wrap">The container cannot reach the '+
+    'hypervisor, so this is queued for the root job and runs within a '+
+    'minute.</span></div>';
+
+  return [v.name||('VM '+v.id), rows+controls];
 }
 
 function appsSection(){
@@ -2619,9 +2715,12 @@ function paint(d){
   // settings may have been changed on another device; adopt before drawing
   const relayout=adoptPrefs(d.prefs);
   if(!setupShown && setupNeeded()){ setupShown=true; openSetup(false); }
+  // Adopt the new payload BEFORE asking whether the layout changed:
+  // layoutSig() reads `data`, so testing it first compared the signature of
+  // the previous poll and every new section arrived one tick late.
+  data=d;
   if(!built) build();
   else if(relayout || layoutSig()!==builtSig){ build(); }
-  data=d;
 
   if(d.cpu!==null && d.cpu!==undefined){
     $('v-cpu').innerHTML=d.cpu.toFixed(0)+'<small>%</small>';
@@ -3424,8 +3523,11 @@ const POPS={
 };
 
 function renderPop(opening){
-  if(!openKey || !data || !POPS[openKey]) return;
-  const r=POPS[openKey]();
+  if(!openKey || !data) return;
+  // VM sheets are keyed by id rather than being listed in POPS
+  const r = openKey.indexOf('vm-')===0 ? vmSheet(openKey.slice(3))
+                                       : (POPS[openKey] ? POPS[openKey]() : null);
+  if(!r) return;
   const b=$('sh-b');
 
   if($('sh-t').textContent!==r[0]) $('sh-t').textContent=r[0];
@@ -3455,7 +3557,8 @@ function renderPop(opening){
 }
 
 function openPop(k){
-  if(!data || !POPS[k]) return;
+  if(!data) return;
+  if(k.indexOf('vm-')!==0 && !POPS[k]) return;
   openKey=k;
   $('sh-b')._html=null;      // force a rebuild so the entrance plays
   renderPop(true);
@@ -3547,6 +3650,20 @@ document.addEventListener('click',ev=>{
   if(u){ ev.preventDefault(); ev.stopPropagation();
          askUpdate(u.dataset.app,u.dataset.name,u.dataset.ver); return; }
   if(ev.target.id==='u-no'){ closePop(); return; }
+  const vb=ev.target.closest('button[data-vmact]');
+  if(vb){
+    const id=vb.dataset.vm, act=vb.dataset.vmact;
+    [].forEach.call(document.querySelectorAll('button[data-vmact]'),
+                    b=>{ b.disabled=true; });
+    vb.textContent = act==='start' ? 'Starting\u2026'
+                   : act==='stop'  ? 'Stopping\u2026' : 'Restarting\u2026';
+    fetch('/api/vm',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({id:Number(id), action:act})})
+      .then(r=>r.json())
+      .then(r=>{ if(!r.ok) vb.textContent = r.msg || 'that did not work'; })
+      .catch(()=>{ vb.textContent='could not reach the NAS'; });
+    return;
+  }
   if(ev.target.id==='su-yes'){
     ev.target.disabled=true; ev.target.textContent='Queued\u2026';
     fetch('/api/update',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -3641,6 +3758,10 @@ async function tick(){
     paint(await r.json());
     renderPop();
   }catch(e){
+    // Swallowed on purpose - a dropped poll must not kill the page - but
+    // recorded, because an exception thrown inside paint() is invisible
+    // otherwise and has cost real debugging time more than once.
+    window.__lastTickError = (e && e.stack) ? String(e.stack) : String(e);
   }
 }
 // chrome first, so the theme and accent are right before any data lands
@@ -3806,6 +3927,16 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/check":
             ok, msg = check_now()
             return self._send(200, json.dumps({"ok": ok, "msg": msg}),
+                              "application/json; charset=utf-8")
+        if path == "/api/vm":
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(min(n, 4096)) or b"{}")
+            except (ValueError, TypeError):
+                body = {}
+            ok, msg = request_vm(body.get("id"), str(body.get("action", "")))
+            return self._send(200 if ok else 400,
+                              json.dumps({"ok": ok, "msg": msg}),
                               "application/json; charset=utf-8")
         if path == "/api/serve":
             try:
