@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.18.0"
+APP_VERSION = "0.19.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -109,7 +109,9 @@ def _hostname():
 
 _lock = threading.Lock()
 HIST = 150          # samples kept per interface, 2s apart -> about 5 minutes
+APP_HIST = 90       # latency samples per app, 20s apart -> about half an hour
 _hist = {}
+_app_hist = {}
 _io_hist = deque(maxlen=HIST)
 _cpu_hist = deque(maxlen=HIST)
 _ctemp_hist = deque(maxlen=HIST)
@@ -1046,16 +1048,21 @@ def discover():
 
 
 def probe(port):
-    """Is something answering on the host at this port? Any HTTP reply counts as up."""
+    """Is something answering on the host at this port? Any HTTP reply counts as up.
+
+    The time it takes to answer is returned alongside the code: it is the one
+    live figure that is genuinely per-app, and a service creeping from 20ms to
+    two seconds is worth seeing before it stops answering at all."""
     url = "http://%s:%d/" % (HOST_IP, port)
     req = urllib.request.Request(url, method="GET")
+    t0 = time.monotonic()
     try:
         with urllib.request.urlopen(req, timeout=4) as r:
-            return r.status
+            return r.status, round((time.monotonic() - t0) * 1000)
     except urllib.error.HTTPError as e:
-        return e.code                      # 401/403 still means it is alive
+        return e.code, round((time.monotonic() - t0) * 1000)  # 401/403 is still alive
     except (urllib.error.URLError, socket.timeout, OSError, ValueError):
-        return 0
+        return 0, None
 
 
 def services_loop():
@@ -1064,7 +1071,9 @@ def services_loop():
         over = (load_prefs() or {}).get("urls") or {}
         for svc in discover():
             svc = dict(svc)
-            svc["code"] = probe(svc["lport"])
+            code, ms = probe(svc["lport"])
+            svc["code"] = code
+            svc["rt_ms"] = ms
             path = svc.get("path") or "/"
             # Both, always. Which one a tile uses is the viewer's setting, and
             # sending both means flipping it is instant on every device instead
@@ -1077,6 +1086,14 @@ def services_loop():
             # auto-resolved addresses and let the owner clear the pin.
             svc["url_custom"] = over.get(svc.get("id") or "")
             svc["url"] = svc["url_custom"] or svc["url_ts"] or svc["url_lan"]
+            # Latency trail, one sample per pass. Only a reachable reply is a
+            # figure worth plotting; a down app must not add a zero that would
+            # read as "fast".
+            stamp = int(time.time())
+            if ms is not None:
+                d = _app_hist.setdefault(svc["id"], deque(maxlen=APP_HIST))
+                d.append([stamp, ms])
+            svc["rt_hist"] = list(_app_hist.get(svc["id"]) or [])
             found.append(svc)
         with _lock:
             _state["services"] = found
@@ -1426,6 +1443,8 @@ PAGE = """<!doctype html>
   .urlrow{margin-top:4px;display:flex;flex-direction:column;gap:6px}
   .urlrow .fld2{width:100%;padding:9px 11px;border-radius:10px;border:1px solid var(--brd);
                 background:var(--faint);color:var(--ink);font:inherit;font-size:13px}
+  .urlrow .fld2:focus{outline:2px solid color-mix(in srgb,var(--accent) 45%,transparent);
+                      outline-offset:1px;border-color:var(--accent)}
   .urlrow .uhint{font-size:11.5px;color:var(--muted)}
   .urlrow .ubtns{display:flex;gap:8px;margin-top:2px}
   .urlrow .ubtns button{flex:1 1 auto}
@@ -1557,6 +1576,11 @@ PAGE = """<!doctype html>
   .sheet-h{display:flex;align-items:center;justify-content:space-between;gap:10px;
            padding:15px 16px 13px;border-bottom:1px solid var(--brd);flex:0 0 auto}
   .sheet-h p{margin:0;font-weight:700;font-size:15px;flex:0 0 auto}
+  .sheet-h #sh-ico{display:flex;align-items:center;flex:0 0 auto}
+  .sheet-h #sh-ico[hidden]{display:none}
+  .sheet-h #sh-ico .aico{width:32px;height:32px;border-radius:8px;object-fit:cover}
+  .sheet-h #sh-ico .aico.mono{display:flex;align-items:center;justify-content:center;
+                              color:#fff;font-size:13px;font-weight:700}
   .sh-sub{font-size:12.5px;font-weight:600;color:var(--muted);margin-right:auto;
           overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .x{appearance:none;border:none;background:var(--faint);color:var(--muted);cursor:pointer;
@@ -1656,19 +1680,61 @@ PAGE = """<!doctype html>
   .apptile .ust.running{color:var(--warn);background:color-mix(in srgb,var(--warn) 18%,transparent)}
   .apptile .ust.done{color:var(--ok);background:color-mix(in srgb,var(--ok) 18%,transparent)}
   .apptile .ust.failed{color:var(--bad);background:color-mix(in srgb,var(--bad) 18%,transparent)}
-  /* a custom address is a deliberate choice, so it gets a visible marker rather
-     than looking identical to the auto-resolved ones */
-  .apptile .ulink{position:absolute;bottom:10px;right:10px;cursor:pointer;appearance:none;
-                  width:21px;height:21px;display:flex;align-items:center;justify-content:center;
-                  padding:0;line-height:1;color:var(--muted);border-radius:50%;
-                  border:1px solid var(--brd);background:var(--faint);
-                  opacity:0;transition:opacity .15s ease,color .15s ease,border-color .15s ease}
-  .apptile:hover .ulink{opacity:.7}
-  .apptile .ulink:hover{opacity:1;color:var(--accent);
-                        border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
-  .apptile .ulink::before{content:"\\270E";display:block;font-size:11px;line-height:1}
-  .apptile[data-custom="1"] .ulink{opacity:1;color:var(--accent);
-      border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
+  /* a custom address is a deliberate choice, so its tile carries a small pin
+     marker rather than looking identical to the auto-resolved ones. The edit
+     itself lives in the app sheet now, not on the tile. */
+  .apptile .pin{position:absolute;bottom:11px;right:11px;width:7px;height:7px;
+                border-radius:50% 50% 50% 0;transform:rotate(-45deg);
+                background:var(--accent);box-shadow:0 0 0 2px var(--surf)}
+  .apptile{cursor:pointer}
+
+  /* ---- app detail sheet ------------------------------------------------
+     Tapping a tile used to launch the app. It now opens this instead: the
+     same readings HEXOS shows, and the one place the launch address is set. */
+  .appsheet{padding:2px 0 10px}
+  .appdesc{margin:12px 16px 10px;font-size:12.5px;color:var(--muted);line-height:1.45}
+  .appstat{display:flex;align-items:center;gap:8px;margin:0 16px 12px}
+  .pill{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700;
+        letter-spacing:.03em;padding:4px 10px;border-radius:999px}
+  .pill.up{color:var(--ok);background:color-mix(in srgb,var(--ok) 15%,transparent)}
+  .pill.down{color:var(--bad);background:color-mix(in srgb,var(--bad) 16%,transparent)}
+  .pill.warn{color:var(--warn);background:color-mix(in srgb,var(--warn) 16%,transparent)}
+  .pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+  .appver{margin-left:auto;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .mcards{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:0 16px 12px}
+  .mcard{background:var(--surf);border-radius:var(--r-sm);padding:11px 12px;min-height:70px;
+         display:flex;flex-direction:column;gap:5px;overflow:hidden}
+  .mcard .ml{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+             color:var(--muted)}
+  .mcard .mv{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
+  .mcard .mu{font-size:11px;font-weight:600;color:var(--muted);margin-left:3px}
+  .mcard .mspark{height:26px;margin-top:auto}
+  .mcard .mspark svg{width:100%;height:26px;display:block}
+  .appresponse{display:flex;align-items:center;gap:10px;margin:0 16px 11px;padding:8px 10px;
+               border-radius:var(--r-sm);background:var(--surf)}
+  .appresponse .rl{font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+                   color:var(--muted);flex:0 0 auto}
+  .appresponse .rv{font-size:14px;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .appresponse .mspark{height:22px;flex:1;min-width:20px}
+  .appresponse .mspark svg{height:22px}
+  .appurls{margin:2px 16px 12px;border-top:1px solid var(--faint);padding-top:12px}
+  .appurls .lbl{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+                color:var(--muted);margin-bottom:7px}
+  .urow{display:flex;align-items:center;gap:8px;padding:7px 0;font-size:12px;
+        font-variant-numeric:tabular-nums}
+  .urow .uk{color:var(--muted);flex:0 0 62px}
+  .urow .uv{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+            text-decoration:none;color:var(--ink)}
+  .urow .uv.on{color:var(--accent);font-weight:650}
+  .appacts{position:sticky;bottom:-8px;z-index:3;display:flex;gap:9px;
+           margin-top:8px;padding:12px 16px max(12px,env(safe-area-inset-bottom));
+           background:var(--panel);border-top:1px solid var(--brd)}
+  .appacts .ubtn{flex:1}
+  .appacts .launch{background:var(--accent);color:#fff;border-color:transparent;flex:2}
+  .appacts .launch:disabled{opacity:.5}
+  .optbox{margin:0 16px 4px;padding:0 0 6px}
+  .optbox .none{font-size:12px;color:var(--muted);padding:2px 0 6px}
+
 
   .stackbar{display:flex;height:16px;border-radius:999px;overflow:hidden;margin:10px 16px 10px;
             background:var(--faint)}
@@ -1880,7 +1946,7 @@ PAGE = """<!doctype html>
 
 <div class="scrim" id="scrim" hidden>
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh-t">
-    <div class="sheet-h"><p id="sh-t"></p><span class="sh-sub" id="sh-s"></span>
+    <div class="sheet-h"><span id="sh-ico" hidden></span><p id="sh-t"></p><span class="sh-sub" id="sh-s"></span>
       <button class="x" id="sh-x" type="button" aria-label="Close">&times;</button></div>
     <div class="sheet-b" id="sh-b"></div>
   </div>
@@ -2823,10 +2889,19 @@ function paintSelfUpdate(){
 // A per-app override wins outright: it was set deliberately for this one tile
 // and the global switch has nothing to say about it.
 function appURL(s){
-  if(s.url_custom) return s.url_custom;
+  const pin=(prefs.urls||{})[s.id];
+  if(pin) return pin;
+  return autoAppURL(s);
+}
+function autoAppURL(s){
   const want=(prefs.setup||{}).links;
   if(want==='lan') return s.url_lan || s.url;
   return s.url_ts || s.url_lan || s.url;
+}
+// True when this tile's address was pinned. Reads prefs first so the marker
+// appears the instant you save, rather than on the next 20s server poll.
+function isPinned(s){
+  return !!(prefs.urls||{})[s.id];
 }
 
 function setLinks(mode){
@@ -3204,14 +3279,14 @@ function rowsApps(){
   if(!list.length) return '<div class="row"><span class="t2">Nothing published yet.</span></div>';
   return '<div class="appgrid">'+list.map(s=>
     '<a class="apptile" data-up="'+(s.code?'1':'0')+'"'+
-      (s.url_custom?' data-custom="1"':'')+
-      ' href="'+appURL(s)+'" target="_blank" rel="noopener">'+
+      ' data-uid="'+esc(s.id)+'" data-name="'+esc(s.name)+'"'+
+      ' href="'+appURL(s)+'"'+
+      ' role="button" aria-label="'+esc(s.name)+' details">'+
       '<span class="sdot"></span>'+
       (s.update?'<button class="upd" data-app="'+s.app+'" data-name="'+s.name+'" '+
                  'data-ver="'+(s.version||'')+'" aria-label="Update '+s.name+'"></button>':'')+
       (st[s.app]?'<span class="ust '+st[s.app].state+'">'+st[s.app].msg+'</span>':'')+
-      '<button class="ulink" data-uid="'+esc(s.id)+'" data-name="'+esc(s.name)+'" '+
-              'aria-label="Set launch address for '+esc(s.name)+'"></button>'+
+      (isPinned(s)?'<span class="pin" aria-hidden="true"></span>':'')+
       appIcon(s)+
       '<span class="an">'+s.name+'</span>'+
       '<span class="ap">'+(s.version||'')+'</span></a>').join('')+'</div>';
@@ -3248,6 +3323,124 @@ function monogramHTML(name){
   return '<span class="aico mono" style="background:hsl('+h+' 42% 46%)">'+
          (name.trim()[0]||'?').toUpperCase()+'</span>';
 }
+
+// A small filled line, for the metric cards. Same square-root idea as the big
+// chart: these figures spend most of their life near the floor, and a linear
+// axis would draw that as a dead flat line.
+function mspark(rows, colour){
+  const vals=(rows||[]).map(r=>r[1]).filter(v=>typeof v==='number');
+  if(vals.length<2) return '<div class="mspark"></div>';
+  const W=120, H=26, n=vals.length;
+  let peak=Math.max.apply(null, vals)||1, low=Math.min.apply(null, vals);
+  const span=Math.max(peak-low, peak*0.12, 1);
+  const x=i=>(i/(n-1))*W;
+  const y=v=>H-2-((v-low)/span)*(H-6);
+  const line=vals.map((v,i)=>(i?'L':'M')+x(i).toFixed(1)+' '+y(v).toFixed(1)).join(' ');
+  const area='M0 '+H+' '+vals.map((v,i)=>'L'+x(i).toFixed(1)+' '+y(v).toFixed(1)).join(' ')+' L'+W+' '+H+' Z';
+  return '<div class="mspark"><svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'+
+    '<path d="'+area+'" fill="'+colour+'" opacity=".12"/>'+
+    '<path d="'+line+'" fill="none" stroke="'+colour+'" stroke-width="1.8" '+
+      'stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>'+
+    '</svg></div>';
+}
+
+// The app detail sheet. Every field here is something Dashy already knows: an
+// app's own latency trail, the versions the NAS reports, and the auto-resolved
+// address. The launch address is set here rather than on the tile, so the whole
+// decision - where it opens, and everything known about it - is in one place.
+function appSheet(id){
+  const s=((data&&data.services)||[]).filter(x=>x.id===id)[0];
+  if(!s) return null;
+  const up=!!s.code;
+  const ver=String(s.version||'').trim();
+  const newer=String(s.update||'').trim();
+  const auto=autoAppURL(s)||'';
+  const pinned=(prefs.urls||{})[id]||'';
+  const target=pinned||auto;
+
+  let head;
+  if(up) head='<span class="pill up"><span class="dot"></span>Running</span>';
+  else if(s.code===0) head='<span class="pill down"><span class="dot"></span>Not answering</span>';
+  else head='<span class="pill warn"><span class="dot"></span>Unknown</span>';
+  const codeTxt=up?('HTTP '+s.code):(s.code===0?'no reply':'');
+  // Response latency is per-app. CPU, RAM, Network and Disk I/O are the live
+  // host readings currently available to Dashy, so each is explicitly marked
+  // NAS rather than being presented as container-level usage.
+  const rt=(typeof s.rt_ms==='number')?s.rt_ms:null;
+  const rtRows=s.rt_hist||[];
+  const netDev=(data.net||[]).slice().sort((a,b)=>(b.down+b.up)-(a.down+a.up))[0];
+  const netHist=netDev?(data.net_hist||{})[netDev.name]||[]:[];
+  const netNow=netDev?(netDev.down||0)+(netDev.up||0):0;
+  const ioNow=(data.io||[]).reduce((n,x)=>n+(x.read||0)+(x.write||0),0);
+  const ioHist=(data.io_hist||[]).map(r=>[r[0],(r[1]||0)+(r[2]||0)]);
+  const ramHist=(data.mem_hist||[]).map(r=>[
+    r[0], data.mem&&data.mem.total ? 100*((r[1]||0)+(r[2]||0))/data.mem.total : 0]);
+  const memPct=data.mem?Math.round(data.mem.pct):null;
+  const cards=
+    '<div class="mcards">'+
+      '<div class="mcard"><span class="ml">CPU \u00b7 NAS</span>'+
+        '<span class="mv">'+(data.cpu!==null&&data.cpu!==undefined?Math.round(data.cpu):'\u2014')+
+          (data.cpu!==null&&data.cpu!==undefined?'<span class="mu">%</span>':'')+'</span>'+
+        mspark(data.cpu_hist,'var(--accent)')+'</div>'+
+      '<div class="mcard"><span class="ml">RAM \u00b7 NAS</span>'+
+        '<span class="mv">'+(memPct!==null?memPct:'\u2014')+
+          (memPct!==null?'<span class="mu">%</span>':'')+'</span>'+mspark(ramHist,'var(--brand)')+'</div>'+
+      '<div class="mcard"><span class="ml">Network \u00b7 NAS</span>'+
+        '<span class="mv" style="font-size:16px">'+rate(netNow)+'</span>'+mspark(netHist,'var(--accent)')+'</div>'+
+      '<div class="mcard"><span class="ml">Disk I/O \u00b7 NAS</span>'+
+        '<span class="mv" style="font-size:16px">'+rate(ioNow)+'</span>'+mspark(ioHist,'var(--brand)')+'</div>'+
+    '</div>';
+  const response='<div class="appresponse"><span class="rl">App response</span>'+
+    '<span class="rv">'+(rt!==null?rt+' ms':'\u2014')+'</span>'+mspark(rtRows,'var(--accent)')+'</div>';
+
+  const urls=
+    '<div class="appurls"><div class="lbl">Launch address</div>'+
+      (pinned
+        ? '<div class="urow"><span class="uk">Set</span><span class="uv on">'+esc(pinned)+'</span></div>'+
+          '<div class="urow"><span class="uk">Auto</span><span class="uv">'+esc(auto||'\u2014')+'</span></div>'
+        : '<div class="urow"><span class="uk">Auto</span><span class="uv on">'+esc(auto||'nowhere yet')+'</span></div>')+
+    '</div>';
+
+  const acts=
+    '<div class="appacts">'+
+      '<button class="ubtn no" id="ap-opt" type="button">Options</button>'+
+      '<button class="ubtn launch" id="ap-launch" type="button"'+
+        (target?'':' disabled')+'>Launch</button>'+
+    '</div>';
+
+  const sub = up?('running'+(codeTxt?(' \u00b7 '+codeTxt):'')+
+                  (rt!==null?' \u00b7 '+rt+' ms':''))
+            : (s.code===0?'not answering':'unknown');
+  return [s.name, '<div class="appsheet">'+
+      (s.desc?'<div class="appdesc">'+esc(s.desc)+'</div>':'')+
+      '<div class="appstat">'+head+
+        '<span class="appver">'+(ver?esc(ver):'')+(newer?' \u2192 '+esc(newer):'')+'</span></div>'+
+      response+cards+urls+'<div id="ap-optbox"></div>'+acts+
+    '</div>', sub];
+}
+
+// Rendered on demand by the Options button: the paste field is only in the way
+// when you actually want it, so it stays behind one tap.
+function appOptions(){
+  const id=openKey.slice(4);
+  const cur=(prefs.urls||{})[id]||'';
+  appUrlId=id;
+  const box=$('ap-optbox'); if(!box) return;
+  if(box._open){ box._open=false; box.innerHTML=''; return; }
+  box._open=true;
+  box.innerHTML=
+    '<div class="optbox"><div class="urlrow">'+
+      '<input class="fld2" id="au-input" type="text" inputmode="url" autocomplete="off" '+
+        'spellcheck="false" placeholder="https://example.ts.net:8443" value="'+esc(cur)+'">'+
+      '<span class="uhint">Paste where this app should open. Leave blank to follow the '+
+        'LAN / tailnet switch.</span>'+
+      '<div class="ubtns">'+
+        '<button class="ubtn no clr" id="au-clear">Use automatic</button>'+
+        '<button class="ubtn yes" id="au-save">Save</button>'+
+      '</div></div></div>';
+  const i=$('au-input'); if(i) i.focus();
+}
+
 
 // series: [{key, colour, label}] over rows of [stamp, v1, v2...]
 function chart(rows, series, fmtv){
@@ -3361,24 +3554,49 @@ const POPS={
 
 function renderPop(opening){
   if(!openKey || !data) return;
-  // VM sheets are keyed by id rather than being listed in POPS
+  // VM and app sheets are keyed by id rather than being listed in POPS
   const r = openKey.indexOf('vm-')===0 ? vmSheet(openKey.slice(3))
-                                       : (POPS[openKey] ? POPS[openKey]() : null);
+          : openKey.indexOf('app-')===0 ? appSheet(openKey.slice(4))
+          : (POPS[openKey] ? POPS[openKey]() : null);
   if(!r) return;
   const b=$('sh-b');
 
   if($('sh-t').textContent!==r[0]) $('sh-t').textContent=r[0];
   const sub=r[2]||'';
   if($('sh-s').textContent!==sub) $('sh-s').textContent=sub;
+  const icon=$('sh-ico');
+  if(openKey.indexOf('app-')===0){
+    const svc=((data.services)||[]).find(s=>s.id===openKey.slice(4));
+    const html=svc?appIcon(svc):'';
+    if(icon.innerHTML!==html){ icon.innerHTML=html; wireIcons(icon); }
+    icon.hidden=!html;
+  }else{
+    icon.innerHTML=''; icon.hidden=true;
+  }
 
   // The poll runs every 3s. Rewriting innerHTML each time rebuilt the whole
   // subtree - images reloaded, charts redrew, scroll position jumped and the
   // entrance animation replayed. That was the flashing. Only touch the DOM
   // when the markup has actually changed.
   if(b._html===r[1] && !opening) return;
+  // The app sheet's Options box is live user input. A 3s poll must not wipe
+  // what is being typed into it, so its contents are lifted out and put back.
+  let opt=null, optValue=null;
+  const prev=b.querySelector('#ap-optbox');
+  if(prev && prev._open && prev.innerHTML){
+    opt=prev.innerHTML;
+    const input=prev.querySelector('#au-input');
+    if(input) optValue=input.value;
+  }
   b._html=r[1];
   b.innerHTML=r[1];
   wireIcons(b);
+  if(opt){
+    const nb=b.querySelector('#ap-optbox');
+    if(nb){ nb.innerHTML=opt; nb._open=true;
+            const i=b.querySelector('#au-input');
+            if(i){ if(optValue!==null) i.value=optValue; i.focus(); } }
+  }
 
   if(!opening){
     // a refresh is not an entrance: show it immediately, no animation
@@ -3395,7 +3613,7 @@ function renderPop(opening){
 
 function openPop(k){
   if(!data) return;
-  if(k.indexOf('vm-')!==0 && !POPS[k]) return;
+  if(k.indexOf('vm-')!==0 && k.indexOf('app-')!==0 && !POPS[k]) return;
   openKey=k;
   $('sh-b')._html=null;      // force a rebuild so the entrance plays
   renderPop(true);
@@ -3448,30 +3666,8 @@ async function askUpdate(app,name,ver){
 // LAN or tailnet from the global switch; this pins one tile so an app that
 // lives somewhere else (a different host, a reverse proxy, a cockpit path)
 // still opens where it should. Blank hands it back to the auto-resolution.
+// Set from the app sheet's Options button, via appOptions/saveAppURL.
 let appUrlId='';
-function askAppURL(id,name){
-  const s=((data&&data.services)||[]).filter(x=>x.id===id)[0]||{};
-  const cur=(prefs.urls||{})[id]||'';
-  const auto=s.url_ts||s.url_lan||s.url||'';
-  appUrlId=id;
-  $('sh-t').textContent=name||'App';
-  $('sh-s').textContent='Launch address';
-  $('sh-b').innerHTML=
-    '<div class="row"><span class="l"><span class="t1">This app opens at</span>'+
-      '<span class="t2">'+(auto?esc(auto):'nowhere yet')+'</span></span></div>'+
-    '<div class="urlrow" style="padding:4px 16px 14px">'+
-      '<input class="fld2" id="au-input" type="text" inputmode="url" '+
-        'autocomplete="off" spellcheck="false" placeholder="https://example.ts.net:8443" '+
-        'value="'+esc(cur)+'">'+
-      '<span class="uhint">Leave blank to follow the LAN / tailnet switch above.</span>'+
-      '<div class="ubtns">'+
-        '<button class="ubtn no clr" id="au-clear">Use automatic</button>'+
-        '<button class="ubtn yes" id="au-save">Save</button>'+
-      '</div></div>';
-  $('sh-b')._html=null;
-  $('scrim').hidden=false; openKey=null;
-  setTimeout(()=>{ const i=$('au-input'); if(i) i.focus(); }, 60);
-}
 
 function saveAppURL(id){
   const v=($('au-input').value||'').trim();
@@ -3480,8 +3676,10 @@ function saveAppURL(id){
   else if(!/^https?:\\/\\//i.test(v)){ $('au-input').focus(); return; }
   else prefs.urls[id]=v;
   savePrefs();
-  closePop();
-  if(data) paint(data);
+  if(data) paint(data);            // refresh the tiles behind the sheet
+  build();                         // prefs.urls is not in layoutSig, so force it
+  $('sh-b')._html=null;            // force the open sheet to re-read prefs
+  renderPop(false);
 }
 /* ---------- long press to arrange --------------------------------------
    A hold puts the page into arrange mode, where each card carries its size
@@ -3524,14 +3722,29 @@ document.addEventListener('click',ev=>{
   const u=ev.target.closest('.apptile .upd');
   if(u){ ev.preventDefault(); ev.stopPropagation();
          askUpdate(u.dataset.app,u.dataset.name,u.dataset.ver); return; }
-  const ul=ev.target.closest('.apptile .ulink');
-  if(ul){ ev.preventDefault(); ev.stopPropagation();
-          askAppURL(ul.dataset.uid, ul.dataset.name); return; }
+  // the tile itself now opens the sheet; Launch inside it is what opens the app
+  const tile=ev.target.closest('.apptile');
+  if(tile){ ev.preventDefault();
+            openPop('app-'+tile.dataset.uid); return; }
+  if(ev.target.id==='ap-opt'){ appOptions(); return; }
+  if(ev.target.id==='ap-launch'){
+    const id=openKey.slice(4);
+    const s=((data&&data.services)||[]).filter(x=>x.id===id)[0]||{};
+    const u=appURL(s);
+    if(u) window.open(u,'_blank','noopener');
+    return;
+  }
   if(ev.target.id==='au-save'){ saveAppURL(appUrlId); return; }
   if(ev.target.id==='au-clear'){
     prefs.urls=Object.assign({}, prefs.urls);
     delete prefs.urls[appUrlId];
-    savePrefs(); closePop(); if(data) paint(data); return; }
+    savePrefs(); if(data) paint(data);
+    build();
+    // the sheet is still open - rebuild it so the pin marker and the listed
+    // address go back to auto straight away, not on the next poll
+    const box=$('ap-optbox'); if(box){ box._open=false; box.innerHTML=''; }
+    $('sh-b')._html=null; renderPop(false);
+    return; }
   if(ev.target.id==='u-no'){ closePop(); return; }
   const vb=ev.target.closest('button[data-vmact]');
   if(vb){

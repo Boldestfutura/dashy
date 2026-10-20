@@ -46,9 +46,9 @@ add and remove things.
 - **Tailnet or local, your choice.** One switch decides whether a tile opens
   its tailnet address or its address on your LAN. Choose the tailnet and Dashy
   publishes whatever is not published yet, so those addresses exist.
-- **Pin an app's address.** If one app lives somewhere else — another host, a
-  reverse proxy, a path — tap the pencil on its tile and give it the address it
-  should open. Leave it blank and the tile goes back to following the switch.
+- **App details before launch.** Tap a tile for its live status, response time,
+  version, and NAS metrics. Choose **Options** to paste a custom launch address;
+  **Launch** opens that address, or the LAN/tailnet address selected above.
 
 | | |
 |:--:|:--:|
@@ -56,6 +56,9 @@ add and remove things.
 | On a phone | Every card opens a detail sheet |
 | ![Settings](docs/05-settings.png) | ![Arrange](docs/06-arrange.png) |
 | Settings | Hold a tile to arrange: **2×** resizes, **×** removes |
+
+| ![App details](docs/08-app-popup.png) | ![App launch options](docs/09-app-options.png) |
+| App details and live metrics | Set an app's launch address in Options |
 
 ![An update waiting](docs/07-update.png)
 
