@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Overlook installer for TrueNAS SCALE.
+# Dashy installer for TrueNAS SCALE.
 #
-#   git clone <repo> && cd overlook && ./install.sh
+#   git clone <repo> && cd dashy && ./install.sh
 #
 # Everything it needs it works out for itself: the pool, a free local port, a
 # free tailnet port, and where Tailscale keeps its Serve config. Anything it
@@ -47,7 +47,7 @@ else
 fi
 
 # ---------------------------------------------------------------- the pool
-say "where should Overlook keep its files"
+say "where should Dashy keep its files"
 mapfile -t POOLS < <(zfs list -H -d 0 -o name 2>/dev/null)
 [ "${#POOLS[@]}" -gt 0 ] || die "no ZFS pools found."
 info "pools: ${POOLS[*]}"
@@ -111,8 +111,8 @@ for h in (cfg.get('Web') or {}):
     print(h.rsplit(':',1)[0]); break")
 fi
 
-# Tailscale is how Overlook learns the tailnet name and which services you chose to
-# publish. It is not required. Without it Overlook serves on the LAN and lists every
+# Tailscale is how Dashy learns the tailnet name and which services you chose to
+# publish. It is not required. Without it Dashy serves on the LAN and lists every
 # app that binds a host port. Requiring it meant a new user with Tailscale running
 # but nothing published yet just got told to go away, which helped nobody.
 if [ -n "$TSHOST" ]; then
@@ -279,7 +279,7 @@ sys.exit(r.returncode)
 PY
 [ $? -eq 0 ] || die "could not create the app"
 
-# A tag is not a version. If this box has ever run Overlook, docker already has
+# A tag is not a version. If this box has ever run Dashy, docker already has
 # something called :latest and will happily use it rather than ask the registry
 # - so a fresh install can come up on a months-old image. Make it go and look.
 say "making sure the image is the current one"
@@ -294,7 +294,7 @@ if [ "$TS" = 2 ]; then
        --lport "$LPORT" --serve "$SERVE"; then
     TS=1
   else
-    info "Serve setup failed. Overlook is installed and reachable at"
+    info "Serve setup failed. Dashy is installed and reachable at"
     info "http://$LAN_IP:$LPORT - fix Tailscale and re-run this to publish it."
     TS=0
   fi
@@ -334,7 +334,7 @@ say "done"
 if [ "$TS" = 1 ]; then URL="https://$TSHOST:$TPORT"; else URL="http://$LAN_IP:$LPORT"; fi
 cat <<EOF
 
-   Overlook is at   $URL
+   Dashy is at   $URL
 
    It takes a minute or two to look right: the pool, temperature and power
    figures come from the cron job, which runs on the minute.

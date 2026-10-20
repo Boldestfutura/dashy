@@ -2,7 +2,7 @@
 # collect.sh and worker.sh do not run in here. They run on the host, as root,
 # from cron, because the container can reach neither zpool, smartctl, the raw
 # devices nor midclt. But they ship in this image so that there is one version
-# of Overlook rather than two, and an image update has to carry them along or they
+# of Dashy rather than two, and an image update has to carry them along or they
 # quietly rot at whatever version they were installed at.
 #
 # So: on every start, copy them out to the host's app directory, which is

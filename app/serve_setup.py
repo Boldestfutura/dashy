@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Set up Tailscale Serve for this NAS, so Overlook can be published on the tailnet.
+Set up Tailscale Serve for this NAS, so Dashy can be published on the tailnet.
 
 On a normal host you would run `tailscale serve ...` and Tailscale keeps its own
 state. The TrueNAS app is different: it reads a declarative JSON file handed to

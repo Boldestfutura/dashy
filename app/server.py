@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sol dashboard: host vitals plus every tailnet-published app, no dependencies."""
+"""Dashy dashboard: host vitals plus every tailnet-published app, no dependencies."""
 import json
 import os
 import re
@@ -12,8 +12,8 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.17.2"
-APP_NAME = "Overlook"
+APP_VERSION = "0.18.0"
+APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
 # Loopback is right for the host-networked case and harmless otherwise; a
@@ -26,15 +26,6 @@ LINK_HOST = os.environ.get("LINK_HOST", "").strip() or HOST_IP
 # where the worker should put serve.json if it has to create one. The
 # container cannot see the host filesystem, so this is a hint, not a lookup.
 SERVE_HOST_HINT = os.environ.get("SERVE_HOST_PATH", "").strip()
-
-# Weather is OFF unless coordinates are supplied. There is no geolocation and
-# no IP lookup anywhere in this app: whoever installs it types a latitude and
-# longitude, or there is no weather. When it is on, this machine (not the
-# browser) calls api.open-meteo.com every 15 minutes with those coordinates.
-# Open-Meteo returns no place name, and a reverse-geocode call for one string
-# is not worth it - the timezone's last segment is the city in every case here.
-WEATHER_TTL = 900.0          # 15 min is plenty; the API asks for restraint
-WEATHER_FAIL_TTL = 120.0     # after a failure, back off before retrying
 
 SERVE = os.environ.get("SERVE_JSON", "/serve/serve.json")
 
@@ -85,11 +76,11 @@ KNOWN = {
     "slskd":          ("Soulseek",       "slskd"),
     "tally":          ("Tally",          "Scoreboard"),
     # Three keys for one app: it was "dashboard", then "dashy", and is now
-    # "overlook". An install that predates a rename still carries the old
-    # name, and should still recognise itself.
-    "dashboard":      ("Overlook",       "This page"),
-    "dashy":          ("Overlook",       "This page"),
-    "overlook":       ("Overlook",       "This page"),
+    # "dashy" once more. An install that predates a rename still carries the
+    # old name, and should still recognise itself.
+    "dashboard":      ("Dashy",          "This page"),
+    "dashy":          ("Dashy",          "This page"),
+    "overlook":       ("Dashy",          "This page"),
     "rust-desk":      ("RustDesk",       "Remote desktop"),
 }
 # host-networked apps publish no ports, so they cannot be matched by owner
@@ -345,7 +336,7 @@ def _fetch_latest(repo):
     try:
         req = urllib.request.Request(
             "https://raw.githubusercontent.com/%s/%s/app/server.py"
-            % (repo, UPDATE_BRANCH), headers={"User-Agent": "overlook"})
+            % (repo, UPDATE_BRANCH), headers={"User-Agent": "dashy"})
         with urllib.request.urlopen(req, timeout=20) as r:
             for line in r.read(200000).decode("utf-8", "replace").splitlines():
                 if line.startswith("APP_VERSION"):
@@ -356,9 +347,9 @@ def _fetch_latest(repo):
 
 
 def _getjson(url, headers=None):
-    req = urllib.request.Request(url, headers=headers or {"User-Agent": "overlook"})
+    req = urllib.request.Request(url, headers=headers or {"User-Agent": "dashy"})
     if headers:
-        req.add_header("User-Agent", "overlook")
+        req.add_header("User-Agent", "dashy")
     with urllib.request.urlopen(req, timeout=20) as r:
         return json.loads(r.read(1 << 20))
 
@@ -724,143 +715,6 @@ def vitals_loop():
                 _state["power"] = pw[-1][1]
 
 
-_wx = {"at": 0.0, "data": None}
-
-
-def wmo(code, is_day):
-    """WMO weather code -> (icon class the page draws, words). Unknown stays blank."""
-    sun = "clear" if is_day else "night"
-    table = [
-        ((0,), sun, "clear"),
-        ((1,), sun, "mainly clear"),
-        ((2,), "partly" if is_day else "partlynight", "partly cloudy"),
-        ((3,), "cloud", "overcast"),
-        ((45, 48), "fog", "fog"),
-        ((51, 53, 55, 56, 57), "drizzle", "drizzle"),
-        ((61, 63, 65, 66, 67), "rain", "rain"),
-        ((80, 81, 82), "rain", "showers"),
-        ((71, 73, 75, 77, 85, 86), "snow", "snow"),
-        ((95, 96, 99), "storm", "thunderstorm"),
-    ]
-    for codes, icon, words in table:
-        if code in codes:
-            return icon, words
-    return "cloud", ""
-
-
-def hourly_from(d, now_iso, span=24):
-    """The next `span` hours starting at the current one. Open-Meteo returns
-    local ISO strings like 2026-10-09T14:00, so align on the hour text."""
-    h = d.get("hourly") or {}
-    times = h.get("time") or []
-    temps = h.get("temperature_2m") or []
-    pops = h.get("precipitation_probability") or []
-    codes = h.get("weather_code") or []
-    if not times or not temps:
-        return []
-
-    start = 0
-    if now_iso:
-        stamp = now_iso[:13]            # YYYY-MM-DDTHH
-        for i, t in enumerate(times):
-            if t[:13] == stamp:
-                start = i
-                break
-
-    out = []
-    for i in range(start, min(start + span, len(times), len(temps))):
-        try:
-            icon, _ = wmo(int(codes[i]), (h.get("is_day") or [1])[i] == 1) \
-                if i < len(codes) else ("cloud", "")
-            out.append({
-                "t": times[i][11:16],                       # HH:MM
-                "temp": round(float(temps[i])),
-                "pop": int(pops[i]) if i < len(pops) and pops[i] is not None else 0,
-                "icon": icon,
-            })
-        except (TypeError, ValueError, IndexError):
-            continue
-    return out
-
-
-def weather_where():
-    """Coordinates come from the town chosen during setup, and nowhere else.
-    Weather is off until someone picks one - there are no built-in coordinates,
-    no IP geolocation and no browser location API."""
-    p = (load_prefs() or {}).get("weather") or {}
-    if p.get("lat") is not None and p.get("lon") is not None:
-        return (str(p["lat"]), str(p["lon"]),
-                p.get("tz") or "UTC", p.get("name") or "")
-    return None
-
-
-def geocode(q):
-    """Name to coordinates, proxied so the browser never talks to open-meteo
-    itself. Town-level only - this API has no street addresses."""
-    q = (q or "").strip()
-    if not 2 <= len(q) <= 60:
-        return []
-    url = ("https://geocoding-api.open-meteo.com/v1/search?name=%s"
-           "&count=6&language=en&format=json" % urllib.parse.quote(q))
-    try:
-        with urllib.request.urlopen(url, timeout=8) as r:
-            d = json.loads(r.read().decode("utf-8"))
-    except Exception:
-        return []
-    out = []
-    for g in (d.get("results") or [])[:6]:
-        bits = [g.get("name"), g.get("admin1"), g.get("country_code")]
-        out.append({"name": ", ".join(b for b in bits if b),
-                    "lat": round(float(g["latitude"]), 4),
-                    "lon": round(float(g["longitude"]), 4),
-                    "tz": g.get("timezone") or "UTC"})
-    return out
-
-
-def weather_now():
-    where = weather_where()
-    if not where:
-        return None
-    WEATHER_LAT_, WEATHER_LON_, tz_, place_ = where
-    """Current conditions, cached. Any failure returns None and the widget hides."""
-    key = (where[0], where[1])
-    if _wx.get("key") != key:
-        _wx["key"], _wx["at"], _wx["data"] = key, 0.0, None
-    now = time.monotonic()
-    if _wx["data"] is not None and now - _wx["at"] < WEATHER_TTL:
-        return _wx["data"]
-    if _wx["data"] is None and _wx["at"] and now - _wx["at"] < WEATHER_FAIL_TTL:
-        return None
-
-    url = ("https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s"
-           "&current=temperature_2m,apparent_temperature,weather_code,is_day"
-           "&hourly=temperature_2m,precipitation_probability,weather_code,is_day"
-           "&daily=temperature_2m_max,temperature_2m_min"
-           "&timezone=%s&forecast_days=2"
-           % (WEATHER_LAT_, WEATHER_LON_, urllib.parse.quote(tz_)))
-    try:
-        with urllib.request.urlopen(url, timeout=8) as r:
-            d = json.loads(r.read().decode("utf-8"))
-        cur = d["current"]
-        day = d.get("daily") or {}
-        icon, words = wmo(int(cur["weather_code"]), int(cur.get("is_day", 1)) == 1)
-        out = {
-            "temp": round(float(cur["temperature_2m"])),
-            "feels": round(float(cur["apparent_temperature"])),
-            "icon": icon,
-            "words": words,
-            "hi": round(float(day["temperature_2m_max"][0])) if day.get("temperature_2m_max") else None,
-            "lo": round(float(day["temperature_2m_min"][0])) if day.get("temperature_2m_min") else None,
-            "hours": hourly_from(d, cur.get("time")),
-            "place": place_ or tz_.rsplit("/", 1)[-1].replace("_", " "),
-        }
-        _wx["data"] = out
-    except Exception:          # offline, rate limited, shape changed - all the same here
-        _wx["data"] = None
-    _wx["at"] = now
-    return _wx["data"]
-
-
 def installed_apps():
     try:
         with open(os.path.join(DATA, "apps.json")) as fh:
@@ -885,14 +739,14 @@ def request_serve(host=""):
                  or "." not in host):
         return False, "that does not look like a tailnet name"
 
-    # Only ports Overlook has actually discovered, so this cannot be talked into
+    # Only ports Dashy has actually discovered, so this cannot be talked into
     # publishing something arbitrary that happens to be listening.
     with _lock:
         svcs = list(_state.get("services") or [])
     want = sorted({int(s["lport"]) for s in svcs
                    if s.get("lport") and not s.get("port")})
     if PORT not in {int(s["lport"]) for s in svcs if s.get("lport")}:
-        want.append(PORT)              # Overlook publishes no ports of its own
+        want.append(PORT)              # Dashy publishes no ports of its own
     want = sorted(set(want))
     if not want:
         return True, "everything is already published"
@@ -914,22 +768,16 @@ def detect():
             # Tailscale is here but nothing is published, which is the normal
             # state of a new install and the one worth offering to fix
             "serve_offer": (not TAILNET) and ("tailscale" in apps),
-            "hexos": "hexos" in apps,
-            "openclaw": "openclaw" in apps,
-            "weather": weather_where() is not None}
+            "hexos": "hexos" in apps}
 
 
 def header_links(services, setup=None):
-    """Resolved from what is actually published, then filtered by whatever the
-    owner said they use during setup."""
-    setup = setup or {}
     """The two header buttons, resolved from what is actually published.
     Nothing hard-coded, so a port change elsewhere carries through."""
-    out = {"truenas": None, "chat": None, "hexos": None}
+    setup = setup or {}
+    out = {"truenas": None, "hexos": None}
     for s in services:
-        if s.get("app") == "openclaw":
-            out["chat"] = s.get("url")
-        elif s.get("lport") in (80, 443) and not out["truenas"]:
+        if s.get("lport") in (80, 443) and not out["truenas"]:
             # :443 is implicit in https and looks like a mistake in a link
             out["truenas"] = (s.get("url") or "").replace(":443/", "/")
 
@@ -949,11 +797,11 @@ _LISTS = ("order", "hidden", "wide")
 _THEMES = ("system", "light", "dark")
 # Must match ACCENTS in the page. When it did not, every accent added to the
 # page but not to this tuple was accepted by the UI and dropped on save.
-# The four current names, plus the seven they replaced: a client that has not
-# reloaded yet still sends the old one, and silently discarding it on save is
+# The five current names, plus the older ones they replaced: a client that has
+# not reloaded yet still sends an old one, and silently discarding it on save is
 # exactly how tile layouts were lost before.
-_ACCENTS = ("dusk", "harbour", "heather", "granite",
-            "teal", "blue", "violet", "amber", "yellow", "rose", "green")
+_ACCENTS = ("blue", "dusk", "harbour", "heather", "granite",
+            "teal", "violet", "amber", "yellow", "rose", "green")
 _prefs_cache = {"mtime": None, "data": None}
 
 
@@ -985,22 +833,29 @@ def _clean_prefs(d):
                 clean[k] = n
         out["size"] = clean
 
-    w = d.get("weather")
-    if isinstance(w, dict):
-        try:
-            lat, lon = float(w["lat"]), float(w["lon"])
-            if -90 <= lat <= 90 and -180 <= lon <= 180:
-                nm = str(w.get("name") or "")[:80]
-                tz = str(w.get("tz") or "UTC")[:60]
-                out["weather"] = {"lat": round(lat, 4), "lon": round(lon, 4),
-                                  "name": nm, "tz": tz}
-        except (KeyError, TypeError, ValueError):
-            pass
+    # Per-app launch URL overrides. A tile normally resolves to its tailnet or
+    # LAN address from the global switch, but the owner can pin an individual
+    # app to a specific address (say a tailnet name while the rest stay local).
+    # Keyed by the app's stable id - its TrueNAS app name, or "port<N>" for a
+    # bare published port - so it survives renames and port changes elsewhere.
+    urls = d.get("urls")
+    if isinstance(urls, dict):
+        clean = {}
+        for k, v in list(urls.items())[:128]:
+            if not (isinstance(k, str)
+                    and re.match(r"^[a-z0-9][a-z0-9_-]{0,31}$", k)):
+                continue
+            if not isinstance(v, str):
+                continue
+            v = v.strip()
+            if len(v) <= 300 and re.match(r"^https?://[^\s<>\"']+$", v):
+                clean[k] = v
+        out["urls"] = clean
 
     su = d.get("setup")
     if isinstance(su, dict):
         clean = {}
-        for flag in ("done", "tailscale", "hexos", "openclaw", "weather"):
+        for flag in ("done", "tailscale", "hexos"):
             if isinstance(su.get(flag), bool):
                 clean[flag] = su[flag]
         # whether a tile opens its tailnet address or its address on the LAN
@@ -1130,7 +985,7 @@ def discover():
     """Every installed app, plus whatever Serve says about how to reach it.
 
     Serve used to BE the list, which meant publishing one app hid all the
-    others - install Overlook on a fresh Tailscale setup and the dashboard showed
+    others - install Dashy on a fresh Tailscale setup and the dashboard showed
     exactly one tile, itself. Serve answers "what address", not "what exists".
     The app list comes from the NAS; anything you do not want, hide."""
     pub = serve_map()
@@ -1165,18 +1020,21 @@ def discover():
                     "path": ppath if chosen == pport else "/",
                     "name": label, "desc": desc,
                     "state": a.get("state"), "app": a.get("name"),
+                    "id": a.get("name") or ("port%d" % chosen),
                     "version": a.get("version"), "update": bool(a.get("update")),
                     "iconsrc": ("/appicon/" + a["name"]) if a.get("icon") else None})
 
     # Published ports that belong to no installed app: the TrueNAS UI on 443,
-    # and Overlook itself, which publishes nothing because it runs host networking.
+    # and Dashy itself, which publishes nothing because it runs host networking.
     for lport, tport in pub.items():
         if lport in claimed:
             continue
         label, desc = PORT_FALLBACK.get(lport, ("Port %d" % lport, ""))
         out.append({"port": tport, "lport": lport, "path": "/",
                     "name": label, "desc": desc,
-                    "state": None, "app": None, "version": None, "update": False,
+                    "state": None, "app": None,
+                    "id": "port%d" % lport,
+                    "version": None, "update": False,
                     "iconsrc": "/icon-192.png" if lport == PORT else None})
 
     # published first, in tailnet-port order, then everything else by name, so
@@ -1203,6 +1061,7 @@ def probe(port):
 def services_loop():
     while True:
         found = []
+        over = (load_prefs() or {}).get("urls") or {}
         for svc in discover():
             svc = dict(svc)
             svc["code"] = probe(svc["lport"])
@@ -1213,11 +1072,14 @@ def services_loop():
             svc["url_lan"] = "http://%s:%d%s" % (LINK_HOST, svc["lport"], path)
             svc["url_ts"] = ("https://%s:%d%s" % (TAILNET, svc["port"], path)
                              if (TAILNET and svc.get("port")) else None)
-            svc["url"] = svc["url_ts"] or svc["url_lan"]
+            # A per-app override pins this one tile regardless of the global
+            # switch. Sent as its own field so the client can still show the
+            # auto-resolved addresses and let the owner clear the pin.
+            svc["url_custom"] = over.get(svc.get("id") or "")
+            svc["url"] = svc["url_custom"] or svc["url_ts"] or svc["url_lan"]
             found.append(svc)
         with _lock:
             _state["services"] = found
-        weather_now()          # cached 15 min; kept off the request path
         time.sleep(20)
 
 
@@ -1235,7 +1097,6 @@ def snapshot():
     out["tailnet"] = TAILNET
     out["services"] = svc
     out["updates"] = update_status()
-    out["weather"] = _wx["data"]          # whatever the loop last fetched
     out["prefs"] = load_prefs()
     out["detected"] = detect()
     out["selfupdate"] = self_update()
@@ -1254,19 +1115,19 @@ PAGE = """<!doctype html>
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#f5f6f8" id="tc">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Overlook">
+<meta name="apple-mobile-web-app-title" content="Dashy">
 <link rel="icon" href="/favicon.png" sizes="32x32" type="image/png">
 <link rel="apple-touch-icon" href="/icon-180.png">
 <link rel="manifest" href="/manifest.webmanifest">
-<title>Overlook</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='2' y='2' width='28' height='28' rx='8.5' fill='%230d9488'/%3E%3Cpath d='M6.5 19h4L13 12l3.5 11 3-8 1.5 4h4.5' fill='none' stroke='%23ffffff' stroke-width='2.3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<title>Dashy</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='2' y='2' width='28' height='28' rx='8.5' fill='%232563eb'/%3E%3Cpath d='M6.5 19h4L13 12l3.5 11 3-8 1.5 4h4.5' fill='none' stroke='%23ffffff' stroke-width='2.3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
   :root{
     color-scheme:light dark;
     --bg:#eaeeff; --panel:#ffffff; --surf:#fbfcff; --brd:rgba(16,20,28,.09);
     --ink:#0f1218; --muted:#6a7280; --faint:rgba(16,20,28,.06);
     --ok:#1fa971; --warn:#e0a32e; --bad:#e0443a;
-    --accent:#2f6df6; --brand:#0d9488;
+    --accent:#2563eb; --brand:#2563eb;
     --shadow:0 1px 2px rgba(16,20,28,.04), 0 12px 30px -14px rgba(16,20,28,.20);
     /* M3's shape scale rather than one radius everywhere. Mixing round and
        square is the point: uniform corners read as a template, varied ones
@@ -1282,7 +1143,7 @@ PAGE = """<!doctype html>
       --bg:#0f111b; --panel:#171b22; --surf:#1b1e2b; --brd:rgba(255,255,255,.09);
       --ink:#eef1f5; --muted:#949cab; --faint:rgba(255,255,255,.06);
       --ok:#34d399; --warn:#fbbf24; --bad:#f87171;
-      --accent:#5b8cff; --brand:#14b8a6;
+      --accent:#5b8cff; --brand:#5b8cff;
       --shadow:0 1px 2px rgba(0,0,0,.4), 0 18px 42px -18px rgba(0,0,0,.7);
       color-scheme:dark;
     }
@@ -1291,7 +1152,7 @@ PAGE = """<!doctype html>
       --bg:#0f111b; --panel:#171b22; --surf:#1b1e2b; --brd:rgba(255,255,255,.09);
       --ink:#eef1f5; --muted:#949cab; --faint:rgba(255,255,255,.06);
       --ok:#34d399; --warn:#fbbf24; --bad:#f87171;
-      --accent:#5b8cff; --brand:#14b8a6;
+      --accent:#5b8cff; --brand:#5b8cff;
       --shadow:0 1px 2px rgba(0,0,0,.4), 0 18px 42px -18px rgba(0,0,0,.7);
       color-scheme:dark;
   }
@@ -1327,16 +1188,6 @@ PAGE = """<!doctype html>
         box-shadow:0 4px 12px -5px var(--brand)}
 
   .hdr-r{display:flex;align-items:center;gap:8px;justify-content:flex-end}
-  .wx{display:inline-flex;align-items:center;gap:8px;padding:8px 15px;border-radius:var(--r-full);
-      background:var(--faint);border:1px solid var(--brd);font-size:12.5px;font-weight:600;
-      color:var(--ink);font-family:inherit;cursor:pointer;
-      transition:border-color .15s ease,transform .15s ease}
-  .wx:hover{border-color:var(--muted);transform:translateY(-1px)}
-  .wx svg{width:18px;height:18px;flex:0 0 auto;display:block}
-  .wx .t{font-size:14px;letter-spacing:-.01em}
-  .wx .c{color:var(--muted);font-weight:500}
-  /* the condition words are the first thing to go when it gets tight */
-  @media (max-width:480px){.wx .c{display:none}}
   .ibtn{width:34px;height:34px;flex:0 0 auto;display:inline-flex;align-items:center;
         justify-content:center;border-radius:var(--r-full);background:var(--faint);
         border:1px solid var(--brd);color:var(--muted);text-decoration:none;
@@ -1505,20 +1356,20 @@ PAGE = """<!doctype html>
   /* ---- press feedback -------------------------------------------------
      One rule for every touch target. transform only, so it composites and
      cannot trigger layout; .09s in, a slower ease back out.              */
-  .card,.apptile,.ibtn,.wx,.mi,.x,.seg button,.sw button,
+  .card,.apptile,.ibtn,.mi,.x,.seg button,.sw button,
   .cardtools button,.editbar button,.ubtn{
     transition:transform .16s cubic-bezier(.22,1,.36,1),
                background .13s ease, border-color .15s ease, color .15s ease, opacity .15s ease}
   .card:active,.apptile:active,.mi:active,.x:active,.seg button:active,
   .cardtools button:active,.editbar button:active,.ubtn:active{
     transform:scale(.967);transition-duration:.09s}
-  .ibtn:active,.wx:active{transform:scale(.94);transition-duration:.09s}
+  .ibtn:active{transform:scale(.94);transition-duration:.09s}
   .sw button:active{transform:scale(.88);transition-duration:.09s}
   .apptile .upd:active{transform:scale(.88);transition-duration:.09s}
   @media (prefers-reduced-motion:reduce){
     .card:active,.apptile:active,.mi:active,.x:active,.seg button:active,
     .cardtools button:active,.editbar button:active,.ubtn:active,
-    .ibtn:active,.wx:active,.sw button:active{transform:none}
+    .ibtn:active,.sw button:active{transform:none}
   }
 
   /* a wide tile spans two columns; at phone width that is the full row */
@@ -1571,14 +1422,14 @@ PAGE = """<!doctype html>
          transition:transform .18s cubic-bezier(.22,1,.36,1)}
   .sw2[aria-checked="true"]{background:var(--brand);border-color:var(--brand)}
   .sw2[aria-checked="true"] i{transform:translateX(18px);background:#fff}
-  .cityres{margin-top:6px;display:flex;flex-direction:column;gap:4px}
-  .cityres button{text-align:left;padding:9px 11px;border-radius:9px;border:1px solid var(--brd);
-                  background:var(--faint);color:var(--ink);font:inherit;font-size:13px;
-                  cursor:pointer}
-  .cityres button:hover{border-color:var(--muted)}
-  .cityres .none{padding:8px 2px;font-size:12px;color:var(--muted)}
-  .wxpick{margin-top:7px;font-size:12.5px;font-weight:650;color:var(--brand);
-          display:flex;align-items:center;gap:6px}
+  /* per-app launch URL editor, opened from a tile's detail sheet */
+  .urlrow{margin-top:4px;display:flex;flex-direction:column;gap:6px}
+  .urlrow .fld2{width:100%;padding:9px 11px;border-radius:10px;border:1px solid var(--brd);
+                background:var(--faint);color:var(--ink);font:inherit;font-size:13px}
+  .urlrow .uhint{font-size:11.5px;color:var(--muted)}
+  .urlrow .ubtns{display:flex;gap:8px;margin-top:2px}
+  .urlrow .ubtns button{flex:1 1 auto}
+  .urlrow .ubtns .clr{background:transparent;border:1px solid var(--brd);color:var(--ink)}
   .setup .fld{width:100%;margin-top:8px;padding:9px 11px;border-radius:10px;
               border:1px solid var(--brd);background:var(--faint);color:var(--ink);
               font:inherit;font-size:13px}
@@ -1805,6 +1656,19 @@ PAGE = """<!doctype html>
   .apptile .ust.running{color:var(--warn);background:color-mix(in srgb,var(--warn) 18%,transparent)}
   .apptile .ust.done{color:var(--ok);background:color-mix(in srgb,var(--ok) 18%,transparent)}
   .apptile .ust.failed{color:var(--bad);background:color-mix(in srgb,var(--bad) 18%,transparent)}
+  /* a custom address is a deliberate choice, so it gets a visible marker rather
+     than looking identical to the auto-resolved ones */
+  .apptile .ulink{position:absolute;bottom:10px;right:10px;cursor:pointer;appearance:none;
+                  width:21px;height:21px;display:flex;align-items:center;justify-content:center;
+                  padding:0;line-height:1;color:var(--muted);border-radius:50%;
+                  border:1px solid var(--brd);background:var(--faint);
+                  opacity:0;transition:opacity .15s ease,color .15s ease,border-color .15s ease}
+  .apptile:hover .ulink{opacity:.7}
+  .apptile .ulink:hover{opacity:1;color:var(--accent);
+                        border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
+  .apptile .ulink::before{content:"\\270E";display:block;font-size:11px;line-height:1}
+  .apptile[data-custom="1"] .ulink{opacity:1;color:var(--accent);
+      border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
 
   .stackbar{display:flex;height:16px;border-radius:999px;overflow:hidden;margin:10px 16px 10px;
             background:var(--faint)}
@@ -1836,7 +1700,7 @@ PAGE = """<!doctype html>
       <!-- Binoculars. A lookout, not a landscape and not a search box: the
            twin circles are the only shape here that still reads as itself at
            24px, which is the size it spends most of its life at. -->
-      <svg class="mark" viewBox="0 0 48 48" role="img" aria-label="Overlook">
+      <svg class="mark" viewBox="0 0 48 48" role="img" aria-label="Dashy">
         <rect width="48" height="48" rx="12" fill="var(--brand)"/>
         <g stroke="#fbfcff" fill="none">
           <circle cx="15" cy="27" r="9.5" stroke-width="3.4"/>
@@ -1845,16 +1709,10 @@ PAGE = """<!doctype html>
         </g>
         <path d="M10 17.5 13 9h7l1.5 8.5M38 17.5 35 9h-7l-1.5 8.5" fill="#fbfcff"/>
       </svg>
-      <div style="min-width:0"><h1>Overlook<span class="host" id="host"></span></h1>
+      <div style="min-width:0"><h1>Dashy<span class="host" id="host"></span></h1>
         <p class="beta">beta</p></div>
     </div>
     <div class="hdr-r">
-      <button class="wx" id="wx" hidden type="button" data-pop="wx"
-              aria-label="Weather, hourly forecast"></button>
-      <a class="ibtn" id="chat" hidden target="_blank" rel="noopener"
-         title="Chat" aria-label="Open chat"><svg viewBox="0 0 24 24" fill="none"
-         stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
-         stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 9.6 9.6 0 0 1-2.9-.4L3 21l1.6-4.6A8.3 8.3 0 0 1 3.6 11.5a8.4 8.4 0 0 1 9-8.4 8.4 8.4 0 0 1 8.4 8.4z"/></svg></a>
 
       <div class="menuwrap">
         <button class="ibtn" id="settings" type="button" aria-haspopup="true"
@@ -1873,7 +1731,7 @@ PAGE = """<!doctype html>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
                  stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
             <span class="dots" id="mi-selfdots" hidden><i></i><i></i><i></i></span>
-            <span id="mi-selftxt">Update Overlook</span><span class="rt" id="mi-selfver"></span></button>
+            <span id="mi-selftxt">Update Dashy</span><span class="rt" id="mi-selfver"></span></button>
           <div class="msep"></div>
           <p class="mh">Appearance</p>
           <div class="seg" id="seg-theme" role="group" aria-label="Theme">
@@ -1893,17 +1751,8 @@ PAGE = """<!doctype html>
           <p class="mh">Integrations</p>
           <div class="mrow"><span class="ml">Tailscale</span>
             <button class="sw2 sm" id="m-ts" role="switch" aria-checked="false"><i></i></button></div>
-          <div class="mrow"><span class="ml">OpenClaw chat</span>
-            <button class="sw2 sm" id="m-oc" role="switch" aria-checked="false"><i></i></button></div>
           <div class="mrow"><span class="ml">HexOS</span>
             <button class="sw2 sm" id="m-hx" role="switch" aria-checked="false"><i></i></button></div>
-          <div class="mrow"><span class="ml">Weather</span>
-            <button class="sw2 sm" id="m-wx" role="switch" aria-checked="false"><i></i></button></div>
-          <div class="mrow nas" id="m-wxrow"><span class="ml">Weather location</span>
-            <span class="mhint" id="m-wxnow">not set</span>
-            <input class="fld sm" id="m-city" type="search" autocomplete="off"
-                   placeholder="Type a town&hellip;">
-            <div class="cityres" id="m-cityres"></div></div>
           <div class="mrow nas" id="m-serverow" hidden>
             <span class="ml">App links</span>
             <span class="mhint">Which address a tile opens</span>
@@ -1930,10 +1779,6 @@ PAGE = """<!doctype html>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
                  stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.6 20.4 7v10L12 21.4 3.6 17V7z"/><path d="M12 11.8 20.4 7M12 11.8V21.4M12 11.8 3.6 7"/></svg>
             HexOS</a>
-          <a class="mi" id="mi-chat" target="_blank" rel="noopener" role="menuitem">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
-                 stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 9.6 9.6 0 0 1-2.9-.4L3 21l1.6-4.6A8.3 8.3 0 0 1 3.6 11.5a8.4 8.4 0 0 1 9-8.4 8.4 8.4 0 0 1 8.4 8.4z"/></svg>
-            Chat</a>
           <div class="msep"></div>
           <button class="mi" id="mi-ver" type="button" role="menuitem"
                   style="color:var(--muted)"></button>
@@ -1955,12 +1800,12 @@ PAGE = """<!doctype html>
 <div class="setup" id="setup" hidden>
   <div class="setupcard">
     <button class="back" id="su-back" hidden type="button">&lsaquo; Back</button>
-    <svg class="mark" viewBox="0 0 32 32" role="img" aria-label="Overlook">
+    <svg class="mark" viewBox="0 0 32 32" role="img" aria-label="Dashy">
       <rect width="32" height="32" rx="8.5" fill="var(--brand)"/>
       <path d="M6.5 19h4L13 12l3.5 11 3-8 1.5 4h4.5" fill="none" stroke="#fff"
             stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
-    <h2 id="su-h">Welcome to Overlook</h2>
+    <h2 id="su-h">Welcome to Dashy</h2>
     <p class="lede" id="su-lede">A dashboard for your NAS that finds your apps
       on its own.</p>
 
@@ -2011,30 +1856,9 @@ PAGE = """<!doctype html>
         <span class="pubmsg" id="su-tsmsg"></span>
       </div>
       <div class="opt">
-        <span class="txt"><b>OpenClaw<span class="auto" id="a-oc"></span></b>
-          <span>Shows a chat button.</span></span>
-        <button class="sw2" id="o-oc" role="switch" aria-checked="false"><i></i></button>
-      </div>
-      <div class="opt">
         <span class="txt"><b>HexOS<span class="auto" id="a-hx"></span></b>
           <span>Adds a link to your HexOS deck.</span></span>
         <button class="sw2" id="o-hx" role="switch" aria-checked="false"><i></i></button>
-      </div>
-      <div class="opt">
-        <span class="txt"><b>Weather<span class="auto" id="a-wx"></span></b>
-          <span>Conditions and an hourly forecast.</span></span>
-        <button class="sw2" id="o-wx" role="switch" aria-checked="false"><i></i></button>
-      </div>
-      <div class="opt wxloc" id="wxloc" style="display:block">
-        <span class="txt"><b>Which town?</b>
-          <span>Type a town or city and pick it from the list. Town level only
-          &mdash; never an address. Your NAS looks up the forecast every 15
-          minutes, so <b>open-meteo.com</b> sees your server&rsquo;s IP and the
-          town you chose. Your browser never contacts them, and there is no
-          account or key.</span></span>
-        <input class="fld" id="o-city" type="search" autocomplete="off"
-               placeholder="Start typing a town&hellip;">
-        <div class="cityres" id="o-cityres"></div>
       </div>
       <div class="opt" style="display:block">
         <span class="txt"><b>TrueNAS address</b>
@@ -2128,27 +1952,28 @@ const SECTIONS=[['system','System'],['storage','Storage'],['apps','Apps'],['vms'
 const CARDK=CARDS.map(c=>c.k);
 
 /* ---------- preferences ------------------------------------------------
-   Per device, in localStorage. Overlook has no login, so there is nowhere else
+   Per device, in localStorage. Dashy has no login, so there is nowhere else
    sensible to put them, and every read is guarded: private windows and
    blocked site data both throw rather than return null.                   */
 const PKEY='overlook.prefs.v2';
-/* Four, deliberately. Amber, red and green already mean warn, bad and ok, so
-   an accent that strays into them reads as an alert that is not there. These
-   all sit in the blue-to-stone range, which is where the name lives too. */
+/* Blue leads, but the four below stay: amber, red and green already mean warn,
+   bad and ok, so an accent that strays into them reads as an alert that is not
+   there. Everything on offer sits in the blue-to-stone range. */
 const ACCENTS={
+  blue:    {light:'#2563eb', dark:'#5b8cff', name:'Blue'},
   dusk:    {light:'#4a57c8', dark:'#7d87e6', name:'Dusk'},
   harbour: {light:'#1d7391', dark:'#49a7c6', name:'Harbour'},
   heather: {light:'#7b57ad', dark:'#a583d6', name:'Heather'},
   granite: {light:'#51606e', dark:'#8c9bab', name:'Granite'}
 };
 
-/* Seven colours became four, so a saved choice may no longer exist. Map it to
-   the nearest survivor rather than silently dropping someone back to default. */
+/* A saved choice may no longer exist. Map it to the nearest survivor rather
+   than silently dropping someone back to default. */
 const ACCENT_WAS={teal:'harbour', blue:'dusk', violet:'heather',
                   amber:'granite', yellow:'granite', rose:'heather', green:'harbour'};
-function migrateAccent(a){ return ACCENTS[a] ? a : (ACCENT_WAS[a] || 'dusk'); }
-const DEFAULTS={theme:'system', accent:'dusk', order:CARDK.slice(), hidden:[], wide:[], size:{},
-                setup:{}, weather:null};
+function migrateAccent(a){ return ACCENTS[a] ? a : (ACCENT_WAS[a] || 'blue'); }
+const DEFAULTS={theme:'system', accent:'blue', order:CARDK.slice(), hidden:[], wide:[], size:{},
+                setup:{}, urls:{}};
 let prefs=Object.assign({}, DEFAULTS);
 let lastTick=0;
 let builtSig='';
@@ -2167,7 +1992,7 @@ function loadPrefs(){
       if(d.size && typeof d.size==='object') prefs.size=cleanSize(d.size);
       migrateSizes();
       if(d.setup && typeof d.setup==='object') prefs.setup=d.setup;
-      if(d.weather && typeof d.weather==='object') prefs.weather=d.weather;
+      if(d.urls && typeof d.urls==='object') prefs.urls=cleanUrls(d.urls);
       if(Array.isArray(d.order)){
         // keep only known cards, then append any card added since this was saved
         const keep=d.order.filter(k=>CARDK.indexOf(k)>=0);
@@ -2196,7 +2021,7 @@ function pushPrefs(){
         body:JSON.stringify({order:prefs.order, hidden:prefs.hidden, wide:prefs.wide,
                              size:prefs.size,
                              theme:prefs.theme, accent:prefs.accent,
-                             setup:prefs.setup, weather:prefs.weather})});
+                             setup:prefs.setup, urls:prefs.urls})});
       const j=await r.json();
       if(j && typeof j.rev==='number') prefsRev=j.rev;   // do not re-apply our own echo
     }catch(e){}                 // offline or no writable mount: the local copy still holds
@@ -2238,7 +2063,7 @@ function adoptPrefs(P){
     if(!same(next, prefs.wide)){ prefs.wide=next; layoutChanged=true; }
   }
   if(P.setup && typeof P.setup==='object') prefs.setup=P.setup;
-  if(P.weather && typeof P.weather==='object') prefs.weather=P.weather;
+  if(P.urls && typeof P.urls==='object') prefs.urls=cleanUrls(P.urls);
   if(P.theme && P.theme!==prefs.theme){ prefs.theme=P.theme; applyTheme(); }
   const inc=P.accent && migrateAccent(P.accent);
   if(inc && inc!==prefs.accent){
@@ -2401,59 +2226,6 @@ function buildSwatches(){
 
 
 
-/* ---------- choosing a town ---------------------------------------------
-   Search runs through our own server, so the browser never contacts the
-   geocoder directly and nobody is asked for a precise location.           */
-let citySearch=null;
-
-function wxLocLabel(){
-  const w=prefs.weather;
-  return (w && w.name) ? w.name : '';
-}
-
-function renderCityPick(){
-  const el=$('o-cityres');
-  const name=wxLocLabel();
-  if(name && !el.dataset.searching){
-    el.innerHTML='<p class="wxpick">✓ '+esc(name)+'</p>';
-  }
-}
-
-function citySearchNow(q, which){
-  const el=$(which==='m' ? 'm-cityres' : 'o-cityres');
-  if(!q || q.trim().length<2){ el.dataset.searching=''; renderCityPick(); return; }
-  el.dataset.searching='1';
-  clearTimeout(citySearch);
-  citySearch=setTimeout(async()=>{
-    try{
-      const r=await fetch('/api/geocode?q='+encodeURIComponent(q.trim()));
-      const j=await r.json();
-      const rs=(j&&j.results)||[];
-      if(!rs.length){ el.innerHTML='<p class="none">Nothing found.</p>'; return; }
-      el.innerHTML=rs.map((g,i)=>
-        '<button type="button" data-city="'+i+'">'+esc(g.name)+'</button>').join('');
-      el._results=rs;
-    }catch(e){ el.innerHTML='<p class="none">Could not search just now.</p>'; }
-  }, 280);                       // one request per pause, not per keystroke
-}
-
-function pickCity(i, fromId){
-  const el=$(fromId || 'o-cityres');
-  const g=(el._results||[])[i];
-  if(!g) return;
-  prefs.weather={name:g.name, lat:g.lat, lon:g.lon, tz:g.tz};
-  prefs.setup=Object.assign({}, prefs.setup, {weather:true});
-  setSwitch('o-wx', true); setSwitch('m-wx', true);
-  el.dataset.searching='';
-  const fld=$(fromId==='m-cityres' ? 'm-city' : 'o-city');
-  if(fld) fld.value='';
-  el.innerHTML='';
-  renderCityPick();
-  const wn=$('m-wxnow'); if(wn) wn.textContent=g.name;
-  savePrefs();
-  if(data) paint(data);
-}
-
 /* ---------- first run ---------------------------------------------------
    Two panes in one card: what the thing does, then what you run. Every answer
    is pre-filled from what the NAS actually has installed, so this is a
@@ -2482,7 +2254,7 @@ function setupGo(step){
   $('su-skip').hidden = step!==0 || $('su-skip').dataset.never==='1';
 
   if(step===0){
-    $('su-h').textContent='Welcome to Overlook';
+    $('su-h').textContent='Welcome to Dashy';
     $('su-lede').textContent='A dashboard for your NAS that finds your apps on its own.';
     $('su-go').textContent='Get started';
   }
@@ -2499,17 +2271,9 @@ function setupGo(step){
     const su=prefs.setup||{};
     const pick=k=> su[k]!==undefined ? su[k] : !!det[k];
     setSwitch('o-ts', pick('tailscale'));
-    setSwitch('o-oc', pick('openclaw'));
     setSwitch('o-hx', pick('hexos'));
-    setSwitch('o-wx', pick('weather'));
     $('a-ts').textContent=det.tailscale?'found':'';
-    $('a-oc').textContent=det.openclaw?'found':'';
     $('a-hx').textContent=det.hexos?'found':'';
-    $('a-wx').textContent=det.weather?'set':'';
-    $('o-city').value='';
-    $('o-cityres').dataset.searching='';
-    renderCityPick();
-    $('wxloc').style.display = getSwitch('o-wx') ? 'block' : 'none';
     const guess=(data&&data.links&&data.links.truenas) ||
                 (location.protocol+'//'+location.hostname+'/');
     $('o-nas').value=su.truenas || guess;
@@ -2544,17 +2308,13 @@ function finishSetup(skipped){
   prefs.setup={
     done:true,
     tailscale:getSwitch('o-ts'),
-    openclaw:getSwitch('o-oc'),
     hexos:getSwitch('o-hx'),
-    weather:getSwitch('o-wx'),
     truenas:/^https?:\\/\\//.test(nas) ? nas : ''
   };
   if(skipped){
     const det=(data&&data.detected)||{};
     prefs.setup.tailscale=!!det.tailscale;
-    prefs.setup.openclaw=!!det.openclaw;
     prefs.setup.hexos=!!det.hexos;
-    prefs.setup.weather=!!det.weather;
     prefs.setup.truenas='';
   }
   savePrefs();
@@ -2597,6 +2357,21 @@ function cleanSize(o){
   return out;
 }
 
+// A per-app URL override. Blank means "keep using whatever ts/lan resolves to",
+// so an empty value is stored as absent rather than as "". Keys are service ids
+// the server mints (app name, or portN); anything else is dropped.
+function cleanUrls(o){
+  const out={};
+  for(const k in o){
+    if(!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(k)) continue;
+    const v=String(o[k]||'').trim();
+    if(!v) continue;
+    if(!/^https?:\\/\\//i.test(v) || v.length>300) continue;
+    out[k]=v;
+  }
+  return out;
+}
+
 // 0.11 moved from a flat "these are wide" list to a size per card. Anyone
 // upgrading had the old list and no sizes, and watched their double-width
 // cards quietly go back to normal - which is exactly what happened to the
@@ -2612,7 +2387,7 @@ function migrateSizes(){
 function toggleWide(k){
   const n=nextSize(k);
   if(n===1) delete prefs.size[k]; else prefs.size[k]=n;
-  // keep the old flat list in step, so a device still on an older Overlook shows
+  // keep the old flat list in step, so a device still on an older Dashy shows
   // a resized card as wide rather than losing the setting entirely
   prefs.wide=CARDK.filter(c=>sizeOf(c)>=2);
   savePrefs(); applyWidths(); applyHidden();
@@ -2965,109 +2740,14 @@ function paint(d){
   $('host').textContent=d.host||'';
   paintHealth(d);
   drawSparks(d);
-  paintWeather(d.weather);
   paintLinks(d.links||{});
   // uptime lives in the settings pane now; the home screen stays clean
   const mv=$('mi-ver');
-  mv.innerHTML='<span>'+(d.app||'Overlook')+' v'+d.version+'</span>'+
+  mv.innerHTML='<span>'+(d.app||'Dashy')+' v'+d.version+'</span>'+
     '<span class="rt"><i class="pdot '+(footIssue?'warn':'ok')+'"></i>up '+
     footUp[0]+' '+footUp[1]+'</span>';
   mv.title = footIssue && footNote ? footNote : '';
   lastTick=Date.now();
-}
-
-// Weather glyphs, drawn rather than emoji. CSS vars work in SVG attributes,
-// same trick the logo already uses, so they follow the light/dark palette.
-const WX_ICON={
- clear:'<circle cx="12" cy="12" r="4.1" fill="var(--warn)"/><g stroke="var(--warn)" stroke-width="1.8" stroke-linecap="round"><path d="M12 2.7v2.1M12 19.2v2.1M4.4 12H2.3M21.7 12h-2.1M6.4 6.4 4.9 4.9M19.1 19.1l-1.5-1.5M17.6 6.4l1.5-1.5M4.9 19.1l1.5-1.5"/></g>',
- night:'<path d="M20.1 14.3A8.1 8.1 0 0 1 9.7 3.9 8.3 8.3 0 1 0 20.1 14.3z" fill="var(--muted)"/>',
- partly:'<circle cx="8.8" cy="8.4" r="3.1" fill="var(--warn)"/><path d="M7.4 18.8h9.3a3.3 3.3 0 0 0 .2-6.6 4.6 4.6 0 0 0-8.8-1.2 3.4 3.4 0 0 0-.7 7.8z" fill="var(--muted)"/>',
- partlynight:'<path d="M12.8 7.6A4.4 4.4 0 0 1 8.5 3.3 4.5 4.5 0 1 0 12.8 7.6z" fill="var(--muted)"/><path d="M7.4 18.8h9.3a3.3 3.3 0 0 0 .2-6.6 4.6 4.6 0 0 0-8.8-1.2 3.4 3.4 0 0 0-.7 7.8z" fill="var(--muted)"/>',
- cloud:'<path d="M6.9 18.6h10a3.5 3.5 0 0 0 .2-7 4.9 4.9 0 0 0-9.4-1.3 3.6 3.6 0 0 0-.8 8.3z" fill="var(--muted)"/>',
- fog:'<path d="M6.9 14.4h10a3.5 3.5 0 0 0 .2-7 4.9 4.9 0 0 0-9.4-1.3 3.6 3.6 0 0 0-.8 8.3z" fill="var(--muted)"/><g stroke="var(--muted)" stroke-width="1.8" stroke-linecap="round"><path d="M4.6 17.9h14.8M7.1 21h9.8"/></g>',
- drizzle:'<path d="M6.9 14.9h10a3.5 3.5 0 0 0 .2-7 4.9 4.9 0 0 0-9.4-1.3 3.6 3.6 0 0 0-.8 8.3z" fill="var(--muted)"/><g stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"><path d="M9.4 18.2v1.5M14.4 18.2v1.5"/></g>',
- rain:'<path d="M6.9 14.9h10a3.5 3.5 0 0 0 .2-7 4.9 4.9 0 0 0-9.4-1.3 3.6 3.6 0 0 0-.8 8.3z" fill="var(--muted)"/><g stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"><path d="M8.8 17.9 7.9 21M12.4 17.9l-.9 3.1M16 17.9l-.9 3.1"/></g>',
- snow:'<path d="M6.9 14.9h10a3.5 3.5 0 0 0 .2-7 4.9 4.9 0 0 0-9.4-1.3 3.6 3.6 0 0 0-.8 8.3z" fill="var(--muted)"/><g stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round"><path d="M9 18.3v2.4M7.8 19.5h2.4M15 18.3v2.4M13.8 19.5h2.4"/></g>',
- storm:'<path d="M6.9 14.4h10a3.5 3.5 0 0 0 .2-7 4.9 4.9 0 0 0-9.4-1.3 3.6 3.6 0 0 0-.8 8.3z" fill="var(--muted)"/><path d="M13.3 16.2 9.6 21.3h2.6l-.7 2.1 3.7-5.2h-2.6z" fill="var(--warn)"/>'
-};
-
-// Forecast needs a different chart to the telemetry one: temperatures sit in a
-// narrow band and can go negative, so the sqrt scale in chart() would be wrong.
-function wxChart(hs){
-  if(!hs||hs.length<3) return '';
-  const W=430,H=112,n=hs.length;
-  const temps=hs.map(h=>h.temp);
-  let lo=Math.min.apply(null,temps), hi=Math.max.apply(null,temps);
-  if(hi-lo<4){const mid=(hi+lo)/2; lo=mid-2; hi=mid+2;}   // a flat day should not look flat-lined
-  const pad=(hi-lo)*0.18; lo-=pad; hi+=pad;
-  const x=i=>(i/(n-1))*W;
-  const y=v=>H-((v-lo)/(hi-lo))*(H-12)-6;
-  const line=hs.map((h,i)=>(i?'L':'M')+x(i).toFixed(1)+' '+y(h.temp).toFixed(1)).join(' ');
-  const area='M0 '+H+' '+hs.map((h,i)=>'L'+x(i).toFixed(1)+' '+y(h.temp).toFixed(1)).join(' ')+
-             ' L'+W+' '+H+' Z';
-  // rain chance sits behind as bars, so the two never fight for the same axis
-  const bw=W/n;
-  const bars=hs.map((h,i)=>h.pop>4?'<rect x="'+(x(i)-bw*0.34).toFixed(1)+'" y="'+
-      (H-(h.pop/100)*(H-12)).toFixed(1)+'" width="'+(bw*0.68).toFixed(1)+'" height="'+
-      ((h.pop/100)*(H-12)).toFixed(1)+'" fill="var(--accent)" opacity=".16" rx="1.5"/>':'').join('');
-  const mark=(i,v)=>'<circle cx="'+x(i).toFixed(1)+'" cy="'+y(v).toFixed(1)+
-      '" r="3.2" fill="var(--warn)"/>';
-  const iHi=temps.indexOf(Math.max.apply(null,temps));
-  const iLo=temps.indexOf(Math.min.apply(null,temps));
-  const at=i=>hs[i]?hs[i].t:'';
-  const mid=Math.floor(n/2);
-  return '<div class="chart"><svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'+
-      bars+
-      '<path d="'+area+'" fill="var(--warn)" opacity=".10"/>'+
-      '<path d="'+line+'" fill="none" stroke="var(--warn)" stroke-width="2.8" '+
-        'stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>'+
-      mark(iHi,temps[iHi])+mark(iLo,temps[iLo])+
-    '</svg><div class="cap"><span>now</span><span>'+at(mid)+'</span><span>'+at(n-1)+'</span></div></div>'+
-    '<div class="legend">'+
-      '<span><u style="background:var(--warn)"></u>temperature</span>'+
-      '<span><u style="background:var(--accent)"></u>chance of rain</span>'+
-    '</div>';
-}
-
-function rowsWx(){
-  const w=data.weather;
-  if(!w) return '<div class="row"><span class="t2">No forecast available.</span></div>';
-  const hs=w.hours||[];
-  const wet=hs.filter(h=>h.pop>=40);
-  const r=[];
-  r.push('<div class="row"><span class="l"><span class="t1">Now</span>'+
-    '<span class="t2">'+(w.words||'')+(w.feels!==null&&w.feels!==undefined&&w.feels!==w.temp?
-      ' · feels '+w.feels+'°':'')+'</span></span>'+
-    '<span class="val">'+w.temp+'°</span></div>');
-  if(w.hi!==null&&w.hi!==undefined&&w.lo!==null&&w.lo!==undefined)
-    r.push('<div class="row"><span class="l"><span class="t1">Today</span>'+
-      '<span class="t2">high and low</span></span>'+
-      '<span class="val">'+w.hi+'° / '+w.lo+'°</span></div>');
-  if(hs.length){
-    const next=hs.slice(1);
-    const peak=next.reduce((a,b)=>b.pop>a.pop?b:a,next[0]||{pop:0,t:''});
-    r.push('<div class="row"><span class="l"><span class="t1">Rain</span>'+
-      '<span class="t2">'+(wet.length? wet.length+' of the next '+hs.length+' hours above 40%'
-                                     : 'nothing above 40% in the next '+hs.length+' hours')+
-      '</span></span><span class="val">'+(peak.pop||0)+'%</span></div>');
-  }
-  return r.join('');
-}
-
-function paintWeather(w){
-  const el=$('wx');
-  if((prefs.setup||{}).weather===false){ el.hidden=true; return; }
-  if(!w||w.temp===null||w.temp===undefined){el.hidden=true;return;}
-  el.hidden=false;
-  el.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true">'+
-    (WX_ICON[w.icon]||WX_ICON.cloud)+'</svg>'+
-    '<span class="t">'+w.temp+'\u00b0</span>'+
-    (w.words?'<span class="c">'+w.words+'</span>':'');
-  const bits=[];
-  if(w.feels!==null&&w.feels!==undefined&&w.feels!==w.temp) bits.push('feels '+w.feels+'\u00b0');
-  if(w.hi!==null&&w.hi!==undefined&&w.lo!==null&&w.lo!==undefined)
-    bits.push(w.lo+'\u00b0 to '+w.hi+'\u00b0 today');
-  el.title=bits.join(' \u00b7 ');
 }
 
 /* The collector looks every half hour, which is the right cadence for a
@@ -3138,7 +2818,10 @@ function paintSelfUpdate(){
 
 // Which address a tile opens. The server sends both, so this is a repaint and
 // not a round trip - flip it on a phone and the laptop follows within a poll.
+// A per-app override wins outright: it was set deliberately for this one tile
+// and the global switch has nothing to say about it.
 function appURL(s){
+  if(s.url_custom) return s.url_custom;
   const want=(prefs.setup||{}).links;
   if(want==='lan') return s.url_lan || s.url;
   return s.url_ts || s.url_lan || s.url;
@@ -3202,22 +2885,13 @@ function paintLinks(L){
   // filter here rather than on the server: a toggle then takes effect on the
   // spot instead of waiting for the next poll to recompute the links
   const su=prefs.setup||{};
-  const chat  = su.openclaw===false ? null : L.chat;
   const hexos = su.hexos ? L.hexos : null;
-  set('chat',chat);
   set('mi-truenas',L.truenas);
-  set('mi-chat',chat);
   set('mi-hexos',hexos);
   paintSelfUpdate();
   paintServeOffer();
   setSwitch('m-ts', !!su.tailscale);
-  setSwitch('m-oc', !!su.openclaw);
   setSwitch('m-hx', !!su.hexos);
-  setSwitch('m-wx', su.weather!==false);
-  const wn=$('m-wxnow');
-  if(wn) wn.textContent = wxLocLabel() || 'not set';
-  const wr=$('m-wxrow');
-  if(wr) wr.style.display = (su.weather===false) ? 'none' : 'block';
   const nas=$('m-nas');
   // never fight the user mid-type
   if(nas && document.activeElement!==nas) nas.value = su.truenas || L.truenas || '';
@@ -3426,7 +3100,7 @@ function rowsSystem(){
   const ps = data.poolstatus || {};
 
   if (su.available)
-    out.push(srow('bad', 'Overlook ' + su.latest + ' is available',
+    out.push(srow('bad', 'Dashy ' + su.latest + ' is available',
                   'You are on ' + (su.current || data.version) +
                   '. Install it from the settings pane.'));
 
@@ -3476,7 +3150,7 @@ function rowsSystem(){
 
   // what is normal, so the sheet says something either way
   const normal = [];
-  normal.push(srow('ok', 'Overlook ' + data.version,
+  normal.push(srow('ok', 'Dashy ' + data.version,
                    su.checked ? 'Checked for updates ' + agoWord(Math.max(0, Math.round(Date.now()/1000 - su.checked))) : ''));
   normal.push(srow('ok', svc.length + ' apps installed',
                    (svc.length - down.length) + ' responding'));
@@ -3527,11 +3201,15 @@ function rowsApps(){
   const st=data.updates||{};
   if(!list.length) return '<div class="row"><span class="t2">Nothing published yet.</span></div>';
   return '<div class="appgrid">'+list.map(s=>
-    '<a class="apptile" data-up="'+(s.code?'1':'0')+'" href="'+appURL(s)+'" target="_blank" rel="noopener">'+
+    '<a class="apptile" data-up="'+(s.code?'1':'0')+'"'+
+      (s.url_custom?' data-custom="1"':'')+
+      ' href="'+appURL(s)+'" target="_blank" rel="noopener">'+
       '<span class="sdot"></span>'+
       (s.update?'<button class="upd" data-app="'+s.app+'" data-name="'+s.name+'" '+
                  'data-ver="'+(s.version||'')+'" aria-label="Update '+s.name+'"></button>':'')+
       (st[s.app]?'<span class="ust '+st[s.app].state+'">'+st[s.app].msg+'</span>':'')+
+      '<button class="ulink" data-uid="'+esc(s.id)+'" data-name="'+esc(s.name)+'" '+
+              'aria-label="Set launch address for '+esc(s.name)+'"></button>'+
       appIcon(s)+
       '<span class="an">'+s.name+'</span>'+
       '<span class="ap">'+(s.version||'')+'</span></a>').join('')+'</div>';
@@ -3677,8 +3355,6 @@ const POPS={
           })()],
   apps:  ()=>['Apps',                 rowsApps()],
   up:    ()=>['Uptime record',        uptimeChart()],
-  wx:    ()=>['Weather',              wxChart((data.weather||{}).hours)+rowsWx(),
-                                      (data.weather||{}).place||''],
 };
 
 function renderPop(opening){
@@ -3734,7 +3410,7 @@ function closePop(){
 
 async function askSelfUpdate(){
   const u=(data && data.selfupdate) || {};
-  $('sh-t').textContent='Update Overlook';
+  $('sh-t').textContent='Update Dashy';
   $('sh-s').textContent='';
   $('sh-b').innerHTML=
     '<div class="row"><span class="l"><span class="t1">'+esc(u.current||'')+
@@ -3742,7 +3418,7 @@ async function askSelfUpdate(){
       '<span class="t2">from '+esc(u.repo||'the repository')+'</span></span></div>'+
     '<div class="row"><span class="t2 wrap">The new files are downloaded and '+
       'checked before anything is replaced, and a ZFS snapshot is taken first. '+
-      'Overlook restarts, so the page will go quiet for a few seconds.</span></div>'+
+      'Dashy restarts, so the page will go quiet for a few seconds.</span></div>'+
     '<div class="m-row" style="padding:12px 16px 14px;display:flex;gap:10px">'+
       '<button class="ubtn no" id="u-no">Cancel</button>'+
       '<button class="ubtn yes" id="su-yes">Update</button></div>';
@@ -3766,7 +3442,45 @@ async function askUpdate(app,name,ver){
   $('scrim').hidden=false; openKey=null;
 }
 
+// The launch address, per app, for this install. Auto-resolution already picks
+// LAN or tailnet from the global switch; this pins one tile so an app that
+// lives somewhere else (a different host, a reverse proxy, a cockpit path)
+// still opens where it should. Blank hands it back to the auto-resolution.
+let appUrlId='';
+function askAppURL(id,name){
+  const s=((data&&data.services)||[]).filter(x=>x.id===id)[0]||{};
+  const cur=(prefs.urls||{})[id]||'';
+  const auto=s.url_ts||s.url_lan||s.url||'';
+  appUrlId=id;
+  $('sh-t').textContent=name||'App';
+  $('sh-s').textContent='Launch address';
+  $('sh-b').innerHTML=
+    '<div class="row"><span class="l"><span class="t1">This app opens at</span>'+
+      '<span class="t2">'+(auto?esc(auto):'nowhere yet')+'</span></span></div>'+
+    '<div class="urlrow" style="padding:4px 16px 14px">'+
+      '<input class="fld2" id="au-input" type="text" inputmode="url" '+
+        'autocomplete="off" spellcheck="false" placeholder="https://example.ts.net:8443" '+
+        'value="'+esc(cur)+'">'+
+      '<span class="uhint">Leave blank to follow the LAN / tailnet switch above.</span>'+
+      '<div class="ubtns">'+
+        '<button class="ubtn no clr" id="au-clear">Use automatic</button>'+
+        '<button class="ubtn yes" id="au-save">Save</button>'+
+      '</div></div>';
+  $('sh-b')._html=null;
+  $('scrim').hidden=false; openKey=null;
+  setTimeout(()=>{ const i=$('au-input'); if(i) i.focus(); }, 60);
+}
 
+function saveAppURL(id){
+  const v=($('au-input').value||'').trim();
+  prefs.urls=Object.assign({}, prefs.urls);
+  if(!v) delete prefs.urls[id];
+  else if(!/^https?:\\/\\//i.test(v)){ $('au-input').focus(); return; }
+  else prefs.urls[id]=v;
+  savePrefs();
+  closePop();
+  if(data) paint(data);
+}
 /* ---------- long press to arrange --------------------------------------
    A hold puts the page into arrange mode, where each card carries its size
    button and its remove badge. Dragging to reorder was removed: once the
@@ -3808,6 +3522,14 @@ document.addEventListener('click',ev=>{
   const u=ev.target.closest('.apptile .upd');
   if(u){ ev.preventDefault(); ev.stopPropagation();
          askUpdate(u.dataset.app,u.dataset.name,u.dataset.ver); return; }
+  const ul=ev.target.closest('.apptile .ulink');
+  if(ul){ ev.preventDefault(); ev.stopPropagation();
+          askAppURL(ul.dataset.uid, ul.dataset.name); return; }
+  if(ev.target.id==='au-save'){ saveAppURL(appUrlId); return; }
+  if(ev.target.id==='au-clear'){
+    prefs.urls=Object.assign({}, prefs.urls);
+    delete prefs.urls[appUrlId];
+    savePrefs(); closePop(); if(data) paint(data); return; }
   if(ev.target.id==='u-no'){ closePop(); return; }
   const vb=ev.target.closest('button[data-vmact]');
   if(vb){
@@ -3858,14 +3580,11 @@ document.addEventListener('click',ev=>{
     if(selfRow.dataset.state==='ready'){ closeMenu(); askSelfUpdate(); }
     return;
   }
-  const cb=ev.target.closest('.cityres button[data-city]');
-  if(cb){ pickCity(parseInt(cb.dataset.city,10), cb.closest('.cityres').id); return; }
   const sw2=ev.target.closest('.sw2');
   if(sw2){
     const on = sw2.getAttribute('aria-checked')!=='true';
     setSwitch(sw2.id, on);
-    if(sw2.id==='o-wx'){ $('wxloc').style.display = on ? 'block' : 'none'; }
-    const menuKey={'m-ts':'tailscale','m-oc':'openclaw','m-hx':'hexos','m-wx':'weather'}[sw2.id];
+    const menuKey={'m-ts':'tailscale','m-hx':'hexos'}[sw2.id];
     if(menuKey){                       // in the menu these apply immediately
       prefs.setup=Object.assign({}, prefs.setup, {done:true});
       prefs.setup[menuKey]=on;
@@ -3930,7 +3649,7 @@ applyTheme();
 // the shared layout is authoritative; the local copy is only a fallback for
 // first paint and for when the server has no writable config mount
 
-$('mi-ver').textContent='Overlook';
+$('mi-ver').textContent='Dashy';
 // a system theme change has to re-pick the accent shade too
 if(darkMQ){
   const onScheme=()=>{ if(prefs.theme==='system') applyAccent(); };
@@ -3947,12 +3666,9 @@ function commitNas(){
   if(data) paint(data);
 }
 document.addEventListener('change', ev=>{ if(ev.target.id==='m-nas') commitNas(); });
-document.addEventListener('input', ev=>{
-  if(ev.target.id==='o-city') citySearchNow(ev.target.value,'o');
-  if(ev.target.id==='m-city') citySearchNow(ev.target.value,'m');
-});
 document.addEventListener('keydown', ev=>{
   if(ev.target.id==='m-nas' && ev.key==='Enter'){ ev.preventDefault(); commitNas(); $('m-nas').blur(); }
+  if(ev.target.id==='au-input' && ev.key==='Enter'){ ev.preventDefault(); saveAppURL(appUrlId); }
 });
 
 tick();
@@ -4052,11 +3768,6 @@ class Handler(BaseHTTPRequestHandler):
                        cache="public, max-age=86400")
         elif path == "/api/stats":
             self._send(200, json.dumps(snapshot()), "application/json; charset=utf-8")
-        elif path.startswith("/api/geocode"):
-            from urllib.parse import parse_qs, urlparse
-            q = (parse_qs(urlparse(self.path).query).get("q") or [""])[0]
-            self._send(200, json.dumps({"results": geocode(q)}),
-                       "application/json; charset=utf-8")
         elif path == "/api/layout":
             self._send(200, json.dumps({"layout": load_prefs()}),
                        "application/json; charset=utf-8")

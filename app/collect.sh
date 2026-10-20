@@ -342,7 +342,7 @@ fi
 
 date +%s > "$D/pools.stamp"
 
-# --- is there a newer Overlook? Checked every 30 min, not every minute: neither
+# --- is there a newer Dashy? Checked every 30 min, not every minute: neither
 # --- GitHub nor ghcr needs 1440 requests a day to answer the same question.
 # ---
 # --- Where to look depends on how this install is packaged. An image install
@@ -370,7 +370,7 @@ try: svc=list(json.load(sys.stdin)['services'].values())[0]
 except Exception: raise SystemExit
 print((svc.get('environment') or {}).get('DASH_PORT') or '')" 2>/dev/null)
 
-# Half an hour between checks is fine right up until Overlook itself is updated,
+# Half an hour between checks is fine right up until Dashy itself is updated,
 # at which point the cached "latest" is being compared against a version that
 # is no longer running - which shows the user a stale and meaningless upgrade.
 # So if the running version has moved since the last check, check again now.
@@ -442,7 +442,7 @@ PYGHCR
         > "$D/selfupdate.json.tmp" && mv "$D/selfupdate.json.tmp" "$D/selfupdate.json" ;;
   esac
 
-  # Overlook and the TrueNAS Apps page were on two independent half-hour timers
+  # Dashy and the TrueNAS Apps page were on two independent half-hour timers
   # that never lined up, so the dashboard could know about an update for up to
   # thirty minutes before the Apps page did. If there is one, clear the sweep
   # stamp: the block at the foot of this script then runs it on this same pass.
@@ -462,7 +462,7 @@ fi
 # --- TrueNAS sweeps the registries for newer images only when the Docker
 # --- service starts (app.image.op.check_update has no periodic caller), so a
 # --- custom app can sit on a stale "no update" for weeks. Nudge it on the same
-# --- half-hour cadence. This is what keeps both Overlook's own update markers and
+# --- half-hour cadence. This is what keeps both Dashy's own update markers and
 # --- the TrueNAS Apps page honest. Set IMAGE_UPDATE_SWEEP=0 to leave it alone.
 if [ "${IMAGE_UPDATE_SWEEP:-1}" = 1 ]; then
   ISTAMP="$D/imagesweep.stamp"

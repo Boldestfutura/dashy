@@ -1,5 +1,5 @@
 #!/bin/sh
-# Processes upgrade requests Overlook drops in the queue. Runs as root from cron.
+# Processes upgrade requests Dashy drops in the queue. Runs as root from cron.
 # A request is a file named <app>.req; the app name is validated against the
 # installed app list before anything is run.
 # Paths derive from this script's own location, so the app works wherever the
@@ -153,7 +153,7 @@ except Exception: print('UNKNOWN')" 2>/dev/null)
   fi
 fi
 
-# --- a request to update Overlook itself ---------------------------------------
+# --- a request to update Dashy itself ---------------------------------------
 # Two install shapes, and the update differs between them:
 #   image  - the app runs a published container image, so pull a new one
 #   files  - the app runs a stock python image with this directory mounted in,
@@ -177,7 +177,7 @@ json.dump(d,open(path,"w"))
 PYN
   }
 
-  # Overlook is a published image, so an update is a pull. There used to be a
+  # Dashy is a published image, so an update is a pull. There used to be a
   # second path for a bind-mounted file install, which meant two ways to update
   # and a mode to get wrong; the installer only builds image installs now.
   APPNAME=$(basename -- "$BASE")
@@ -187,11 +187,10 @@ try: svc=list(json.load(sys.stdin)['services'].values())[0]
 except Exception: raise SystemExit
 print(svc.get('image') or '')" 2>/dev/null)
 
-  # Both names: the product is Overlook but the published image is still
-  # ghcr.io/boldestfutura/dashy until that migration happens. Matching only
-  # the new name made the worker refuse to update a correctly installed app
-  # with "update it by hand", which is exactly the kind of breakage a rename
-  # causes when identifiers and branding are changed in one sweep.
+  # Both names: older installs may still run an ghcr.io/boldestfutura/overlook
+  # image from before the rename, so the published image under either name is
+  # matched. Matching only one name would make the worker refuse to update a
+  # correctly installed app with "update it by hand".
   case "$IMAGE" in
     */overlook:*|*/overlook|*/dashy:*|*/dashy)
       note running "taking a snapshot" 5
@@ -241,7 +240,7 @@ while True:
         note failed "could not pull the image"
       fi ;;
     *)
-      note failed "this install does not run an Overlook image; update it by hand" ;;
+      note failed "this install does not run a Dashy image; update it by hand" ;;
   esac
 fi
 

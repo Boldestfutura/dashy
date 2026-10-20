@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Checks whether this box can run Overlook, and whether an existing install is
+# Checks whether this box can run Dashy, and whether an existing install is
 # healthy. Safe to run at any time: it reads, it never changes anything.
 #
 #   ./test.sh              # check the default app name, 'overlook'
@@ -16,7 +16,7 @@ bad()  { printf '  \033[31m✗\033[0m %s\n' "$*"; FAIL=$((FAIL+1)); }
 warn() { printf '  \033[33m–\033[0m %s\n' "$*"; SKIP=$((SKIP+1)); }
 head_() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
-head_ "Can this box run Overlook?"
+head_ "Can this box run Dashy?"
 for c in midclt zfs python3 curl; do
   command -v "$c" >/dev/null && ok "$c present" || bad "$c missing"
 done
@@ -25,7 +25,7 @@ midclt call system.info >/dev/null 2>&1 \
   || bad "midclt call failed — run as root or truenas_admin"
 python3 -c 'import json,urllib.request,http.server' 2>/dev/null \
   && ok "python standard library is enough (no pip needed)" \
-  || bad "python3 is missing modules Overlook uses"
+  || bad "python3 is missing modules Dashy uses"
 
 head_ "Tailscale Serve (optional)"
 SERVE="${SERVE:-$(find /mnt -maxdepth 4 -name serve.json 2>/dev/null | head -1)}"
@@ -38,7 +38,7 @@ import json, sys
 cfg = json.load(open(sys.argv[1]))
 web, tcp = cfg.get("Web") or {}, cfg.get("TCP") or {}
 if not web:
-    print("  \033[33m\u2013\033[0m nothing published yet - Overlook will install for your LAN")
+    print("  \033[33m\u2013\033[0m nothing published yet - Dashy will install for your LAN")
     sys.exit(0)
 print("  \033[32m✓\033[0m %d service(s) published" % len(web))
 host = next(iter(web)).rsplit(":", 1)[0]
@@ -55,7 +55,7 @@ PY
     bad "serve.json is not valid JSON"
   fi
 else
-  warn "no Tailscale Serve config - Overlook will install for your LAN instead"
+  warn "no Tailscale Serve config - Dashy will install for your LAN instead"
   warn "(app tiles will link to this NAS's LAN address rather than a tailnet name)"
 fi
 
@@ -140,7 +140,7 @@ import json;print(json.load(open('$BASE/data/selfupdate.json')).get('latest','')
   [ -n "$LATEST" ] && ok "repo says the current release is $LATEST" \
                    || bad "selfupdate.json is there but unreadable"
   if [ -n "$VER" ] && [ -n "$LATEST" ] && [ "$VER" != "$LATEST" ]; then
-    warn "running $VER, repo has $LATEST - Update Overlook is waiting in the settings pane"
+    warn "running $VER, repo has $LATEST - Update Dashy is waiting in the settings pane"
   fi
 else
   warn "no update check yet (it runs every 30 minutes, give it that long)"

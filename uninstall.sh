@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Removes Overlook: the app, its cron jobs and its Serve entry.
+# Removes Dashy: the app, its cron jobs and its Serve entry.
 # The datasets are left alone - deleting data is your call, not the script's.
 set -uo pipefail
 APP_NAME="${APP_NAME:-dashy}"
