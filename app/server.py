@@ -1120,7 +1120,7 @@ PAGE = """<!doctype html>
 <link rel="apple-touch-icon" href="/icon-180.png">
 <link rel="manifest" href="/manifest.webmanifest">
 <title>Dashy</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='2' y='2' width='28' height='28' rx='8.5' fill='%232563eb'/%3E%3Cpath d='M6.5 19h4L13 12l3.5 11 3-8 1.5 4h4.5' fill='none' stroke='%23ffffff' stroke-width='2.3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' rx='12' fill='%232563eb'/%3E%3Cg fill='%23fbfcff'%3E%3Crect x='11' y='26' width='6.5' height='12' rx='3.25'/%3E%3Crect x='20.75' y='19' width='6.5' height='19' rx='3.25'/%3E%3Crect x='30.5' y='11' width='6.5' height='27' rx='3.25'/%3E%3C/g%3E%3C/svg%3E">
 <style>
   :root{
     color-scheme:light dark;
@@ -1697,17 +1697,16 @@ PAGE = """<!doctype html>
 <div class="wrap">
   <header>
     <div class="id">
-      <!-- Binoculars. A lookout, not a landscape and not a search box: the
-           twin circles are the only shape here that still reads as itself at
-           24px, which is the size it spends most of its life at. -->
+      <!-- Three ascending bars. A dashboard is a board of readings, and bars
+           are the only shape here that still reads as itself at 16px. Equal
+           gaps, rounded caps, the tallest bar twice the shortest. -->
       <svg class="mark" viewBox="0 0 48 48" role="img" aria-label="Dashy">
         <rect width="48" height="48" rx="12" fill="var(--brand)"/>
-        <g stroke="#fbfcff" fill="none">
-          <circle cx="15" cy="27" r="9.5" stroke-width="3.4"/>
-          <circle cx="33" cy="27" r="9.5" stroke-width="3.4"/>
-          <path d="M22.5 24.5h3" stroke-width="3" stroke-linecap="round"/>
+        <g fill="#fbfcff">
+          <rect x="11" y="26" width="6.5" height="12" rx="3.25"/>
+          <rect x="20.75" y="19" width="6.5" height="19" rx="3.25"/>
+          <rect x="30.5" y="11" width="6.5" height="27" rx="3.25"/>
         </g>
-        <path d="M10 17.5 13 9h7l1.5 8.5M38 17.5 35 9h-7l-1.5 8.5" fill="#fbfcff"/>
       </svg>
       <div style="min-width:0"><h1>Dashy<span class="host" id="host"></span></h1>
         <p class="beta">beta</p></div>
@@ -1800,10 +1799,13 @@ PAGE = """<!doctype html>
 <div class="setup" id="setup" hidden>
   <div class="setupcard">
     <button class="back" id="su-back" hidden type="button">&lsaquo; Back</button>
-    <svg class="mark" viewBox="0 0 32 32" role="img" aria-label="Dashy">
-      <rect width="32" height="32" rx="8.5" fill="var(--brand)"/>
-      <path d="M6.5 19h4L13 12l3.5 11 3-8 1.5 4h4.5" fill="none" stroke="#fff"
-            stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
+    <svg class="mark" viewBox="0 0 48 48" role="img" aria-label="Dashy">
+      <rect width="48" height="48" rx="12" fill="var(--brand)"/>
+      <g fill="#fbfcff">
+        <rect x="11" y="26" width="6.5" height="12" rx="3.25"/>
+        <rect x="20.75" y="19" width="6.5" height="19" rx="3.25"/>
+        <rect x="30.5" y="11" width="6.5" height="27" rx="3.25"/>
+      </g>
     </svg>
     <h2 id="su-h">Welcome to Dashy</h2>
     <p class="lede" id="su-lede">A dashboard for your NAS that finds your apps
