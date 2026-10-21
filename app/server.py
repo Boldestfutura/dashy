@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.20.2"
+APP_VERSION = "0.20.3"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -95,15 +95,6 @@ KNOWN = {
     "overlook":       ("Dashy",          "This page"),
     "rust-desk":      ("RustDesk",       "Remote desktop"),
 }
-# host-networked apps publish no ports, so they cannot be matched by owner
-# Host networking means this app publishes no ports, so it never shows up in
-# apps.json and has to recognise itself by the port it was told to serve on.
-PORT_FALLBACK = {
-    80:   ("TrueNAS", "The NAS itself"),
-    443:  ("TrueNAS", "The NAS itself"),
-    PORT: (APP_NAME,  "This page"),
-}
-
 def _hostname():
     """The NAS's name for the header. A container's /proc/sys/kernel/hostname is
     its own UTS namespace - host networking shares the network namespace, not
@@ -789,14 +780,20 @@ def detect():
 
 
 def header_links(services, setup=None):
-    """The two header buttons, resolved from what is actually published.
-    Nothing hard-coded, so a port change elsewhere carries through."""
+    """Resolve admin links separately from the discovered app tiles."""
     setup = setup or {}
-    out = {"truenas": None, "hexos": None}
-    for s in services:
-        if s.get("lport") in (80, 443) and not out["truenas"]:
-            # :443 is implicit in https and looks like a mistake in a link
-            out["truenas"] = (s.get("url") or "").replace(":443/", "/")
+    pub = serve_map()
+    tn = tailnet_host()
+    out = {"truenas": "https://%s/" % LINK_HOST, "hexos": None}
+    for lport in (443, 80):
+        tport = pub.get(lport)
+        if not tport:
+            continue
+        if tn:
+            out["truenas"] = "https://%s:%d/" % (tn, tport)
+        elif lport == 80:
+            out["truenas"] = "http://%s/" % LINK_HOST
+        break
 
     # an explicit address always wins: not everyone reaches the NAS over a tailnet
     if setup.get("truenas"):
@@ -1018,8 +1015,11 @@ def discover():
     except (OSError, ValueError):
         apps = []
 
-    out, claimed = [], set()
+    out = []
     for a in apps:
+        app_name = a.get("name") if isinstance(a, dict) else None
+        if not isinstance(app_name, str) or not app_name.strip():
+            continue
         ports = sorted(int(p) for p in (a.get("ports") or []) if p)
         pport, ppath = portal_of(a)
 
@@ -1036,34 +1036,18 @@ def discover():
         chosen = next((p for p in order if p), None)
         if chosen is None:
             continue                 # host networking, or nothing web-facing
-        claimed.add(chosen)
-        label, desc = KNOWN.get(a.get("name"),
-                                ((a.get("name") or "?").replace("-", " ").title(), ""))
+        label, desc = KNOWN.get(app_name,
+                                (app_name.replace("-", " ").title(), ""))
         out.append({"port": pub.get(chosen), "lport": chosen,
                     "path": ppath if chosen == pport else "/",
                     "name": label, "desc": desc,
-                    "state": a.get("state"), "app": a.get("name"),
-                    "id": a.get("name") or ("port%d" % chosen),
+                    "state": a.get("state"), "app": app_name,
+                    "id": app_name,
                     "version": a.get("version"), "update": bool(a.get("update")),
                     "iconsrc": ("/appicon/" + a["name"]) if a.get("icon") else None})
 
-    # Keep only explicit system entries. Arbitrary published ports are not apps:
-    # they may be stale Serve rules or non-web services, and guessing a tile
-    # from them created random, unusable links.
-    for lport, tport in pub.items():
-        if lport in claimed or lport not in PORT_FALLBACK:
-            continue
-        label, desc = PORT_FALLBACK[lport]
-        out.append({"port": tport, "lport": lport, "path": "/",
-                    "name": label, "desc": desc,
-                    "state": None, "app": None,
-                    "id": "port%d" % lport,
-                    "version": None, "update": False,
-                    "iconsrc": "/icon-192.png" if lport == PORT else None})
-
-    # published first, in tailnet-port order, then everything else by name, so
-    # an existing install's tiles keep their order and the newly visible ones
-    # land after them rather than shuffling the lot
+    # Only installed, web-facing TrueNAS apps appear here. The NAS admin UI and
+    # Dashy itself have separate header/browser links, never pseudo-app tiles.
     out.sort(key=lambda x: (x["port"] is None, x["port"] or 0,
                             (x["name"] or "").lower()))
     return out
