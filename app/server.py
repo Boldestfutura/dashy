@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.19.0"
+APP_VERSION = "0.20.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -835,11 +835,9 @@ def _clean_prefs(d):
                 clean[k] = n
         out["size"] = clean
 
-    # Per-app launch URL overrides. A tile normally resolves to its tailnet or
-    # LAN address from the global switch, but the owner can pin an individual
-    # app to a specific address (say a tailnet name while the rest stay local).
-    # Keyed by the app's stable id - its TrueNAS app name, or "port<N>" for a
-    # bare published port - so it survives renames and port changes elsewhere.
+    # Per-app launch URL overrides, kept separately for LAN and tailnet.
+    # Migrate the previous single URL to both fields so existing pins retain
+    # their old mode-independent behavior until edited by the owner.
     urls = d.get("urls")
     if isinstance(urls, dict):
         clean = {}
@@ -847,11 +845,19 @@ def _clean_prefs(d):
             if not (isinstance(k, str)
                     and re.match(r"^[a-z0-9][a-z0-9_-]{0,31}$", k)):
                 continue
-            if not isinstance(v, str):
+            fields = {"lan": v, "ts": v} if isinstance(v, str) else v
+            if not isinstance(fields, dict):
                 continue
-            v = v.strip()
-            if len(v) <= 300 and re.match(r"^https?://[^\s<>\"']+$", v):
-                clean[k] = v
+            entry = {}
+            for mode in ("lan", "ts"):
+                value = fields.get(mode)
+                if not isinstance(value, str):
+                    continue
+                value = value.strip()
+                if len(value) <= 300 and re.match(r"^https?://[^\s<>\"']+$", value):
+                    entry[mode] = value
+            if entry:
+                clean[k] = entry
         out["urls"] = clean
 
     su = d.get("setup")
@@ -1026,12 +1032,13 @@ def discover():
                     "version": a.get("version"), "update": bool(a.get("update")),
                     "iconsrc": ("/appicon/" + a["name"]) if a.get("icon") else None})
 
-    # Published ports that belong to no installed app: the TrueNAS UI on 443,
-    # and Dashy itself, which publishes nothing because it runs host networking.
+    # Keep only explicit system entries. Arbitrary published ports are not apps:
+    # they may be stale Serve rules or non-web services, and guessing a tile
+    # from them created random, unusable links.
     for lport, tport in pub.items():
-        if lport in claimed:
+        if lport in claimed or lport not in PORT_FALLBACK:
             continue
-        label, desc = PORT_FALLBACK.get(lport, ("Port %d" % lport, ""))
+        label, desc = PORT_FALLBACK[lport]
         out.append({"port": tport, "lport": lport, "path": "/",
                     "name": label, "desc": desc,
                     "state": None, "app": None,
@@ -1075,17 +1082,20 @@ def services_loop():
             svc["code"] = code
             svc["rt_ms"] = ms
             path = svc.get("path") or "/"
-            # Both, always. Which one a tile uses is the viewer's setting, and
-            # sending both means flipping it is instant on every device instead
-            # of waiting for the next poll to recompute a single url.
-            svc["url_lan"] = "http://%s:%d%s" % (LINK_HOST, svc["lport"], path)
-            svc["url_ts"] = ("https://%s:%d%s" % (TAILNET, svc["port"], path)
-                             if (TAILNET and svc.get("port")) else None)
-            # A per-app override pins this one tile regardless of the global
-            # switch. Sent as its own field so the client can still show the
-            # auto-resolved addresses and let the owner clear the pin.
-            svc["url_custom"] = over.get(svc.get("id") or "")
-            svc["url"] = svc["url_custom"] or svc["url_ts"] or svc["url_lan"]
+            # Keep discovered LAN/tailnet URLs and the corresponding overrides
+            # separate. The owner can correct either mode without affecting the
+            # other mode or relying on a guessed published port.
+            auto_lan = "http://%s:%d%s" % (LINK_HOST, svc["lport"], path)
+            auto_ts = ("https://%s:%d%s" % (TAILNET, svc["port"], path)
+                       if (TAILNET and svc.get("port")) else None)
+            entry = over.get(svc.get("id") or "") or {}
+            if isinstance(entry, str):       # defensive migration for old prefs
+                entry = {"lan": entry, "ts": entry}
+            svc["url_lan_auto"] = auto_lan
+            svc["url_ts_auto"] = auto_ts
+            svc["url_lan"] = entry.get("lan") or auto_lan
+            svc["url_ts"] = entry.get("ts") or auto_ts
+            svc["url"] = svc["url_ts"] or svc["url_lan"]
             # Latency trail, one sample per pass. Only a reachable reply is a
             # figure worth plotting; a down app must not add a zero that would
             # read as "fast".
@@ -1133,11 +1143,10 @@ PAGE = """<!doctype html>
 <meta name="theme-color" content="#f5f6f8" id="tc">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Dashy">
-<link rel="icon" href="/favicon.png" sizes="32x32" type="image/png">
-<link rel="apple-touch-icon" href="/icon-180.png">
-<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/favicon.png?v=ICON_VERSION" sizes="32x32" type="image/png">
+<link rel="apple-touch-icon" href="/icon-180.png?v=ICON_VERSION">
+<link rel="manifest" href="/manifest.webmanifest?v=ICON_VERSION">
 <title>Dashy</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' rx='12' fill='%232563eb'/%3E%3Cg fill='%23fbfcff'%3E%3Crect x='11' y='26' width='6.5' height='12' rx='3.25'/%3E%3Crect x='20.75' y='19' width='6.5' height='19' rx='3.25'/%3E%3Crect x='30.5' y='11' width='6.5' height='27' rx='3.25'/%3E%3C/g%3E%3C/svg%3E">
 <style>
   :root{
     color-scheme:light dark;
@@ -1213,18 +1222,65 @@ PAGE = """<!doctype html>
   .ibtn svg{width:17px;height:17px;display:block}
 
 
-  /* ---- settings dropdown ---------------------------------------------- */
-  .menuwrap{position:relative}
-  .menu{position:absolute;top:calc(100% + 9px);right:0;z-index:60;
-        width:min(296px,calc(100vw - 28px));background:var(--panel);
-        backdrop-filter:blur(18px) saturate(1.5);-webkit-backdrop-filter:blur(18px) saturate(1.5);
-        border:1px solid var(--brd);border-radius:16px;box-shadow:var(--shadow);
-        padding:7px;transform-origin:top right;overflow-y:auto;
-        max-height:min(78vh,620px);overscroll-behavior:contain}
-  .menu[hidden]{display:none}
-  .menu.in{animation:menuin .19s cubic-bezier(.22,1,.36,1) both}
-  @keyframes menuin{from{opacity:0;transform:translateY(-6px) scale(.97)}
-                    to{opacity:1;transform:none}}
+  /* ---- full-page settings --------------------------------------------- */
+  .settings-page{padding:5px 0 32px;animation:settingsin .22s ease both}
+  @keyframes settingsin{from{opacity:.35;transform:translateY(5px)}to{opacity:1;transform:none}}
+  .settings-head{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;
+                 padding:4px 0 22px;border-bottom:1px solid var(--brd)}
+  .settings-kicker{margin:0 0 5px;color:var(--accent);font-size:10px;font-weight:750;
+                   letter-spacing:.13em;text-transform:uppercase}
+  .settings-head h2{margin:0;font-size:clamp(23px,4vw,30px);letter-spacing:-.025em}
+  .settings-head p:last-child{margin:4px 0 0;color:var(--muted);font-size:13px}
+  .settings-back{appearance:none;border:1px solid var(--brd);border-radius:var(--r-full);
+                 background:var(--surf);color:var(--ink);padding:9px 14px;font:inherit;
+                 font-size:12.5px;font-weight:650;cursor:pointer;white-space:nowrap}
+  .settings-back:hover{border-color:var(--accent);color:var(--accent)}
+  .settings-layout{display:grid;grid-template-columns:174px minmax(0,1fr);gap:24px;
+                   align-items:start;padding-top:20px}
+  .settings-nav{position:sticky;top:14px;display:flex;flex-direction:column;gap:4px}
+  .settings-nav button{appearance:none;border:0;border-radius:10px;background:transparent;
+                       color:var(--muted);text-align:left;padding:10px 12px;font:inherit;
+                       font-size:13px;font-weight:650;cursor:pointer}
+  .settings-nav button:hover{background:var(--faint);color:var(--ink)}
+  .settings-nav button.active{background:color-mix(in srgb,var(--accent) 14%,var(--panel));
+                              color:var(--accent)}
+  .settings-content{min-width:0}
+  .settings-section{scroll-margin-top:18px;margin:0 0 28px}
+  .settings-section>h3{margin:0 0 12px;font-size:17px;letter-spacing:-.01em}
+  .settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr));
+                 gap:12px}
+  .settings-card{min-width:0;padding:17px;border:1px solid var(--brd);border-radius:16px;
+                  background:var(--panel);box-shadow:0 8px 24px -21px rgba(0,0,0,.45)}
+  .settings-glyph{width:32px;height:32px;display:grid;place-items:center;border-radius:50%;
+                  margin-bottom:12px;background:color-mix(in srgb,var(--accent) 18%,var(--panel));
+                  color:var(--accent);font-size:18px;font-weight:750}
+  .settings-card h4{margin:0;font-size:14px;font-weight:700}
+  .settings-card>p{min-height:34px;margin:4px 0 12px;color:var(--muted);font-size:12px;line-height:1.4}
+  .settings-card .mi{margin-top:7px;padding:9px 10px;border:1px solid var(--brd);
+                     border-radius:10px;background:var(--faint);justify-content:space-between}
+  .settings-card .mi:hover{background:color-mix(in srgb,var(--accent) 8%,var(--faint))}
+  .settings-card .seg{margin:5px 0 0}
+  .settings-card .sw{padding:8px 0 0;grid-template-columns:repeat(4,minmax(46px,1fr))}
+  .settings-card .mrow{margin-top:12px;padding:9px 0 0;border-top:1px solid var(--faint)}
+  .settings-card .pubmsg{margin-top:6px}
+  .settings-card .fld.sm{margin-top:4px}
+  .settings-version{display:flex;align-items:center;justify-content:space-between;gap:8px;
+                    margin-top:10px;color:var(--muted);font-size:11px}
+  .settings-links{display:flex;gap:8px;margin-top:8px}
+  .settings-links .mi{flex:1;justify-content:center}
+  .settings-note{margin-top:12px;padding:12px 14px;border-radius:11px;background:var(--faint);
+                 color:var(--muted);font-size:12px}
+  @media(max-width:680px){
+    .settings-head{align-items:flex-start;padding-bottom:16px}
+    .settings-back{padding:8px 10px;font-size:11px}
+    .settings-layout{grid-template-columns:minmax(0,1fr);gap:14px;padding-top:14px}
+    .settings-nav{position:sticky;top:0;z-index:5;flex-direction:row;overflow-x:auto;
+                  padding:5px 0;background:var(--bg);scrollbar-width:none}
+    .settings-nav::-webkit-scrollbar{display:none}
+    .settings-nav button{flex:0 0 auto;padding:8px 11px;font-size:12px}
+  }
+
+  /* shared settings controls */
   .mh{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);
       font-weight:700;padding:9px 10px 5px}
   .mi{display:flex;align-items:center;gap:10px;width:100%;padding:9px 10px;border-radius:10px;
@@ -1243,9 +1299,7 @@ PAGE = """<!doctype html>
   .seg.sm button{padding:6px 10px;font-size:12.5px}
   .pubmsg{display:block;margin-top:7px;font-size:12px;color:var(--muted)}
   .pubmsg.bad{color:var(--warn)}
-  /* Closing the pane and opening whatever is underneath used to be the same
-     tap. This catches it, so a tap outside only ever closes. */
-  .mscrim{position:fixed;inset:0;z-index:50;background:transparent}
+  /* update state */
   @keyframes spin{to{transform:rotate(360deg)}}
   /* a check that takes two seconds and says nothing looks like a dead button */
   #mi-check[data-state="busy"] svg{animation:spin .85s linear infinite;
@@ -1260,7 +1314,6 @@ PAGE = """<!doctype html>
   .dots i:nth-child(3){animation-delay:.4s}
   @keyframes blink{0%,66%,100%{opacity:.22}33%{opacity:1}}
   @media (prefers-reduced-motion:reduce){ .dots i{animation:none;opacity:.6} }
-  .mscrim[hidden]{display:none}
   #settings.dot{position:relative}
   #settings.dot::after{content:'';position:absolute;top:5px;right:5px;width:7px;height:7px;
       border-radius:50%;background:var(--warn);box-shadow:0 0 0 2px var(--card)}
@@ -1443,6 +1496,7 @@ PAGE = """<!doctype html>
   .urlrow{margin-top:4px;display:flex;flex-direction:column;gap:6px}
   .urlrow .fld2{width:100%;padding:9px 11px;border-radius:10px;border:1px solid var(--brd);
                 background:var(--faint);color:var(--ink);font:inherit;font-size:13px}
+  .urlfield{display:flex;flex-direction:column;gap:4px;font-size:11.5px;font-weight:650;color:var(--muted)}
   .urlrow .fld2:focus{outline:2px solid color-mix(in srgb,var(--accent) 45%,transparent);
                       outline-offset:1px;border-color:var(--accent)}
   .urlrow .uhint{font-size:11.5px;color:var(--muted)}
@@ -1571,7 +1625,7 @@ PAGE = """<!doctype html>
   @keyframes rowin{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:none}}
 
   @media (prefers-reduced-motion:reduce){
-    .sheet,.scrim,.scrim.out,.scrim.out .sheet,.sheet-b > *,.menu.in{animation:none}
+    .sheet,.scrim,.scrim.out,.scrim.out .sheet,.sheet-b > *,.settings-page{animation:none}
   }
   .sheet-h{display:flex;align-items:center;justify-content:space-between;gap:10px;
            padding:15px 16px 13px;border-bottom:1px solid var(--brd);flex:0 0 auto}
@@ -1779,78 +1833,114 @@ PAGE = """<!doctype html>
     </div>
     <div class="hdr-r">
 
-      <div class="menuwrap">
-        <button class="ibtn" id="settings" type="button" aria-haspopup="true"
-                aria-expanded="false" title="Settings" aria-label="Settings"><svg viewBox="0 0 24 24" fill="none"
+      <button class="ibtn" id="settings" type="button" aria-controls="settings-page" aria-expanded="false"
+                title="Settings" aria-label="Settings"><svg viewBox="0 0 24 24" fill="none"
          stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
          stroke-linejoin="round"><circle cx="12" cy="12" r="3.1"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
-        <div class="mscrim" id="mscrim" hidden></div>
-        <div class="menu" id="menu" hidden role="menu" aria-labelledby="settings">
-          <p class="mh">Updates</p>
-          <button class="mi" id="mi-check" type="button" role="menuitem">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
-                 stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/></svg>
-            <span id="mi-checktxt">Check for updates</span>
-            <span class="rt" id="mi-checkmsg"></span></button>
-          <button class="mi" id="mi-self" type="button" role="menuitem">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
-                 stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
-            <span class="dots" id="mi-selfdots" hidden><i></i><i></i><i></i></span>
-            <span id="mi-selftxt">Update Dashy</span><span class="rt" id="mi-selfver"></span></button>
-          <div class="msep"></div>
-          <p class="mh">Appearance</p>
-          <div class="seg" id="seg-theme" role="group" aria-label="Theme">
-            <button type="button" data-theme="system" aria-pressed="true">System</button>
-            <button type="button" data-theme="light"  aria-pressed="false">Light</button>
-            <button type="button" data-theme="dark"   aria-pressed="false">Dark</button>
-          </div>
-          <p class="mh">Icon colour</p>
-          <div class="sw" id="sw-accent" role="group" aria-label="Icon colour"></div>
-          <div class="msep"></div>
-          <p class="mh">Layout</p>
-          <button class="mi" id="mi-edit" type="button" role="menuitem">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
-                 stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.6"/></svg>
-            Resize or remove cards</button>
-          <div class="msep"></div>
-          <p class="mh">Integrations</p>
-          <div class="mrow"><span class="ml">Tailscale</span>
-            <button class="sw2 sm" id="m-ts" role="switch" aria-checked="false"><i></i></button></div>
-          <div class="mrow"><span class="ml">HexOS</span>
-            <button class="sw2 sm" id="m-hx" role="switch" aria-checked="false"><i></i></button></div>
-          <div class="mrow nas" id="m-serverow" hidden>
-            <span class="ml">App links</span>
-            <span class="mhint">Which address a tile opens</span>
-            <div class="seg sm" id="m-links" role="group" aria-label="App links">
-              <button type="button" data-links="ts" aria-pressed="true">Tailnet</button>
-              <button type="button" data-links="lan" aria-pressed="false">Local</button>
-            </div>
-            <span class="pubmsg" id="m-tsmsg"></span></div>
-          <div class="mrow nas"><span class="ml">TrueNAS address</span>
-            <span class="mhint">Where you open the TrueNAS interface</span>
-            <input class="fld sm" id="m-nas" type="url" inputmode="url"
-                   placeholder="https://nas.example.ts.net/"></div>
-          <button class="mi" id="mi-setup" type="button" role="menuitem">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
-                 stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>
-            Show the welcome screen</button>
-          <div class="msep"></div>
-          <p class="mh">Links</p>
-          <a class="mi" id="mi-truenas" target="_blank" rel="noopener" role="menuitem">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
-                 stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>
-            TrueNAS</a>
-          <a class="mi" id="mi-hexos" target="_blank" rel="noopener" role="menuitem">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
-                 stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.6 20.4 7v10L12 21.4 3.6 17V7z"/><path d="M12 11.8 20.4 7M12 11.8V21.4M12 11.8 3.6 7"/></svg>
-            HexOS</a>
-          <div class="msep"></div>
-          <button class="mi" id="mi-ver" type="button" role="menuitem"
-                  style="color:var(--muted)"></button>
-        </div>
-      </div>
+
     </div>
   </header>
+
+  <main class="settings-page" id="settings-page" hidden aria-label="Settings">
+    <div class="settings-head">
+      <div><p class="settings-kicker">DASHY / SETTINGS</p><h2>Settings</h2>
+        <p>Appearance, layout, integrations and app links.</p></div>
+      <button class="settings-back" id="settings-back" type="button">Back to dashboard</button>
+    </div>
+    <div class="settings-layout">
+      <nav class="settings-nav" aria-label="Settings sections">
+        <button type="button" id="settings-nav-back">Dashboard</button>
+        <button class="active" type="button" data-settings-target="settings-system">System</button>
+        <button type="button" data-settings-target="settings-appearance">Appearance</button>
+        <button type="button" data-settings-target="settings-dashboard">Cards</button>
+        <button type="button" data-settings-target="settings-integrations">Integrations</button>
+        <button type="button" data-settings-target="settings-links">App links</button>
+      </nav>
+      <div class="settings-content">
+        <section class="settings-section" id="settings-system">
+          <h3>System</h3><div class="settings-grid">
+            <article class="settings-card"><div class="settings-glyph">↻</div><h4>App updates</h4>
+              <p>Check for updates to your installed TrueNAS apps.</p>
+              <button class="mi" id="mi-check" type="button">
+                <span id="mi-checktxt">Check for updates</span><span class="rt" id="mi-checkmsg"></span></button>
+            </article>
+            <article class="settings-card"><div class="settings-glyph">↑</div><h4>Dashy update</h4>
+              <p>Keep Dashy current with the latest release.</p>
+              <button class="mi" id="mi-self" type="button">
+                <span class="dots" id="mi-selfdots" hidden><i></i><i></i><i></i></span>
+                <span id="mi-selftxt">Update Dashy</span><span class="rt" id="mi-selfver"></span></button>
+            </article>
+            <article class="settings-card"><div class="settings-glyph">i</div><h4>About</h4>
+              <p>Dashboard version and setup.</p>
+              <button class="mi" id="mi-setup" type="button">Show the welcome screen</button>
+               <div class="settings-version" id="settings-version"></div>
+            </article>
+          </div>
+        </section>
+        <section class="settings-section" id="settings-appearance">
+          <h3>Appearance</h3><div class="settings-grid">
+            <article class="settings-card"><div class="settings-glyph">◐</div><h4>Theme</h4>
+              <p>Choose a theme or follow your device preference.</p>
+              <div class="seg" id="seg-theme" role="group" aria-label="Theme">
+                <button type="button" data-theme="system" aria-pressed="true">System</button>
+                <button type="button" data-theme="light" aria-pressed="false">Light</button>
+                <button type="button" data-theme="dark" aria-pressed="false">Dark</button>
+              </div>
+            </article>
+            <article class="settings-card"><div class="settings-glyph">●</div><h4>Accent colour</h4>
+              <p>Choose the colour used for highlights and charts.</p>
+              <div class="sw" id="sw-accent" role="group" aria-label="Accent colour"></div>
+            </article>
+          </div>
+        </section>
+        <section class="settings-section" id="settings-dashboard">
+          <h3>Dashboard</h3><div class="settings-grid">
+            <article class="settings-card"><div class="settings-glyph">▦</div><h4>Card layout</h4>
+              <p>Resize cards, hide the ones you do not need, or restore the default layout.</p>
+              <button class="mi" id="mi-edit" type="button">Resize or remove cards</button>
+              <button class="mi" id="mi-reset" type="button">Reset dashboard layout</button>
+            </article>
+          </div>
+        </section>
+        <section class="settings-section" id="settings-integrations">
+          <h3>Integrations</h3><div class="settings-grid">
+            <article class="settings-card"><div class="settings-glyph">↗</div><h4>Tailscale</h4>
+              <p>Publish app addresses to your tailnet.</p>
+              <div class="mrow"><span class="ml">Enable Tailscale</span>
+                <button class="sw2 sm" id="m-ts" role="switch" aria-checked="false"><i></i></button></div>
+              <span class="pubmsg" id="m-tsmsg"></span>
+            </article>
+            <article class="settings-card"><div class="settings-glyph">⬡</div><h4>HexOS</h4>
+              <p>Show the HexOS link in the dashboard header.</p>
+              <div class="mrow"><span class="ml">Enable HexOS</span>
+                <button class="sw2 sm" id="m-hx" role="switch" aria-checked="false"><i></i></button></div>
+            </article>
+          </div>
+        </section>
+        <section class="settings-section" id="settings-links">
+          <h3>App links</h3><div class="settings-grid">
+            <article class="settings-card"><div class="settings-glyph">⌁</div><h4>Default address</h4>
+              <p>Choose which discovered address app tiles use when launched.</p>
+              <div class="seg" id="m-links" role="group" aria-label="Default app address">
+                <button type="button" data-links="ts" aria-pressed="true">Tailnet</button>
+                <button type="button" data-links="lan" aria-pressed="false">LAN</button>
+              </div>
+            </article>
+            <article class="settings-card"><div class="settings-glyph">⌂</div><h4>TrueNAS address</h4>
+              <p>Address used by the TrueNAS header link.</p>
+              <input class="fld sm" id="m-nas" type="url" inputmode="url"
+                     placeholder="https://nas.example.ts.net/">
+              <div class="settings-links">
+                <a class="mi" id="mi-truenas" target="_blank" rel="noopener">Open TrueNAS</a>
+                <a class="mi" id="mi-hexos" target="_blank" rel="noopener">Open HexOS</a>
+              </div>
+            </article>
+          </div>
+          <div class="settings-note">Each app can also have separate LAN and tailnet addresses in its Options.</div>
+        </section>
+      </div>
+    </div>
+  </main>
 
   <div class="editbar" id="editbar">
     <span><b>2\u00d7</b> resizes, <b>\u00d7</b> removes. Removed cards stay here, faded, with a <b>+</b>.</span>
@@ -2390,19 +2480,24 @@ function finishSetup(skipped){
   if(data) paint(data);
 }
 
-/* ---------- settings menu --------------------------------------------- */
-function menuOpen(){ return !$('menu').hidden; }
-function openMenu(){
-  const m=$('menu');
-  m.hidden=false; m.classList.add('in');
-  const sc=$('mscrim'); if(sc) sc.hidden=false;
+/* ---------- settings page ---------------------------------------------- */
+function settingsOpen(){ return !$('settings-page').hidden; }
+function openSettings(){
+  const m=$('settings-page');
+  window._settingsScroll=window.scrollY;
+  m.hidden=false;
+  $('vitals').hidden=true;
+  $('editbar').hidden=true;
+  window.scrollTo(0,0);
   $('settings').setAttribute('aria-expanded','true');
 }
-function closeMenu(){
-  const m=$('menu');
-  m.hidden=true; m.classList.remove('in');
-  const sc=$('mscrim'); if(sc) sc.hidden=true;
+function closeSettings(){
+  const m=$('settings-page');
+  m.hidden=true;
+  $('vitals').hidden=false;
+  $('editbar').hidden=false;
   $('settings').setAttribute('aria-expanded','false');
+  if(window._settingsScroll!==undefined) window.scrollTo(0,window._settingsScroll);
 }
 
 /* ---------- rearrange -------------------------------------------------- */
@@ -2425,17 +2520,21 @@ function cleanSize(o){
   return out;
 }
 
-// A per-app URL override. Blank means "keep using whatever ts/lan resolves to",
-// so an empty value is stored as absent rather than as "". Keys are service ids
-// the server mints (app name, or portN); anything else is dropped.
+// Per-app LAN and tailnet overrides. Older string values are copied to both
+// modes on load; blank fields stay absent so each can auto-resolve separately.
 function cleanUrls(o){
   const out={};
   for(const k in o){
     if(!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(k)) continue;
-    const v=String(o[k]||'').trim();
-    if(!v) continue;
-    if(!/^https?:\\/\\//i.test(v) || v.length>300) continue;
-    out[k]=v;
+    const raw=o[k];
+    const fields=typeof raw==='string'?{lan:raw,ts:raw}:raw;
+    if(!fields || typeof fields!=='object') continue;
+    const entry={};
+    for(const mode of ['lan','ts']){
+      const v=String(fields[mode]||'').trim();
+      if(v && /^https?:\\/\\//i.test(v) && v.length<=300) entry[mode]=v;
+    }
+    if(Object.keys(entry).length) out[k]=entry;
   }
   return out;
 }
@@ -2810,7 +2909,7 @@ function paint(d){
   drawSparks(d);
   paintLinks(d.links||{});
   // uptime lives in the settings pane now; the home screen stays clean
-  const mv=$('mi-ver');
+  const mv=$('settings-version');
   mv.innerHTML='<span>'+(d.app||'Dashy')+' v'+d.version+'</span>'+
     '<span class="rt"><i class="pdot '+(footIssue?'warn':'ok')+'"></i>up '+
     footUp[0]+' '+footUp[1]+'</span>';
@@ -2884,24 +2983,26 @@ function paintSelfUpdate(){
   set('idle','Install update', u ? 'up to date' : 'not checked yet');
 }
 
-// Which address a tile opens. The server sends both, so this is a repaint and
-// not a round trip - flip it on a phone and the laptop follows within a poll.
-// A per-app override wins outright: it was set deliberately for this one tile
-// and the global switch has nothing to say about it.
+// Each app can override its LAN and tailnet address independently. The global
+// switch picks a mode; only that mode's override is applied.
+function urlOverrides(id){
+  const value=(prefs.urls||{})[id];
+  return typeof value==='string'?{lan:value,ts:value}:(value||{});
+}
+function autoAppURL(s,mode){
+  const want=mode||(prefs.setup||{}).links||'ts';
+  if(want==='lan') return s.url_lan_auto || s.url_lan || s.url;
+  return s.url_ts_auto || s.url_ts || s.url_lan_auto || s.url_lan || s.url;
+}
 function appURL(s){
-  const pin=(prefs.urls||{})[s.id];
-  if(pin) return pin;
-  return autoAppURL(s);
+  const mode=(prefs.setup||{}).links==='lan'?'lan':'ts';
+  const pin=urlOverrides(s.id)[mode];
+  return pin || autoAppURL(s,mode);
 }
-function autoAppURL(s){
-  const want=(prefs.setup||{}).links;
-  if(want==='lan') return s.url_lan || s.url;
-  return s.url_ts || s.url_lan || s.url;
-}
-// True when this tile's address was pinned. Reads prefs first so the marker
-// appears the instant you save, rather than on the next 20s server poll.
+// A marker means at least one of this app's addresses has been customized.
 function isPinned(s){
-  return !!(prefs.urls||{})[s.id];
+  const fields=urlOverrides(s.id);
+  return !!(fields.lan || fields.ts);
 }
 
 function setLinks(mode){
@@ -2939,14 +3040,14 @@ function paintServeOffer(){
   // the choice is worth offering whenever Tailscale is here at all, published
   // or not - it is how you switch back to local addresses too
   const on=!!det.tailscale;
-  ['su-serve','m-serverow'].forEach(id=>{ const el=$(id); if(el) el.hidden=!on; });
-  if(!on) return;
+  const su=$('su-serve'); if(su) su.hidden=!on;
   const mode=((prefs.setup||{}).links==='lan') ? 'lan' : 'ts';
   ['su-links','m-links'].forEach(id=>{
     const g=$(id); if(!g) return;
     g.querySelectorAll('button').forEach(b=>
       b.setAttribute('aria-pressed', String(b.dataset.links===mode)));
   });
+  if(!on) return;
   let msg='', bad=false;
   if(st && st.state==='running') msg='Publishing\u2026';
   else if(st && st.state==='failed'){ msg=st.msg||'That did not work.'; bad=true; }
@@ -3354,9 +3455,12 @@ function appSheet(id){
   const up=!!s.code;
   const ver=String(s.version||'').trim();
   const newer=String(s.update||'').trim();
-  const auto=autoAppURL(s)||'';
-  const pinned=(prefs.urls||{})[id]||'';
-  const target=pinned||auto;
+  const overrides=urlOverrides(id);
+  const lanAuto=s.url_lan_auto||s.url_lan||'';
+  const tsAuto=s.url_ts_auto||s.url_ts||'';
+  const lanURL=overrides.lan||lanAuto;
+  const tsURL=overrides.ts||tsAuto;
+  const target=appURL(s);
 
   let head;
   if(up) head='<span class="pill up"><span class="dot"></span>Running</span>';
@@ -3395,10 +3499,10 @@ function appSheet(id){
 
   const urls=
     '<div class="appurls"><div class="lbl">Launch address</div>'+
-      (pinned
-        ? '<div class="urow"><span class="uk">Set</span><span class="uv on">'+esc(pinned)+'</span></div>'+
-          '<div class="urow"><span class="uk">Auto</span><span class="uv">'+esc(auto||'\u2014')+'</span></div>'
-        : '<div class="urow"><span class="uk">Auto</span><span class="uv on">'+esc(auto||'nowhere yet')+'</span></div>')+
+      '<div class="urow"><span class="uk">LAN</span><span class="uv '+(overrides.lan?'on':'')+'">'+
+        esc(lanURL||'Not discovered')+'</span></div>'+
+      '<div class="urow"><span class="uk">Tailnet</span><span class="uv '+(overrides.ts?'on':'')+'">'+
+        esc(tsURL||'Not configured')+'</span></div>'+
     '</div>';
 
   const acts=
@@ -3423,22 +3527,26 @@ function appSheet(id){
 // when you actually want it, so it stays behind one tap.
 function appOptions(){
   const id=openKey.slice(4);
-  const cur=(prefs.urls||{})[id]||'';
+  const fields=urlOverrides(id);
+  const s=((data&&data.services)||[]).find(x=>x.id===id)||{};
+  const lanAuto=s.url_lan_auto||s.url_lan||'';
+  const tsAuto=s.url_ts_auto||s.url_ts||'';
   appUrlId=id;
   const box=$('ap-optbox'); if(!box) return;
   if(box._open){ box._open=false; box.innerHTML=''; return; }
   box._open=true;
   box.innerHTML=
     '<div class="optbox"><div class="urlrow">'+
-      '<input class="fld2" id="au-input" type="text" inputmode="url" autocomplete="off" '+
-        'spellcheck="false" placeholder="https://example.ts.net:8443" value="'+esc(cur)+'">'+
-      '<span class="uhint">Paste where this app should open. Leave blank to follow the '+
-        'LAN / tailnet switch.</span>'+
+      '<label class="urlfield"><span>LAN address</span><input class="fld2" id="au-lan" type="url" inputmode="url" autocomplete="off" '+
+        'spellcheck="false" placeholder="'+esc(lanAuto||'http://nas-ip:port')+'" value="'+esc(fields.lan||'')+'"></label>'+
+      '<label class="urlfield"><span>Tailnet address</span><input class="fld2" id="au-ts" type="url" inputmode="url" autocomplete="off" '+
+        'spellcheck="false" placeholder="'+esc(tsAuto||'https://nas.tailnet.ts.net')+'" value="'+esc(fields.ts||'')+'"></label>'+
+      '<span class="uhint">Leave either field blank to use its discovered address.</span>'+
       '<div class="ubtns">'+
         '<button class="ubtn no clr" id="au-clear">Use automatic</button>'+
         '<button class="ubtn yes" id="au-save">Save</button>'+
       '</div></div></div>';
-  const i=$('au-input'); if(i) i.focus();
+  const i=$('au-lan'); if(i) i.focus();
 }
 
 
@@ -3581,12 +3689,14 @@ function renderPop(opening){
   if(b._html===r[1] && !opening) return;
   // The app sheet's Options box is live user input. A 3s poll must not wipe
   // what is being typed into it, so its contents are lifted out and put back.
-  let opt=null, optValue=null;
+  let opt=null, optValues=null, optFocus='';
   const prev=b.querySelector('#ap-optbox');
   if(prev && prev._open && prev.innerHTML){
     opt=prev.innerHTML;
-    const input=prev.querySelector('#au-input');
-    if(input) optValue=input.value;
+    optValues={};
+    prev.querySelectorAll('#au-lan,#au-ts').forEach(i=>optValues[i.id]=i.value);
+    if(document.activeElement && ['au-lan','au-ts'].includes(document.activeElement.id))
+      optFocus=document.activeElement.id;
   }
   b._html=r[1];
   b.innerHTML=r[1];
@@ -3594,8 +3704,11 @@ function renderPop(opening){
   if(opt){
     const nb=b.querySelector('#ap-optbox');
     if(nb){ nb.innerHTML=opt; nb._open=true;
-            const i=b.querySelector('#au-input');
-            if(i){ if(optValue!==null) i.value=optValue; i.focus(); } }
+            nb.querySelectorAll('#au-lan,#au-ts').forEach(i=>{
+              if(optValues && Object.prototype.hasOwnProperty.call(optValues,i.id))
+                i.value=optValues[i.id];
+            });
+            if(optFocus){ const i=$(optFocus); if(i) i.focus(); } }
   }
 
   if(!opening){
@@ -3670,11 +3783,14 @@ async function askUpdate(app,name,ver){
 let appUrlId='';
 
 function saveAppURL(id){
-  const v=($('au-input').value||'').trim();
+  const lan=($('au-lan').value||'').trim();
+  const ts=($('au-ts').value||'').trim();
+  for(const [field,value] of [['au-lan',lan],['au-ts',ts]]){
+    if(value && !/^https?:\\/\\//i.test(value)){ $(field).focus(); return; }
+  }
   prefs.urls=Object.assign({}, prefs.urls);
-  if(!v) delete prefs.urls[id];
-  else if(!/^https?:\\/\\//i.test(v)){ $('au-input').focus(); return; }
-  else prefs.urls[id]=v;
+  if(!lan && !ts) delete prefs.urls[id];
+  else prefs.urls[id]={...(lan?{lan}:{}),...(ts?{ts}:{})};
   savePrefs();
   if(data) paint(data);            // refresh the tiles behind the sheet
   build();                         // prefs.urls is not in layoutSig, so force it
@@ -3778,21 +3894,31 @@ document.addEventListener('click',ev=>{
   }
   // --- settings menu -----------------------------------------------
   if(ev.target.closest('#settings')){
-    ev.preventDefault(); menuOpen()?closeMenu():openMenu(); return;
+    ev.preventDefault(); settingsOpen()?closeSettings():openSettings(); return;
+  }
+  if(ev.target.closest('#settings-back')){ closeSettings(); return; }
+  if(ev.target.closest('#settings-nav-back')){ closeSettings(); return; }
+  const settingsTarget=ev.target.closest('[data-settings-target]');
+  if(settingsTarget){
+    document.querySelectorAll('.settings-nav button').forEach(b=>b.classList.remove('active'));
+    settingsTarget.classList.add('active');
+    const section=$(settingsTarget.dataset.settingsTarget);
+    if(section) section.scrollIntoView({behavior:'smooth',block:'start'});
+    return;
   }
   const seg=ev.target.closest('#seg-theme button');
   if(seg){ prefs.theme=seg.dataset.theme; savePrefs(); applyTheme(); return; }
   const sw=ev.target.closest('#sw-accent button');
   if(sw){ prefs.accent=sw.dataset.accent; savePrefs(); applyAccent(); return; }
-  if(ev.target.closest('#mi-edit')){ closeMenu(); setEditing(true); return; }
-  if(ev.target.closest('#mi-ver')){ closeMenu(); openPop('up'); return; }
-  if(ev.target.closest('#mi-setup')){ closeMenu(); openSetup(true); return; }
+  if(ev.target.closest('#mi-edit')){ closeSettings(); setEditing(true); return; }
+  if(ev.target.closest('#mi-reset')){ resetLayout(); return; }
+  if(ev.target.closest('#mi-setup')){ closeSettings(); openSetup(true); return; }
   const lk=ev.target.closest('#su-links button, #m-links button');
   if(lk){ setLinks(lk.dataset.links); return; }
   if(ev.target.closest('#mi-check')){ doCheck(); return; }
   const selfRow=ev.target.closest('#mi-self');
   if(selfRow){
-    if(selfRow.dataset.state==='ready'){ closeMenu(); askSelfUpdate(); }
+    if(selfRow.dataset.state==='ready'){ closeSettings(); askSelfUpdate(); }
     return;
   }
   const sw2=ev.target.closest('.sw2');
@@ -3823,12 +3949,6 @@ document.addEventListener('click',ev=>{
   if(ev.target.closest('#su-skip')){ finishSetup(true); return; }
   if(ev.target.closest('#eb-done')){ setEditing(false); return; }
   if(ev.target.closest('#eb-reset')){ resetLayout(); return; }
-  // the scrim swallows this tap: close, and let nothing else see it
-  if(ev.target.closest('#mscrim')){
-    ev.preventDefault(); ev.stopPropagation(); closeMenu(); return;
-  }
-  if(menuOpen() && !ev.target.closest('#menu')){ closeMenu(); return; }
-
   // --- rearrange mode ----------------------------------------------
   const wb=ev.target.closest('.cardtools button[data-wide]');
   if(wb){ ev.preventDefault(); ev.stopPropagation();
@@ -3864,14 +3984,14 @@ applyTheme();
 // the shared layout is authoritative; the local copy is only a fallback for
 // first paint and for when the server has no writable config mount
 
-$('mi-ver').textContent='Dashy';
+$('settings-version').textContent='Dashy';
 // a system theme change has to re-pick the accent shade too
 if(darkMQ){
   const onScheme=()=>{ if(prefs.theme==='system') applyAccent(); };
   darkMQ.addEventListener ? darkMQ.addEventListener('change',onScheme)
                           : darkMQ.addListener(onScheme);
 }
-document.addEventListener('keydown',ev=>{ if(ev.key==='Escape' && menuOpen()) closeMenu(); });
+document.addEventListener('keydown',ev=>{ if(ev.key==='Escape' && settingsOpen()) closeSettings(); });
 function commitNas(){
   const v=($('m-nas').value||'').trim();
   const next=/^https?:\\/\\//.test(v) ? v : '';
@@ -3883,7 +4003,9 @@ function commitNas(){
 document.addEventListener('change', ev=>{ if(ev.target.id==='m-nas') commitNas(); });
 document.addEventListener('keydown', ev=>{
   if(ev.target.id==='m-nas' && ev.key==='Enter'){ ev.preventDefault(); commitNas(); $('m-nas').blur(); }
-  if(ev.target.id==='au-input' && ev.key==='Enter'){ ev.preventDefault(); saveAppURL(appUrlId); }
+  if(['au-lan','au-ts'].includes(ev.target.id) && ev.key==='Enter'){
+    ev.preventDefault(); saveAppURL(appUrlId);
+  }
 });
 
 tick();
@@ -3915,9 +4037,9 @@ MANIFEST = {
     "background_color": "#f5f6f8",
     "theme_color": "#f5f6f8",
     "icons": [
-        {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png"},
-        {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png"},
-        {"src": "/icon-512-maskable.png", "sizes": "512x512", "type": "image/png",
+        {"src": "/icon-192.png?v=" + APP_VERSION, "sizes": "192x192", "type": "image/png"},
+        {"src": "/icon-512.png?v=" + APP_VERSION, "sizes": "512x512", "type": "image/png"},
+        {"src": "/icon-512-maskable.png?v=" + APP_VERSION, "sizes": "512x512", "type": "image/png",
          "purpose": "maskable"},
     ],
 }
@@ -3973,7 +4095,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html"):
-            self._send(200, PAGE, "text/html; charset=utf-8")
+            self._send(200, PAGE.replace("ICON_VERSION", APP_VERSION), "text/html; charset=utf-8")
         elif path.startswith("/appicon/"):
             self._send_appicon(path[len("/appicon/"):])
         elif path in ICONS:
