@@ -56,17 +56,17 @@ add and remove things.
   version, and live NAS metrics. Choose **Options** to paste a LAN address, a
   tailnet address, or both; **Launch** uses the mode selected above.
 
-| | |
+| Phone, light | Phone, dark |
 |:--:|:--:|
-| ![Phone](docs/03-phone.png) | ![Storage detail](docs/04-detail.png) |
-| On a phone | Every card opens a detail sheet |
-| ![Settings](docs/05-settings.png) | ![Arrange](docs/06-arrange.png) |
-| Full-page settings | Hold a tile to arrange: **2×** resizes, **×** removes |
+| ![Light phone](docs/03-phone.png) | ![Dark phone](docs/11-phone-dark.png) |
+| On a phone | On a phone in dark mode |
+| ![Storage detail](docs/04-detail.png) | ![Settings](docs/05-settings.png) |
+| Every card opens a detail sheet | Settings in light mode |
+| ![Arrange](docs/06-arrange.png) | ![Full-page settings](docs/10-settings-page.png) |
+| Hold a tile to arrange: **2×** resizes, **×** removes | Settings in dark mode |
 
 | ![App details](docs/08-app-popup.png) | ![App launch options](docs/09-app-options.png) |
 | App details and live metrics | Set an app's launch address in Options |
-
-![Full-page settings](docs/10-settings-page.png)
 
 ![An update waiting](docs/07-update.png)
 
