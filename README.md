@@ -43,9 +43,10 @@ add and remove things.
   or system theme and a choice of five accent colours.
   **Layout and theme are stored on the server**, so they follow you to every
   device and apply within seconds without a refresh.
-- **Tailnet or local, your choice.** One switch decides whether a tile opens
-  its tailnet address or its address on your LAN. Choose the tailnet and Dashy
-  publishes whatever is not published yet, so those addresses exist.
+- **Tailnet or local, your choice.** Apps default to LAN when Tailscale is off.
+  Enable Tailscale and Dashy asks its host worker to publish discovered app
+  ports, then reads the node's tailnet DNS name and Serve ports automatically.
+  Once ready, one switch chooses tailnet or LAN for every app.
 - **Discovered from TrueNAS.** The Apps section comes from the installed app
   list; unclaimed published ports are ignored. Each app resolves its LAN and
   tailnet address separately, and either can be corrected in its Options.
@@ -252,7 +253,7 @@ Everything is optional — the app discovers or asks for all of it.
 | Variable | Default |
 |---|---|
 | `DASH_PORT` | `8080` (the installer picks a free one) |
-| `TAILNET_HOST` | discovered from `serve.json` |
+| `TAILNET_HOST` | discovered from the Tailscale app status and Serve config |
 | `HOST_NAME` | first label of the tailnet hostname |
 | `HOST_IP` | `127.0.0.1` — where the app probes from |
 | `LINK_HOST` | the NAS's LAN address — what goes in a link you click |

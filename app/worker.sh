@@ -10,6 +10,34 @@ Q="$BASE/queue"
 D="$BASE/data"
 S="$D/updates.json"
 
+# Tailscale substitutes ${TS_CERT_DOMAIN} inside serve.json, but the source
+# file retains the template. Resolve the node's real DNS name from the running
+# Tailscale container so Dashy can build clickable tailnet URLs automatically.
+sync_tailnet_host(){
+  command -v docker >/dev/null 2>&1 || return 1
+  TC=$(docker ps --format '{{.Names}}' 2>/dev/null | python3 -c '
+import re,sys
+names=[x.strip() for x in sys.stdin if x.strip()]
+print(next((x for x in names if re.match(r"^ix-tailscale-tailscale-\d+$",x)), ""))
+' 2>/dev/null)
+  [ -n "$TC" ] || return 1
+  n=0
+  while [ "$n" -lt 10 ]; do
+    DNS=$(docker exec "$TC" tailscale status --json 2>/dev/null | python3 -c '
+import json,re,sys
+try: name=str(json.load(sys.stdin).get("Self",{}).get("DNSName","")).strip().rstrip(".").lower()
+except Exception: name=""
+if re.match(r"^[a-z0-9][a-z0-9.-]*\.ts\.net$",name): print(name)
+' 2>/dev/null)
+    if [ -n "$DNS" ]; then
+      printf '%s\n' "$DNS" > "$D/tailnet-host.tmp" && mv "$D/tailnet-host.tmp" "$D/tailnet-host"
+      return 0
+    fi
+    n=$((n+1)); sleep 2
+  done
+  return 1
+}
+
 # --- a request from the dashboard to set up Tailscale Serve -----------------
 # The container cannot do this itself: it has no midclt, and the Tailscale app
 # has to be edited and redeployed. The dashboard drops the parameters here and
@@ -29,7 +57,7 @@ PYS
   snote running "setting up Tailscale Serve"
   # The app sends a list of local ports it has actually discovered. Validate
   # it here too: the queue is a file, and a file is not an argument list.
-  PORTS=$(printf '%s' "$REQ" | python3 -c "
+PORTS=$(printf '%s' "$REQ" | python3 -c "
 import json,sys,re
 try: r=json.load(sys.stdin)
 except Exception: raise SystemExit
@@ -40,8 +68,9 @@ for p in (r.get('lports') or [])[:60]:
     try: p=int(p)
     except Exception: continue
     if 1 <= p <= 65535: out.append(str(p))
-if not out: raise SystemExit
-print((host or '-') + ' ' + ' '.join(sorted(set(out), key=int)))
+if not out and not r.get('host_lookup'): raise SystemExit
+ports=' '.join(sorted(set(out), key=int))
+print((host or '-') + ((' ' + ports) if ports else ''))
 " 2>/dev/null)
   SPATH=$(printf '%s' "$REQ" | python3 -c "
 import json,sys
@@ -73,8 +102,20 @@ print(s or '-')
         BAD=$((BAD+1))
       fi
     done
+    DNSOK=0
+    sync_tailnet_host && DNSOK=1
     if [ "$BAD" = 0 ]; then
-      snote done "published $OK"
+      if [ "$DNSOK" = 1 ]; then
+        if [ "$OK" = 0 ]; then
+          snote done "tailnet name found; app addresses are ready"
+        else
+          snote done "published $OK app(s); tailnet addresses are ready"
+        fi
+      elif [ "$OK" = 0 ]; then
+        snote failed "could not resolve the Tailscale node name"
+      else
+        snote done "published $OK app(s); waiting for the Tailscale name"
+      fi
     elif [ "$OK" = 0 ]; then
       snote failed "$(tail -1 "$D/serve-setup.log" 2>/dev/null | head -c 120)"
     else

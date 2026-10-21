@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.20.0"
+APP_VERSION = "0.20.1"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -31,10 +31,9 @@ SERVE = os.environ.get("SERVE_JSON", "/serve/serve.json")
 
 
 def serve_tailnet():
-    """This machine's own tailnet name, read from whatever Serve publishes.
-    Nothing about the install is written down: serve.json already knows which
-    host it is answering for, so a copy of this app on another NAS names
-    itself correctly with no configuration."""
+    """Read a literal node name from Serve. Tailscale's ${TS_CERT_DOMAIN}
+    template is intentionally skipped; the root worker resolves that template
+    through the Tailscale status command after enabling Serve."""
     try:
         with open(SERVE) as fh:
             cfg = json.load(fh)
@@ -42,13 +41,26 @@ def serve_tailnet():
         return ""
     for host in (cfg.get("Web") or {}):
         h = host.rsplit(":", 1)[0].strip()
-        if h:
+        if h and "${" not in h and "$TS_CERT_DOMAIN" not in h:
             return h
     return ""
 
 
-# an explicit setting wins, otherwise discover it, otherwise fall back to the host
-TAILNET = os.environ.get("TAILNET_HOST", "").strip() or serve_tailnet()
+def tailnet_host():
+    """Resolve this node's FQDN dynamically, including after first-time setup."""
+    env = os.environ.get("TAILNET_HOST", "").strip().rstrip(".")
+    if env and "${" not in env and "$TS_CERT_DOMAIN" not in env:
+        return env
+    try:
+        with open(os.path.join(DATA, "tailnet-host")) as fh:
+            saved = fh.read().strip().rstrip(".")
+        if saved:
+            return saved
+    except OSError:
+        pass
+    return serve_tailnet()
+
+
 QUEUE = os.environ.get("DASH_QUEUE", "/queue")
 # Layout has to be shared, not per-browser: the same arrangement should greet
 # you on the phone and the desktop. /data is read-only (the collector owns it),
@@ -99,9 +111,10 @@ def _hostname():
     v = os.environ.get("HOST_NAME", "").strip()
     if v:
         return v.split(".")[0]
-    # TAILNET_HOST is already set per install, and its first label is the machine
-    if TAILNET:
-        first = TAILNET.split(":")[0].split(".")[0].strip()
+    # The discovered tailnet FQDN also identifies the machine's first label.
+    tn = tailnet_host()
+    if tn:
+        first = tn.split(":")[0].split(".")[0].strip()
         if first:
             return first
     return "nas"
@@ -733,9 +746,9 @@ def request_serve(host=""):
     decision, so this is one request covering every unpublished app rather than
     a queue entry per tile.
 
-    `host` is optional and normally empty: the Tailscale container substitutes
-    ${TS_CERT_DOMAIN} with this node's own name, so nobody has to go and look
-    it up."""
+    `host` is optional and normally empty. Tailscale substitutes
+    ${TS_CERT_DOMAIN} in its Serve config; the root worker also reads the
+    resulting node DNS name from Tailscale status and shares it with Dashy."""
     host = (host or "").strip().lower()
     if host and (not re.match(r"^[a-z0-9][a-z0-9.-]{0,252}$", host)
                  or "." not in host):
@@ -743,22 +756,23 @@ def request_serve(host=""):
 
     # Only ports Dashy has actually discovered, so this cannot be talked into
     # publishing something arbitrary that happens to be listening.
-    with _lock:
-        svcs = list(_state.get("services") or [])
+    # Read the NAS app inventory directly: an enable click can arrive before
+    # the first 20s service probe has filled the in-memory list.
+    svcs = discover()
     want = sorted({int(s["lport"]) for s in svcs
                    if s.get("lport") and not s.get("port")})
     if PORT not in {int(s["lport"]) for s in svcs if s.get("lport")}:
         want.append(PORT)              # Dashy publishes no ports of its own
     want = sorted(set(want))
-    if not want:
-        return True, "everything is already published"
     try:
         os.makedirs(QUEUE, exist_ok=True)
         with open(os.path.join(QUEUE, "_serve.req"), "w") as fh:
-            json.dump({"host": host, "lports": want[:60],
+            json.dump({"host": host, "lports": want[:60], "host_lookup": True,
                        "serve": SERVE_HOST_HINT}, fh)
     except OSError as e:
         return False, str(e)
+    if not want:
+        return True, "checking the Tailscale hostname"
     return True, "publishing %d app%s" % (len(want), "" if len(want) == 1 else "s")
 
 
@@ -766,10 +780,11 @@ def detect():
     """What this NAS appears to be running, so first-run setup can be a
     confirmation rather than an interrogation."""
     apps = installed_apps()
-    return {"tailscale": bool(TAILNET) or "tailscale" in apps,
+    tn = tailnet_host()
+    return {"tailscale": bool(tn) or "tailscale" in apps,
             # Tailscale is here but nothing is published, which is the normal
             # state of a new install and the one worth offering to fix
-            "serve_offer": (not TAILNET) and ("tailscale" in apps),
+            "serve_offer": (not tn) and ("tailscale" in apps),
             "hexos": "hexos" in apps}
 
 
@@ -1076,6 +1091,7 @@ def services_loop():
     while True:
         found = []
         over = (load_prefs() or {}).get("urls") or {}
+        tn = tailnet_host()
         for svc in discover():
             svc = dict(svc)
             code, ms = probe(svc["lport"])
@@ -1086,8 +1102,8 @@ def services_loop():
             # separate. The owner can correct either mode without affecting the
             # other mode or relying on a guessed published port.
             auto_lan = "http://%s:%d%s" % (LINK_HOST, svc["lport"], path)
-            auto_ts = ("https://%s:%d%s" % (TAILNET, svc["port"], path)
-                       if (TAILNET and svc.get("port")) else None)
+            auto_ts = ("https://%s:%d%s" % (tn, svc["port"], path)
+                       if (tn and svc.get("port")) else None)
             entry = over.get(svc.get("id") or "") or {}
             if isinstance(entry, str):       # defensive migration for old prefs
                 entry = {"lan": entry, "ts": entry}
@@ -1121,7 +1137,10 @@ def snapshot():
                 "cpu_hist", "ctemp_hist", "store_hist", "host")}
     out["version"] = APP_VERSION
     out["app"] = APP_NAME
-    out["tailnet"] = TAILNET
+    tn = tailnet_host()
+    out["tailnet"] = tn
+    if not os.environ.get("HOST_NAME") and tn:
+        out["host"] = tn.split(":", 1)[0].split(".", 1)[0]
     out["services"] = svc
     out["updates"] = update_status()
     out["prefs"] = load_prefs()
@@ -1487,6 +1506,7 @@ PAGE = """<!doctype html>
   .sw2{margin-left:auto;flex:0 0 auto;width:44px;height:26px;border-radius:999px;
        background:var(--faint);border:1px solid var(--brd);position:relative;cursor:pointer;
        transition:background .18s ease,border-color .18s ease}
+  .sw2:disabled{opacity:.45;cursor:not-allowed}
   .sw2 i{position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;
          background:var(--panel);box-shadow:0 1px 3px rgba(0,0,0,.25);
          transition:transform .18s cubic-bezier(.22,1,.36,1)}
@@ -1905,7 +1925,7 @@ PAGE = """<!doctype html>
         <section class="settings-section" id="settings-integrations">
           <h3>Integrations</h3><div class="settings-grid">
             <article class="settings-card"><div class="settings-glyph">↗</div><h4>Tailscale</h4>
-              <p>Publish app addresses to your tailnet.</p>
+              <p>Automatically publish discovered apps and find their tailnet addresses.</p>
               <div class="mrow"><span class="ml">Enable Tailscale</span>
                 <button class="sw2 sm" id="m-ts" role="switch" aria-checked="false"><i></i></button></div>
               <span class="pubmsg" id="m-tsmsg"></span>
@@ -2463,21 +2483,26 @@ function getSwitch(id){
 
 function finishSetup(skipped){
   const nas=($('o-nas').value||'').trim();
+  const tailscale=getSwitch('o-ts');
+  const selectedLink=$('su-links') && $('su-links').querySelector('button[aria-pressed="true"]');
   prefs.setup={
     done:true,
-    tailscale:getSwitch('o-ts'),
+    tailscale:tailscale,
+    links:tailscale?(selectedLink?selectedLink.dataset.links:'ts'):'lan',
     hexos:getSwitch('o-hx'),
     truenas:/^https?:\\/\\//.test(nas) ? nas : ''
   };
   if(skipped){
     const det=(data&&data.detected)||{};
     prefs.setup.tailscale=!!det.tailscale;
+    prefs.setup.links=det.tailscale?'ts':'lan';
     prefs.setup.hexos=!!det.hexos;
     prefs.setup.truenas='';
   }
   savePrefs();
   $('setup').hidden=true;
   if(data) paint(data);
+  if(prefs.setup.tailscale) publishAll();
 }
 
 /* ---------- settings page ---------------------------------------------- */
@@ -2990,12 +3015,14 @@ function urlOverrides(id){
   return typeof value==='string'?{lan:value,ts:value}:(value||{});
 }
 function autoAppURL(s,mode){
-  const want=mode||(prefs.setup||{}).links||'ts';
+  const setup=prefs.setup||{};
+  const want=mode||setup.links||(setup.tailscale?'ts':'lan');
   if(want==='lan') return s.url_lan_auto || s.url_lan || s.url;
   return s.url_ts_auto || s.url_ts || s.url_lan_auto || s.url_lan || s.url;
 }
 function appURL(s){
-  const mode=(prefs.setup||{}).links==='lan'?'lan':'ts';
+  const setup=prefs.setup||{};
+  const mode=(setup.links||(setup.tailscale?'ts':'lan'))==='lan'?'lan':'ts';
   const pin=urlOverrides(s.id)[mode];
   return pin || autoAppURL(s,mode);
 }
@@ -3007,12 +3034,16 @@ function isPinned(s){
 
 function setLinks(mode){
   prefs.setup=Object.assign({}, prefs.setup, {links:mode});
+  if(mode==='ts' && data && data.detected && data.detected.tailscale){
+    prefs.setup.tailscale=true;
+    setSwitch('o-ts',true); setSwitch('m-ts',true);
+  }
   savePrefs();
   paintServeOffer();
   if(openKey==='apps') renderPop(false);
   build();
   // choosing the tailnet is also a request to make those addresses exist
-  if(mode==='ts') publishAll();
+  if(mode==='ts' && data && data.detected && data.detected.tailscale) publishAll();
 }
 
 let publishing=false;
@@ -3041,7 +3072,11 @@ function paintServeOffer(){
   // or not - it is how you switch back to local addresses too
   const on=!!det.tailscale;
   const su=$('su-serve'); if(su) su.hidden=!on;
-  const mode=((prefs.setup||{}).links==='lan') ? 'lan' : 'ts';
+  const setupToggle=$('o-ts'); if(setupToggle) setupToggle.disabled=!on;
+  const toggle=$('m-ts'); if(toggle) toggle.disabled=!on;
+  if(!on){ const msg=$('m-tsmsg'); if(msg) msg.textContent='Install Tailscale on TrueNAS to discover tailnet addresses.'; }
+  const setup=prefs.setup||{};
+  const mode=(setup.links||(setup.tailscale?'ts':'lan'))==='lan'?'lan':'ts';
   ['su-links','m-links'].forEach(id=>{
     const g=$(id); if(!g) return;
     g.querySelectorAll('button').forEach(b=>
@@ -3926,11 +3961,16 @@ document.addEventListener('click',ev=>{
     const on = sw2.getAttribute('aria-checked')!=='true';
     setSwitch(sw2.id, on);
     const menuKey={'m-ts':'tailscale','m-hx':'hexos'}[sw2.id];
-    if(menuKey){                       // in the menu these apply immediately
+    if(menuKey){                       // in Settings these apply immediately
       prefs.setup=Object.assign({}, prefs.setup, {done:true});
       prefs.setup[menuKey]=on;
+      if(menuKey==='tailscale'){
+        if(!on) prefs.setup.links='lan';
+        else if(!prefs.setup.links) prefs.setup.links='lan';
+      }
       savePrefs();
       if(data) paint(data);
+      if(menuKey==='tailscale' && on) publishAll();
     }
     return;
   }
@@ -4174,5 +4214,5 @@ if __name__ == "__main__":
     threading.Thread(target=services_loop, daemon=True).start()
     time.sleep(2.2)                      # let the first CPU sample land before serving
     print("%s on :%s for %s (tailnet %s), data %s"
-          % (APP_NAME, PORT, _state["host"], TAILNET or "not published", DATA), flush=True)
+          % (APP_NAME, PORT, _state["host"], tailnet_host() or "not published", DATA), flush=True)
     ThreadingHTTPServer(("", PORT), Handler).serve_forever()
