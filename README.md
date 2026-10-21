@@ -286,11 +286,13 @@ alone — deleting data should be a decision, not a side effect.
 
 ## Known limitations
 
-- **The TrueNAS Apps page shows a generic icon.** Custom apps have no icon
-  field, and TrueNAS SCALE no longer supports third-party catalogues
-  (`catalog.update` accepts only `preferred_trains`), so there is no supported
-  way to set one. Dashy does ship a proper icon for the browser tab and the
-  phone home screen.
+- **Custom-app icons in TrueNAS.** TrueNAS custom apps have no supported icon
+  field. On TrueNAS 25.10, the community-maintained [TrueNAS App Icon Manager](https://github.com/amnya/truenas-app-icon-manager)
+  can patch the generated metadata with a local icon; Dashy imports that icon
+  and refreshes its cache automatically. The `dashy_community` Discover Apps
+  listing is maintained separately by TrueNAS for Lissy93's Dashy and cannot
+  be rebranded from this repository. Dashy ships its own browser and home-screen
+  icons regardless of the TrueNAS Apps icon.
 - Upgrades of **other** apps go through `midclt app.upgrade`, so anything that
   tool cannot upgrade, Dashy cannot either.
 - Power figures need Intel RAPL. On a CPU without it, the power chart is empty.

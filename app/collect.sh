@@ -81,32 +81,70 @@ json.dump(out,sys.stdout)
 " > "$D/apps.json.tmp" 2>/dev/null && mv "$D/apps.json.tmp" "$D/apps.json"
 
 # --- cache app icons locally, so the browser never calls out to the internet
-# --- and the grid still works with no WAN. Fetched once, then left alone.
+# --- and the grid still works with no WAN. Refresh when TrueNAS metadata changes;
+# --- icon managers store custom images as data URIs rather than remote URLs.
 mkdir -p "$D/icons" 2>/dev/null
 python3 - "$D" <<'PYICON' 2>/dev/null
-import json, os, sys, urllib.request
+import base64, hashlib, json, os, re, sys, urllib.parse, urllib.request
 d = sys.argv[1]
 icons = os.path.join(d, "icons")
+ext_for = {"image/svg+xml": "svg", "image/png": "png",
+           "image/webp": "webp", "image/jpeg": "jpg"}
+allowed = set(ext_for.values())
 try:
     apps = json.load(open(os.path.join(d, "apps.json")))
 except Exception:
     raise SystemExit
-have = {f.rsplit(".", 1)[0] for f in os.listdir(icons)} if os.path.isdir(icons) else set()
 for a in apps:
-    name, url = a.get("name"), a.get("icon") or ""
-    if not name or not url or name in have:
+    name, source = a.get("name"), a.get("icon") or ""
+    if not isinstance(name, str) or not re.match(r"^[a-z0-9][a-z0-9._-]{0,48}$", name):
         continue
-    ext = url.rsplit(".", 1)[-1].lower()
-    if ext not in ("svg", "png", "webp", "jpg", "jpeg"):
+    if not isinstance(source, str) or not source:
         continue
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "overlook"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            blob = r.read(512 * 1024)
-        tmp = os.path.join(icons, name + "." + ext + ".tmp")
+        signature = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        sig_path = os.path.join(icons, name + ".source")
+        if os.path.isfile(sig_path) and open(sig_path).read().strip() == signature:
+            if any(os.path.isfile(os.path.join(icons, name + "." + ext)) for ext in allowed):
+                continue
+
+        if source.startswith("data:"):
+            header, payload = source.split(",", 1)
+            bits = header[5:].split(";")
+            mime = bits[0].lower()
+            if mime not in ext_for:
+                continue
+            blob = (base64.b64decode(payload, validate=True) if "base64" in bits[1:]
+                    else urllib.parse.unquote_to_bytes(payload))
+            ext = ext_for[mime]
+        else:
+            parsed = urllib.parse.urlsplit(source)
+            if parsed.scheme not in ("http", "https"):
+                continue
+            suffix = parsed.path.rsplit(".", 1)[-1].lower() if "." in parsed.path else ""
+            ext = "jpg" if suffix == "jpeg" else suffix
+            req = urllib.request.Request(source, headers={"User-Agent": "Dashy"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                blob = r.read(512 * 1024 + 1)
+                mime_ext = ext_for.get(r.headers.get_content_type())
+            if ext not in allowed:
+                ext = mime_ext
+            if ext not in allowed:
+                continue
+
+        if not blob or len(blob) > 512 * 1024:
+            continue
+        target = os.path.join(icons, name + "." + ext)
+        tmp = target + ".tmp"
         with open(tmp, "wb") as fh:
             fh.write(blob)
-        os.replace(tmp, os.path.join(icons, name + "." + ext))
+        os.replace(tmp, target)
+        for old in os.listdir(icons):
+            if old.startswith(name + ".") and old.rsplit(".", 1)[-1] in allowed and old != os.path.basename(target):
+                os.unlink(os.path.join(icons, old))
+        with open(sig_path + ".tmp", "w") as fh:
+            fh.write(signature + "\n")
+        os.replace(sig_path + ".tmp", sig_path)
     except Exception:
         pass
 PYICON
