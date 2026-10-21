@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.20.3"
+APP_VERSION = "0.20.4"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1034,6 +1034,12 @@ def discover():
             order.append(pport)
         order += [p for p in ports if p not in NOT_WEB]
         chosen = next((p for p in order if p), None)
+        # Dashy is a TrueNAS-installed app too, but host networking means
+        # TrueNAS reports no published container ports for it. Its listener is
+        # this process's configured PORT, so discover that one app from the
+        # installed-app inventory without resurrecting arbitrary port tiles.
+        if chosen is None and app_name.lower() == APP_NAME.lower():
+            chosen, ppath = PORT, "/"
         if chosen is None:
             continue                 # host networking, or nothing web-facing
         label, desc = KNOWN.get(app_name,
@@ -1043,7 +1049,9 @@ def discover():
                     "name": label, "desc": desc,
                     "state": a.get("state"), "app": app_name,
                     "id": app_name,
-                    "version": a.get("version"), "update": bool(a.get("update")),
+                    "version": (APP_VERSION if app_name.lower() == APP_NAME.lower()
+                                else a.get("version")),
+                    "update": bool(a.get("update")),
                     "iconsrc": ("/appicon/" + a["name"]) if a.get("icon") else None})
 
     # Only installed, web-facing TrueNAS apps appear here. The NAS admin UI and

@@ -48,9 +48,10 @@ add and remove things.
   ports, then reads the node's tailnet DNS name and Serve ports automatically.
   Once ready, one switch chooses tailnet or LAN for every app.
 - **Discovered from TrueNAS.** The Apps section comes from the installed app
-  list; unclaimed published ports are ignored. TrueNAS and Dashy themselves
-  stay as navigation links, not pseudo-app tiles. Each app resolves its LAN and
-  tailnet address separately, and either can be corrected in its Options.
+  list; unclaimed published ports are ignored. The host-networked Dashy app
+  uses its configured listener, while the TrueNAS admin interface stays a
+  navigation link. Each app resolves its LAN and tailnet address separately,
+  and either can be corrected in its Options.
 - **App details before launch.** Tap a tile for its live status, response time,
   version, and live NAS metrics. Choose **Options** to paste a LAN address, a
   tailnet address, or both; **Launch** uses the mode selected above.
