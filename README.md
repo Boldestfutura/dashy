@@ -77,18 +77,31 @@ add and remove things.
 - **TrueNAS SCALE** — the app list, versions and upgrades go through `midclt`.
 - Permission to call `midclt` (root, or `truenas_admin`).
 
-**Tailscale is optional.** With Serve configured, Dashy publishes itself on your
-tailnet and lists the services you chose to publish, each at its tailnet name.
-Without it, Dashy serves on your LAN and lists every app that binds a host port.
-Install it either way and add Tailscale later if you want it.
+**Tailscale is optional.** Dashy works on your LAN without it. When the Tailscale
+app is installed and enabled, Dashy publishes the discovered apps and makes
+their tailnet links available as well.
 
-**And if Tailscale is installed but you have not published anything, Dashy will
-set Serve up for you** — during install, or later from the settings pane. On
-TrueNAS, Serve is not something Tailscale configures itself: it reads a JSON
-file you have to write, mount into the Tailscale container and name with
-`TS_SERVE_CONFIG`. Dashy does those steps, backing up anything it touches, and
-asks you for one thing: your tailnet name. It will not restart Tailscale unless
-something actually changed.
+### Automatic Tailscale links
+
+Install and authenticate the **Tailscale app** on TrueNAS, and enable HTTPS
+certificates for your tailnet once in the Tailscale admin console under
+**DNS → HTTPS Certificates**. After that, Dashy handles discovery and Serve
+configuration:
+
+1. Turn on **Settings → Integrations → Tailscale**. Dashy reads installed apps
+   and their local web ports from TrueNAS.
+2. Its host worker configures Tailscale Serve for those discovered ports,
+   assigning free tailnet ports and setting up the Serve configuration mount
+   and `TS_SERVE_CONFIG` if needed.
+3. The worker reads the NAS's tailnet DNS name from Tailscale. Dashy joins that
+   name and each Serve port to the corresponding app, then refreshes the links.
+4. Choose **Tailnet** in **Settings → App links** to launch apps through those
+   addresses. Turn Tailscale off and Dashy switches the default back to LAN.
+
+There is no need to look up or paste the tailnet name or ports. If an app has an
+unusual address, its **Options** can still override the LAN and tailnet URLs
+separately. Selecting Tailnet also requests publication if any discovered app
+is not published yet.
 
 ## Install
 
