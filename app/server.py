@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.23.0"
+APP_VERSION = "0.23.1"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -520,6 +520,16 @@ def pools_now():
             size, alloc, free = int(size), int(alloc), int(free)
         except ValueError:
             continue
+        # Columns 6 and 7 are the root dataset's used and avail: usable space,
+        # parity excluded. zpool's figures are raw, which on a 4-wide RAIDZ1
+        # showed 12 TB free when 7.8 TB could actually be written. Fall back to
+        # raw only for a collector too old to write them.
+        try:
+            zused, zavail = int(bits[5]), int(bits[6])
+            if zused + zavail > 0:
+                alloc, free, size = zused, zavail, zused + zavail
+        except (IndexError, ValueError):
+            pass
         # live health straight from the kernel, in case the file is stale
         live = _read("/proc/spl/kstat/zfs/%s/state" % name).strip()
         out.append({"name": name, "size": size, "used": alloc, "free": free,

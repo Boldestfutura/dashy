@@ -6,9 +6,19 @@ APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 BASE=$(dirname -- "$APP_DIR")
 D="$BASE/data"
 
-# --- pools: name, size, allocated, free, health
-zpool list -Hp -o name,size,allocated,free,health > "$D/pools.tsv.tmp" 2>/dev/null \
-  && mv "$D/pools.tsv.tmp" "$D/pools.tsv"
+# --- pools: name, size, allocated, free, health, then usable used and avail.
+# zpool list counts raw disk space, parity included, so on RAIDZ it overstates
+# both used and free by the parity share (4-wide RAIDZ1: a third). The root
+# dataset's used/avail from zfs list is what can actually be stored. Appended
+# as extra columns so an older server still reads the first five.
+if zpool list -Hp -o name,size,allocated,free,health > "$D/pools.tsv.zp" 2>/dev/null; then
+  zfs list -Hp -d 0 -o name,used,avail > "$D/pools.tsv.zfs" 2>/dev/null
+  awk -F'\t' -v Z="$D/pools.tsv.zfs" 'BEGIN{OFS="\t"
+      while ((getline l < Z) > 0) { split(l, f, "\t"); u[f[1]] = f[2]; a[f[1]] = f[3] } }
+    { if ($1 in u) print $0, u[$1], a[$1]; else print $0 }' \
+    "$D/pools.tsv.zp" > "$D/pools.tsv.tmp" && mv "$D/pools.tsv.tmp" "$D/pools.tsv"
+  rm -f "$D/pools.tsv.zp" "$D/pools.tsv.zfs"
+fi
 
 # --- CPU package temperature, from the coretemp sensor
 for h in /sys/class/hwmon/hwmon*; do
