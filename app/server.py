@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1899,10 +1899,16 @@ PAGE = """<!doctype html>
   :root{--mem-cache:color-mix(in srgb,var(--accent) 60%,var(--panel))}
   .memrow{display:flex;align-items:center;gap:12px;flex:1}
   .memtxt{flex:1;min-width:0}
+  /* 2x reads like the other double tiles: words at the top, a trend line along
+     the bottom. The donut stays on the 1x and 4x cards, where it has the room. */
+  .memspark{display:none}
+  .cardwrap[data-w="2"] .memspark{display:block}
+  .cardwrap[data-w="2"] .donut{display:none}
+  .cardwrap[data-w="2"] .memrow{align-items:flex-start;flex:0 0 auto}
   .donut{flex:0 0 auto;width:50px;height:50px;transform:rotate(-90deg);overflow:visible}
   .cardwrap[data-w="2"] .donut{width:104px;height:104px}
   .cardwrap[data-w="4"] .donut{width:150px;height:150px}
-  .donut circle{fill:none;stroke-width:5;stroke-dasharray:0 100;
+  .donut circle{fill:none;stroke-width:7;stroke-dasharray:0 100;
     transition:stroke-dasharray .7s cubic-bezier(.4,0,.2,1),
                stroke-dashoffset .7s cubic-bezier(.4,0,.2,1)}
   .donut .apps{stroke:var(--accent)}
@@ -2731,8 +2737,8 @@ function cardHTML(c){
       '<p class="sub" id="s-'+c.k+'"></p>'
     : '<p class="big" id="v-'+c.k+'">\u2013</p><p class="sub" id="s-'+c.k+'"></p>';
   const body = c.k==='mem' ? memBody(head) : head;
-  const spark = c.trend
-    ? '<div class="sparkwrap"><svg class="spark" id="k-'+c.k+
+  const spark = (c.trend || c.k==='mem')
+    ? '<div class="sparkwrap'+(c.k==='mem'?' memspark':'')+'"><svg class="spark" id="k-'+c.k+
       '" preserveAspectRatio="none" viewBox="0 0 160 20"></svg></div>' : '';
   const tools=cardTools(c.k);
   return '<div class="cardwrap" data-k="'+c.k+'">'+
@@ -2910,7 +2916,8 @@ function applyWidths(){
 const SPARKS={
   cpu:   d=>[(d.cpu_hist||[]).map(r=>[r[0],r[1]]), 'var(--accent)', 100],
   ctemp: d=>[(d.ctemp_hist||[]).map(r=>[r[0],r[1]]), 'var(--warn)', null],
-  mem:   d=>[(d.mem_hist||[]).map(r=>[r[0],r[1]+r[2]]), 'var(--brand)', null],
+  // apps only, the same figure as the big number, in the Apps legend colour
+  mem:   d=>[(d.mem_hist||[]).map(r=>[r[0],r[1]]), 'var(--accent)', null],
   store: d=>[(d.store_hist||[]).map(r=>[r[0],r[1]]), 'var(--warn)', 100],
   net:   d=>{const h=d.net_hist||{}; const k=Object.keys(h)[0];
              return [(h[k]||[]).map(r=>[r[0],(r[1]||0)+(r[2]||0)]), 'var(--accent)', null];}
