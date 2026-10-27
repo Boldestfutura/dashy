@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.20.4"
+APP_VERSION = "0.21.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1164,7 +1164,7 @@ PAGE = """<!doctype html>
     --bg:#eaeeff; --panel:#ffffff; --surf:#fbfcff; --brd:rgba(16,20,28,.09);
     --ink:#0f1218; --muted:#6a7280; --faint:rgba(16,20,28,.06);
     --ok:#1fa971; --warn:#e0a32e; --bad:#e0443a;
-    --accent:#2563eb; --brand:#2563eb;
+    --accent:#4a57c8; --brand:#4a57c8;
     --shadow:0 1px 2px rgba(16,20,28,.04), 0 12px 30px -14px rgba(16,20,28,.20);
     /* M3's shape scale rather than one radius everywhere. Mixing round and
        square is the point: uniform corners read as a template, varied ones
@@ -1172,6 +1172,8 @@ PAGE = """<!doctype html>
     --r-xs:8px; --r-sm:12px; --r-md:16px; --r-lg:22px; --r-xl:28px;
     --r-full:999px;
     --r:var(--r-md);
+    /* every tile, home and settings: a hairline outline and a soft drop */
+    --tile-shadow:0 8px 24px -21px rgba(0,0,0,.45);
   }
   /* dark palette twice: once for "follow the system" (suppressed when the user
      has explicitly chosen light), once for an explicit dark choice */
@@ -1180,7 +1182,7 @@ PAGE = """<!doctype html>
       --bg:#0f111b; --panel:#171b22; --surf:#1b1e2b; --brd:rgba(255,255,255,.09);
       --ink:#eef1f5; --muted:#949cab; --faint:rgba(255,255,255,.06);
       --ok:#34d399; --warn:#fbbf24; --bad:#f87171;
-      --accent:#5b8cff; --brand:#5b8cff;
+      --accent:#7d87e6; --brand:#7d87e6;
       --shadow:0 1px 2px rgba(0,0,0,.4), 0 18px 42px -18px rgba(0,0,0,.7);
       color-scheme:dark;
     }
@@ -1189,7 +1191,7 @@ PAGE = """<!doctype html>
       --bg:#0f111b; --panel:#171b22; --surf:#1b1e2b; --brd:rgba(255,255,255,.09);
       --ink:#eef1f5; --muted:#949cab; --faint:rgba(255,255,255,.06);
       --ok:#34d399; --warn:#fbbf24; --bad:#f87171;
-      --accent:#5b8cff; --brand:#5b8cff;
+      --accent:#7d87e6; --brand:#7d87e6;
       --shadow:0 1px 2px rgba(0,0,0,.4), 0 18px 42px -18px rgba(0,0,0,.7);
       color-scheme:dark;
   }
@@ -1261,7 +1263,7 @@ PAGE = """<!doctype html>
   .settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr));
                  gap:12px}
   .settings-card{min-width:0;padding:17px;border:1px solid var(--brd);border-radius:16px;
-                  background:var(--panel);box-shadow:0 8px 24px -21px rgba(0,0,0,.45)}
+                  background:var(--panel);box-shadow:var(--tile-shadow)}
   .settings-glyph{width:32px;height:32px;display:grid;place-items:center;border-radius:50%;
                   margin-bottom:12px;background:color-mix(in srgb,var(--accent) 18%,var(--panel));
                   color:var(--accent);font-size:18px;font-weight:750}
@@ -1302,8 +1304,7 @@ PAGE = """<!doctype html>
   /* only an update actually waiting earns the warning colour; the rest of
      the time the row is present but plainly doing nothing */
   #mi-self[data-state="ready"]{color:var(--warn)}
-  #mi-self[data-state="idle"]{color:var(--muted);cursor:default}
-  #mi-self[data-state="idle"]:hover{background:none}
+  #mi-self[data-state="checking"]{opacity:.6;pointer-events:none}
   .opt.col{display:block}
   .opt.col .seg{margin-top:10px}
   .seg.sm{margin-top:8px}
@@ -1312,9 +1313,6 @@ PAGE = """<!doctype html>
   .pubmsg.bad{color:var(--warn)}
   /* update state */
   @keyframes spin{to{transform:rotate(360deg)}}
-  /* a check that takes two seconds and says nothing looks like a dead button */
-  #mi-check[data-state="busy"] svg{animation:spin .85s linear infinite;
-                                   transform-origin:50% 50%}
   /* a spinner says "busy"; three dots in sequence say "working through it",
      which is what an update actually is */
   .dots{display:inline-flex;align-items:center;justify-content:center;
@@ -1543,11 +1541,11 @@ PAGE = """<!doctype html>
   .grid{display:grid;gap:9px;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));
         grid-auto-rows:minmax(84px,auto)}
 
-  /* Filled, not outlined. In M3 a surface is defined by its tone; a border
-     and a drop shadow are both ways of faking separation that colour does
-     better. --surf is a tonal step up from the page, so the card reads as
-     raised without anything being drawn around it. */
-  .card{position:relative;background:var(--surf);border:none;
+  /* Outlined, with a soft shadow - the same tile as the settings page, so
+     the two screens read as one app. The outline is also what the hover and
+     warn/bad states recolour. */
+  .card{position:relative;background:var(--panel);border:1px solid var(--brd);
+        box-shadow:var(--tile-shadow);
         border-radius:var(--r-md);padding:14px 15px;
         min-height:92px;display:flex;flex-direction:column;align-items:stretch}
   button.card{width:100%;text-align:left;font:inherit;color:inherit;
@@ -1716,8 +1714,9 @@ PAGE = """<!doctype html>
   /* Deliberately a smaller corner than the metric cards above them: the
      shape is what separates the two groups now that nothing is outlined. */
   .apptile{position:relative;text-decoration:none;color:inherit;display:flex;
-           flex-direction:column;gap:6px;background:var(--surf);
-           border:none;border-radius:var(--r-sm);
+           flex-direction:column;gap:6px;background:var(--panel);
+           border:1px solid var(--brd);box-shadow:var(--tile-shadow);
+           border-radius:var(--r-sm);
            padding:11px 12px;min-height:84px;transition:border-color .15s ease}
   .apptile:hover{border-color:color-mix(in srgb,var(--accent) 40%,var(--brd))}
   .apptile .sdot{position:absolute;top:13px;right:12px;width:6px;height:6px;
@@ -1861,7 +1860,6 @@ PAGE = """<!doctype html>
     </div>
     <div class="settings-layout">
       <nav class="settings-nav" aria-label="Settings sections">
-        <button type="button" id="settings-nav-back">Dashboard</button>
         <button class="active" type="button" data-settings-target="settings-system">System</button>
         <button type="button" data-settings-target="settings-appearance">Appearance</button>
         <button type="button" data-settings-target="settings-dashboard">Cards</button>
@@ -1872,15 +1870,10 @@ PAGE = """<!doctype html>
         <section class="settings-section" id="settings-system">
           <h3>System</h3><div class="settings-grid">
             <article class="settings-card"><div class="settings-glyph">↻</div><h4>App updates</h4>
-              <p>Check for updates to your installed TrueNAS apps.</p>
-              <button class="mi" id="mi-check" type="button">
-                <span id="mi-checktxt">Check for updates</span><span class="rt" id="mi-checkmsg"></span></button>
-            </article>
-            <article class="settings-card"><div class="settings-glyph">↑</div><h4>Dashy update</h4>
-              <p>Keep Dashy current with the latest release.</p>
+              <p>Check for a new version of Dashy, then install it. A snapshot is taken first.</p>
               <button class="mi" id="mi-self" type="button">
                 <span class="dots" id="mi-selfdots" hidden><i></i><i></i><i></i></span>
-                <span id="mi-selftxt">Update Dashy</span><span class="rt" id="mi-selfver"></span></button>
+                <span id="mi-selftxt">Check for updates</span><span class="rt" id="mi-selfver"></span></button>
             </article>
             <article class="settings-card"><div class="settings-glyph">i</div><h4>About</h4>
               <p>Dashboard version and setup.</p>
@@ -2126,11 +2119,10 @@ const CARDK=CARDS.map(c=>c.k);
    sensible to put them, and every read is guarded: private windows and
    blocked site data both throw rather than return null.                   */
 const PKEY='overlook.prefs.v2';
-/* Blue leads, but the four below stay: amber, red and green already mean warn,
+/* Dusk is the default. Amber, red and green stay out: they already mean warn,
    bad and ok, so an accent that strays into them reads as an alert that is not
    there. Everything on offer sits in the blue-to-stone range. */
 const ACCENTS={
-  blue:    {light:'#2563eb', dark:'#5b8cff', name:'Blue'},
   dusk:    {light:'#4a57c8', dark:'#7d87e6', name:'Dusk'},
   harbour: {light:'#1d7391', dark:'#49a7c6', name:'Harbour'},
   heather: {light:'#7b57ad', dark:'#a583d6', name:'Heather'},
@@ -2141,8 +2133,8 @@ const ACCENTS={
    than silently dropping someone back to default. */
 const ACCENT_WAS={teal:'harbour', blue:'dusk', violet:'heather',
                   amber:'granite', yellow:'granite', rose:'heather', green:'harbour'};
-function migrateAccent(a){ return ACCENTS[a] ? a : (ACCENT_WAS[a] || 'blue'); }
-const DEFAULTS={theme:'system', accent:'blue', order:CARDK.slice(), hidden:[], wide:[], size:{},
+function migrateAccent(a){ return ACCENTS[a] ? a : (ACCENT_WAS[a] || 'dusk'); }
+const DEFAULTS={theme:'system', accent:'dusk', order:CARDK.slice(), hidden:[], wide:[], size:{},
                 setup:{}, urls:{}};
 let prefs=Object.assign({}, DEFAULTS);
 let lastTick=0;
@@ -2937,19 +2929,17 @@ function paint(d){
 /* The collector looks every half hour, which is the right cadence for a
    background check and the wrong one for somebody standing there waiting.
    This asks now, and shows that it is asking. */
-let checking=false;
+let checking=false, checkMsg='', checkAt=0;
 function doCheck(){
   if(checking) return;
   checking=true;
-  const row=$('mi-check'), t=$('mi-checktxt'), m=$('mi-checkmsg');
-  if(row) row.dataset.state='busy';
-  if(t) t.textContent='Checking\u2026';
-  if(m) m.textContent='';
+  paintSelfUpdate();
+  // the answer shows on the same button: 'Update to x' if there is one,
+  // otherwise what the check said, for a minute
   const done=(msg)=>{
     checking=false;
-    if(row) row.dataset.state='';
-    if(t) t.textContent='Check for updates';
-    if(m) m.textContent=msg||'';
+    checkMsg=msg||''; checkAt=Date.now();
+    paintSelfUpdate();
   };
   // a registry that never answers would otherwise spin for ever
   const ac=('AbortController' in window) ? new AbortController() : null;
@@ -2971,9 +2961,8 @@ function paintSelfUpdate(){
   const set=(state, label, right)=>{
     b.dataset.state=state;
     // swap the arrow for the dots while it is actually doing something
-    const ic=b.querySelector('svg'), dots=$('mi-selfdots');
-    if(ic) ic.style.display = state==='running' ? 'none' : '';
-    if(dots) dots.hidden = state!=='running';
+    const dots=$('mi-selfdots');
+    if(dots) dots.hidden = state!=='running' && state!=='checking';
     if(txt) txt.textContent=label;
     if(ver) ver.textContent=right||'';
     if(gear) gear.classList.toggle('dot', state==='ready');
@@ -2983,6 +2972,7 @@ function paintSelfUpdate(){
   // out here or they pin the row: 'Updated' would sit in the menu for weeks,
   // and a worker that died mid-update would leave 'Updating...' forever.
   const age=(st && st.t) ? (Date.now()/1000 - st.t) : 1e9;
+  if(checking) return set('checking','Checking\u2026','');
   if(st && st.state==='running' && age < 900)
     return set('running','Updating\u2026', st.pct ? st.pct+'%' : (st.msg||''));
   // An available update outranks a stale failure. The other order looks
@@ -2994,10 +2984,13 @@ function paintSelfUpdate(){
     return set('ready','Update to '+u.latest,
                (st && st.state==='failed' && age < 3600)
                  ? 'last attempt failed' : u.current+' \u2192 '+u.latest);
+  // nothing waiting: the same button checks
+  if(checkMsg && Date.now()-checkAt < 60000)
+    return set('idle','Check for updates', checkMsg);
   if(st && st.state==='failed' && age < 3600)
-    return set('idle','Install update', st.msg||'that did not work');
-  if(st && st.state==='done' && age < 3600) return set('idle','Install update','just updated');
-  set('idle','Install update', u ? 'up to date' : 'not checked yet');
+    return set('idle','Check for updates', st.msg||'last update failed');
+  if(st && st.state==='done' && age < 3600) return set('idle','Check for updates','just updated');
+  set('idle','Check for updates', u ? 'up to date' : '');
 }
 
 // Each app can override its LAN and tailnet address independently. The global
@@ -3924,7 +3917,6 @@ document.addEventListener('click',ev=>{
     ev.preventDefault(); settingsOpen()?closeSettings():openSettings(); return;
   }
   if(ev.target.closest('#settings-back')){ closeSettings(); return; }
-  if(ev.target.closest('#settings-nav-back')){ closeSettings(); return; }
   const settingsTarget=ev.target.closest('[data-settings-target]');
   if(settingsTarget){
     document.querySelectorAll('.settings-nav button').forEach(b=>b.classList.remove('active'));
@@ -3942,10 +3934,10 @@ document.addEventListener('click',ev=>{
   if(ev.target.closest('#mi-setup')){ closeSettings(); openSetup(true); return; }
   const lk=ev.target.closest('#su-links button, #m-links button');
   if(lk){ setLinks(lk.dataset.links); return; }
-  if(ev.target.closest('#mi-check')){ doCheck(); return; }
   const selfRow=ev.target.closest('#mi-self');
   if(selfRow){
     if(selfRow.dataset.state==='ready'){ closeSettings(); askSelfUpdate(); }
+    else if(selfRow.dataset.state==='idle') doCheck();
     return;
   }
   const sw2=ev.target.closest('.sw2');
