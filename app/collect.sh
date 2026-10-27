@@ -31,27 +31,84 @@ if timeout 30 zpool list -Hp -o name,size,allocated,free,health > "$D/pools.tsv.
   date +%s > "$D/pools.stamp"
 fi
 
-# --- CPU package temperature, from the coretemp sensor
-for h in /sys/class/hwmon/hwmon*; do
-  [ "$(cat "$h/name" 2>/dev/null)" = "coretemp" ] || continue
-  for l in "$h"/temp*_label; do
-    case "$(cat "$l" 2>/dev/null)" in
-      Package*) cat "${l%_label}_input" 2>/dev/null > "$D/cputemp.tmp" && \
-                mv "$D/cputemp.tmp" "$D/cputemp"; break 2 ;;
-    esac
-  done
-done
+# --- CPU temperatures, from whichever sensor driver this CPU has. coretemp is
+# --- Intel; k10temp (or the out-of-tree zenpower) is AMD. Reading coretemp alone
+# --- left every AMD box with no CPU temperature at all.
+python3 - "$D" <<'PYTEMP'
+import glob, os, sys
+D = sys.argv[1]
 
-# --- per-core temperatures
-: > "$D/cores.tsv.tmp"
-for h in /sys/class/hwmon/hwmon*; do
-  [ "$(cat "$h/name" 2>/dev/null)" = "coretemp" ] || continue
-  for l in "$h"/temp*_label; do
-    lb=$(cat "$l" 2>/dev/null)
-    case "$lb" in Core*) printf "%s\t%s\n" "$lb" "$(cat "${l%_label}_input" 2>/dev/null)" >> "$D/cores.tsv.tmp" ;; esac
-  done
-done
-mv "$D/cores.tsv.tmp" "$D/cores.tsv"
+
+def rd(p):
+    try:
+        with open(p) as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+pkg, cores = None, []
+for h in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+    drv = rd(h + "/name")
+    if drv not in ("coretemp", "k10temp", "zenpower"):
+        continue
+    for lab in sorted(glob.glob(h + "/temp*_label"),
+                      key=lambda p: int("".join(c for c in os.path.basename(p) if c.isdigit()) or 0)):
+        name, val = rd(lab), rd(lab[:-len("_label")] + "_input")
+        if not val.lstrip("-").isdigit():
+            continue
+        # the package figure: Intel's "Package id 0", AMD's Tctl (Tdie on
+        # older kernels and zenpower, which is the truer one when present)
+        if name.startswith("Package") or name in ("Tdie", "Tctl"):
+            if pkg is None or name == "Tdie":
+                pkg = val
+        # per core on Intel, per chiplet (CCD) on AMD
+        elif name.startswith("Core") or name.startswith("Tccd"):
+            cores.append((name, val))
+    if pkg is not None:
+        break
+
+if pkg is not None:
+    with open(D + "/cputemp.tmp", "w") as fh:
+        fh.write(pkg + "\n")
+    os.replace(D + "/cputemp.tmp", D + "/cputemp")
+with open(D + "/cores.tsv.tmp", "w") as fh:
+    for name, val in cores:
+        fh.write("%s\t%s\n" % (name, val))
+os.replace(D + "/cores.tsv.tmp", D + "/cores.tsv")
+PYTEMP
+
+# --- this machine, as TrueNAS describes it: its name, its version and the
+# --- hardware. Nothing about any particular NAS is known to the page; it is
+# --- all read here, on whatever box this runs on.
+timeout 30 midclt call system.info 2>/dev/null | python3 -c "
+import json,re,sys
+try: i=json.load(sys.stdin)
+except Exception: raise SystemExit
+def cpu(v):
+    # '13th Gen Intel(R) Core(TM) i3-13100' -> 'Intel Core i3-13100'
+    v=re.sub(r'\((?:R|TM|r|tm)\)','',str(v or ''))
+    v=re.sub(r'\b\d+(?:st|nd|rd|th) Gen\b|\bCPU\b|@.*$|\b\d+-Core Processor\b','',v)
+    return ' '.join(v.split())
+def clean(v):
+    v=str(v or '').strip()
+    # boards with blank DMI fields report placeholder strings
+    return '' if v.lower() in ('default string','to be filled by o.e.m.','system product name',
+                               'system manufacturer','not specified','none') else v
+json.dump({'hostname': clean(i.get('hostname')),
+           'version': clean(i.get('version')),
+           'cpu': cpu(clean(i.get('model'))),
+           'cores': i.get('physical_cores'),
+           'threads': i.get('cores'),
+           'memory': i.get('physmem'),
+           'ecc': i.get('ecc_memory'),
+           'maker': clean(i.get('system_manufacturer')),
+           'product': clean(i.get('system_product')),
+           'timezone': clean(i.get('timezone')),
+           # which installed app is this dashboard: the dataset is named after it
+           'app': sys.argv[1]}, sys.stdout)
+" "$(basename -- "$BASE")" > "$D/system.json.tmp" 2>/dev/null && [ -s "$D/system.json.tmp" ] \
+  && mv "$D/system.json.tmp" "$D/system.json" || rm -f "$D/system.json.tmp"
 
 # --- boot/shutdown history, for the uptime record
 last -x --time-format=iso reboot shutdown 2>/dev/null | head -60 > "$D/boots.txt.tmp" \
@@ -92,7 +149,16 @@ for a in apps:
             if hp.get('host_ip') in ('0.0.0.0','::'):
                 ports.add(hp.get('host_port'))
     md=a.get('metadata') or {}
+    # a custom app carries the catalogue's placeholder ('Custom App', 'This is a
+    # custom app where...'), which says nothing about what it actually is
+    if a.get('custom_app'): md=dict(md, title='', description='')
+    desc=' '.join(str(md.get('description') or '').split())
+    # the catalogue's first sentence is the useful part
+    desc=desc.split('. ')[0].rstrip('.')
     out.append({'name':a.get('name'),'state':a.get('state'),
+                # the catalogue's own name and blurb; custom apps have neither
+                'title':str(md.get('title') or ''),
+                'desc':desc[:90],
                 'ports':sorted(p for p in ports if p),
                 'version':a.get('human_version'),
                 'icon':md.get('icon') or md.get('icon_url') or '',

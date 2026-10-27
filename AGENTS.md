@@ -75,6 +75,14 @@ CDP and click things; a screenshot alone has missed real bugs here.
 - The worker prunes its own `preupdate-`/`preupgrade-<app>-` snapshots to the newest
   five, matched by an anchored regex. Never widen that match.
 - Escape anything from the NAS (`esc`) before it goes into markup.
+- **Nothing about one NAS is baked in.** Hostname, TrueNAS version, CPU, board and memory
+  come from `system.info` (collector → `system.json`); app titles and blurbs from the
+  catalogue metadata (custom apps have none and are titled from their name); "which app
+  is this dashboard" is the dataset name. CPU temps read coretemp, k10temp or zenpower.
+- **Updates show every step.** Tap → `queued` (the `.req` file, via `queued()`) →
+  `running` with a percentage (worker `job()`/`track()`) → done/failed, on the tile and
+  in `#upbanner`. Confirming returns to the home screen. A self-update restart is
+  expected (`selfBusy`), and a new version reloads the page.
 
 ## Current design (1.0.0)
 

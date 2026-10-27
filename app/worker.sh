@@ -39,6 +39,47 @@ os.replace(tmp, path)
 PYS
 }
 
+# track <key> <msg> <from> <to>: read a midclt -j job's output on stdin and
+# publish its percentage, mapped into from-to, so the dashboard can show how far
+# along an update is rather than leaving someone watching a word. It only
+# reports; whether the job worked is the job's exit code (see job()).
+track(){ python3 -u -c "
+import json, os, re, sys, time
+S, key, msg, lo, hi = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4]), float(sys.argv[5])
+last, lastw = lo, 0.0
+pat = re.compile(r'([0-9]{1,3}(?:\.[0-9]+)?)%')
+for line in sys.stdin:
+    found = pat.findall(line)
+    if not found:
+        continue
+    pct = lo + min(100.0, float(found[-1])) * (hi - lo) / 100.0
+    now = time.time()
+    if pct <= last or now - lastw < 1.0:
+        continue
+    last, lastw = pct, now
+    try:
+        d = json.load(open(S))
+    except Exception:
+        d = {}
+    d[key] = {'state': 'running', 'msg': msg, 'pct': int(pct), 't': int(now)}
+    tmp = S + '.tmp'
+    with open(tmp, 'w') as fh:
+        json.dump(d, fh)
+    os.replace(tmp, S)
+" "$S" "$@"
+}
+
+# job <key> <msg> <from> <to> <midclt args...>: run a midclt job, track its
+# progress, and return the job's own exit code. In a POSIX pipeline only the
+# last command's status survives, and that is the progress reader, so the
+# job's code goes through a file.
+job(){
+  k="$1"; m="$2"; lo="$3"; hi="$4"; shift 4
+  rcf="$D/.job-rc"; echo 1 > "$rcf"
+  { midclt call -j "$@" 2>&1; echo $? > "$rcf"; } | track "$k" "$m" "$lo" "$hi"
+  [ "$(cat "$rcf" 2>/dev/null)" = 0 ]
+}
+
 # prune <dataset> <regex for the snapshot name>: keep the newest five of the
 # snapshots this worker took, destroy the rest. Without it every update left a
 # rollback point behind for ever - 127 of them on the box this was built on.
@@ -256,37 +297,7 @@ print(svc.get('image') or '')" 2>/dev/null)
       # midclt -j prints its own progress; read it as it goes and publish the
       # percentage, so the dashboard can say how far along it is rather than
       # leaving someone watching a word
-      if midclt call -j app.pull_images "$APPNAME" '{"redeploy": true}' 2>&1 \
-           | python3 -u -c "
-import json, os, re, sys, time
-S = sys.argv[1]
-last, lastw = 0.0, 0.0
-pat = re.compile(r'([0-9]{1,3}(?:\.[0-9]+)?)%')
-while True:
-    chunk = sys.stdin.read(256)
-    if not chunk:
-        break
-    found = pat.findall(chunk)
-    if not found:
-        continue
-    pct = float(found[-1])
-    # the pull is the long middle of the job, so map it into 10-90
-    pct = 10 + pct * 0.8
-    now = time.time()
-    if pct <= last or now - lastw < 1.0:
-        continue
-    last, lastw = pct, now
-    try:
-        d = json.load(open(S))
-    except Exception:
-        d = {}
-    d['_self'] = {'state': 'running', 'msg': 'pulling the new image',
-                  'pct': int(pct), 't': int(now)}
-    tmp = S + '.tmp'
-    with open(tmp, 'w') as fh:
-        json.dump(d, fh)
-    os.replace(tmp, S)
-" "$S" >/dev/null 2>&1; then
+      if job _self "pulling the new image" 10 90 app.pull_images "$APPNAME" '{"redeploy": true}'; then
         # the container's entrypoint copies the new cron scripts back out to
         # this directory as it starts, so cron picks them up too
         note done "updated"
@@ -326,7 +337,7 @@ for f in "$Q"/*.req; do
     "[]"|"") status "$app" failed "no such app"; continue ;;
   esac
 
-  status "$app" running "upgrading"
+  status "$app" running "upgrading" 5
 
   # rollback point for the app's own data before the upgrade touches it
   stamp=$(date +%Y%m%d-%H%M%S)
@@ -342,7 +353,7 @@ for f in "$Q"/*.req; do
       prune "$ds" "preupgrade-$app-[0-9]{8}-[0-9]{6}"
   done
 
-  if midclt call -j app.upgrade "$app" >/dev/null 2>&1; then
+  if job "$app" "upgrading" 5 95 app.upgrade "$app"; then
     res=done; msg="upgraded"
   else
     res=failed; msg="upgrade failed"

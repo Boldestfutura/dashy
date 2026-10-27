@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -74,32 +74,34 @@ HEXOS_URL = os.environ.get("HEXOS_URL", "https://deck.hexos.com/dash")
 UPDATE_REPO = os.environ.get("UPDATE_REPO", "Boldestfutura/dashy")
 UPDATE_BRANCH = os.environ.get("UPDATE_BRANCH", "main")
 
-# Only used to pretty up names and add a one-liner. Anything not listed still
-# appears, titled from whatever the app is actually called on the NAS.
-KNOWN = {
-    "plex":           ("Plex",           "Films, shows and music"),
-    "jellyfin":       ("Jellyfin",       "Second media server"),
-    "immich":         ("Immich",         "Photos"),
-    "audiobookshelf": ("Audiobookshelf", "Audiobooks and podcasts"),
-    "seerr":          ("Seerr",          "Media requests"),
-    "requestrr":      ("Requestrr",      "Request bot"),
-    "pihole":         ("Pi-hole",        "DNS and ad blocking"),
-    "scrutiny":       ("Scrutiny",       "Drive health"),
-    "sparkyfitness":  ("SparkyFitness",  "Workouts and food"),
-    "slskd":          ("Soulseek",       "slskd"),
-    "tally":          ("Tally",          "Scoreboard"),
-    # Three keys for one app: it was "dashboard", then "dashy", and is now
-    # "dashy" once more. An install that predates a rename still carries the
-    # old name, and should still recognise itself.
-    "dashboard":      ("Dashy",          "This page"),
-    "dashy":          ("Dashy",          "This page"),
-    "overlook":       ("Dashy",          "This page"),
-    "rust-desk":      ("RustDesk",       "Remote desktop"),
-}
+def system_info():
+    """This NAS as TrueNAS describes it - name, version, hardware, and which
+    installed app is this dashboard - written by the collector from
+    system.info. Nothing about any particular machine is known here."""
+    try:
+        with open(os.path.join(DATA, "system.json")) as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def is_self(app_name):
+    """Is this installed app the dashboard itself? The collector names it from
+    the dataset it runs in; the fallbacks cover a first minute with no file."""
+    me = str(system_info().get("app") or "").lower()
+    name = str(app_name or "").lower()
+    return name == me if me else name in ("dashy", "dashboard", "overlook")
+
+
 def _hostname():
     """The NAS's name for the header. A container's /proc/sys/kernel/hostname is
     its own UTS namespace - host networking shares the network namespace, not
-    that one - so it reports a container id unless we are told explicitly."""
+    that one - so it reports a container id. TrueNAS's own hostname comes
+    first; an explicit HOST_NAME and the tailnet name are only fallbacks."""
+    v = str(system_info().get("hostname") or "").strip()
+    if v:
+        return v.split(".")[0]
     v = os.environ.get("HOST_NAME", "").strip()
     if v:
         return v.split(".")[0]
@@ -406,6 +408,17 @@ def update_status():
         return d if isinstance(d, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+def queued():
+    """Requests waiting for the root worker, which picks them up within a
+    minute. Without this an update just tapped showed nothing at all until the
+    worker reached it, which looked like the tap had not worked."""
+    try:
+        names = os.listdir(QUEUE)
+    except OSError:
+        return []
+    return sorted(n[:-4] for n in names if n.endswith(".req"))
 
 
 def request_upgrade(app):
@@ -1060,19 +1073,24 @@ def discover():
         # TrueNAS reports no published container ports for it. Its listener is
         # this process's configured PORT, so discover that one app from the
         # installed-app inventory without resurrecting arbitrary port tiles.
-        if chosen is None and app_name.lower() == APP_NAME.lower():
+        me = is_self(app_name)
+        if chosen is None and me:
             chosen, ppath = PORT, "/"
         if chosen is None:
             continue                 # host networking, or nothing web-facing
-        label, desc = KNOWN.get(app_name,
-                                (app_name.replace("-", " ").title(), ""))
+        # The catalogue's own title and one-line description. A custom app
+        # has neither, so it is titled from its name on the NAS.
+        if me:
+            label, desc = APP_NAME, "This page"
+        else:
+            label = str(a.get("title") or "").strip() or app_name.replace("-", " ").title()
+            desc = str(a.get("desc") or "").strip()
         out.append({"port": pub.get(chosen), "lport": chosen,
                     "path": ppath if chosen == pport else "/",
                     "name": label, "desc": desc,
                     "state": a.get("state"), "app": app_name,
                     "id": app_name,
-                    "version": (APP_VERSION if app_name.lower() == APP_NAME.lower()
-                                else a.get("version")),
+                    "version": APP_VERSION if me else a.get("version"),
                     "update": bool(a.get("update")),
                     "iconsrc": ("/appicon/" + a["name"]) if a.get("icon") else None})
 
@@ -1156,9 +1174,10 @@ def snapshot():
     out["app"] = APP_NAME
     tn = tailnet_host()
     out["tailnet"] = tn
-    if not os.environ.get("HOST_NAME") and tn:
-        out["host"] = tn.split(":", 1)[0].split(".", 1)[0]
+    out["host"] = _hostname()
+    out["system"] = system_info()
     out["services"] = svc
+    out["queued"] = queued()
     out["updates"] = update_status()
     out["prefs"] = load_prefs()
     out["detected"] = detect()
@@ -1611,7 +1630,8 @@ PAGE = """<!doctype html>
   .cardwrap[data-state="warn"] .hcard .hv{color:var(--warn)}
   .cardwrap[data-state="bad"] .hcard .hv{color:var(--bad)}
   /* lost contact: every reading is frozen, so stop them looking live */
-  body.stale #vitals .cardwrap:not([data-k="health"]),body.stale .hlist{opacity:.45;filter:saturate(.25)}
+  body.stale #vitals .cardwrap:not([data-k="health"]),body.stale .hlist,
+  body.stale .appgrid{opacity:.45;filter:saturate(.25)}
   body.stale .cardwrap[data-w] #s-health{display:block}
   .lbl{font-size:11px;letter-spacing:.02em;color:var(--muted);
        font-weight:600;margin:0;text-align:left;align-self:flex-start}
@@ -1784,11 +1804,39 @@ PAGE = """<!doctype html>
                         transform:rotate(-90deg) translateY(-1px);
                         transition:transform .15s ease, opacity .15s ease}
   .apptile .upd:hover::before{transform:rotate(-90deg) translateY(1px)}
+  /* update progress. Queued and running are not warnings, so they wear the
+     accent; only a finished or failed update takes a status colour. */
   .apptile .ust{position:absolute;top:24px;right:6px;font-size:9px;font-weight:700;
-                letter-spacing:.04em;text-transform:uppercase;border-radius:999px;padding:2px 6px}
-  .apptile .ust.running{color:var(--warn);background:color-mix(in srgb,var(--warn) 18%,transparent)}
-  .apptile .ust.done{color:var(--ok);background:color-mix(in srgb,var(--ok) 18%,transparent)}
-  .apptile .ust.failed{color:var(--bad);background:color-mix(in srgb,var(--bad) 18%,transparent)}
+                letter-spacing:.04em;text-transform:uppercase;border-radius:999px;padding:2px 6px;
+                display:none;font-variant-numeric:tabular-nums}
+  .apptile[data-ust] .ust{display:block}
+  .apptile[data-ust] .upd{display:none}
+  .apptile[data-ust="queued"] .ust,.apptile[data-ust="running"] .ust{
+    color:var(--accent);background:color-mix(in srgb,var(--accent) 16%,transparent)}
+  .apptile[data-ust="done"] .ust{color:var(--ok);background:color-mix(in srgb,var(--ok) 18%,transparent)}
+  .apptile[data-ust="failed"] .ust{color:var(--bad);background:color-mix(in srgb,var(--bad) 18%,transparent)}
+  /* an app being upgraded is down on purpose; do not fade it like a fault */
+  .apptile[data-ust="running"],.apptile[data-ust="queued"]{opacity:1}
+  .uprog{display:none;height:3px;border-radius:2px;overflow:hidden;
+         background:color-mix(in srgb,var(--accent) 18%,transparent)}
+  .uprog i{display:block;height:100%;width:0;border-radius:2px;background:var(--accent);
+           transition:width .6s ease}
+  .apptile .uprog{position:absolute;left:12px;right:12px;bottom:6px}
+  .apptile[data-ust="queued"] .uprog,.apptile[data-ust="running"] .uprog{display:block}
+  /* queued has no percentage yet, so it moves without claiming one */
+  [data-ust="queued"] .uprog i{width:35%;animation:indet 1.3s ease-in-out infinite}
+  @keyframes indet{0%{transform:translateX(-100%)}100%{transform:translateX(290%)}}
+  .upbanner{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;margin:0 0 14px;
+            padding:11px 14px;border-radius:var(--r-sm);background:var(--panel);
+            border:1px solid color-mix(in srgb,var(--accent) 45%,var(--brd));box-shadow:var(--tile-shadow)}
+  .upbanner[hidden]{display:none}
+  .upbanner b{font-size:13px;font-weight:650}
+  .upbanner span{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .upbanner .uprog{display:block;flex:1 0 100%}
+  .upbanner[data-ust="done"]{border-color:color-mix(in srgb,var(--ok) 50%,var(--brd))}
+  .upbanner[data-ust="done"] .uprog,.upbanner[data-ust="failed"] .uprog{display:none}
+  .upbanner[data-ust="failed"]{border-color:color-mix(in srgb,var(--bad) 50%,var(--brd))}
+  @media (prefers-reduced-motion:reduce){ [data-ust="queued"] .uprog i{animation:none;width:100%;opacity:.5} }
   /* a custom address is a deliberate choice, so its tile carries a small pin
      marker rather than looking identical to the auto-resolved ones. The edit
      itself lives in the app sheet now, not on the tile. */
@@ -2018,6 +2066,10 @@ PAGE = """<!doctype html>
     <button class="done" id="eb-done" type="button">Done</button>
   </div>
 
+  <div class="upbanner" id="upbanner" role="status" aria-live="polite" hidden>
+    <b id="ub-t"></b><span id="ub-s"></span><span class="uprog"><i id="ub-bar"></i></span>
+  </div>
+
   <div id="vitals"></div>
 
 </div>
@@ -2211,6 +2263,7 @@ const DEFAULTS={theme:'system', accent:'dusk', order:CARDK.slice(), hidden:[], w
                 setup:{}, urls:{}};
 let prefs=Object.assign({}, DEFAULTS);
 let lastTick=0;
+let bootVersion=null;
 let builtSig='';
 let footUp=['\u2013',''], footNote='', footIssue=false;
 
@@ -2923,6 +2976,14 @@ function paint(d){
   // Adopt the new payload BEFORE asking whether the layout changed:
   // layoutSig() reads `data`, so testing it first compared the signature of
   // the previous poll and every new section arrived one tick late.
+  // A new Dashy is running behind this page. Load it, or this tab keeps
+  // running the old code against the new server until someone refreshes.
+  if(bootVersion===null) bootVersion=d.version;
+  else if(d.version && d.version!==bootVersion){
+    try{ sessionStorage.setItem('dashy.updated', JSON.stringify({from:bootVersion, at:Date.now()})); }catch(e){}
+    location.reload();
+    return;
+  }
   data=d;
   if(!built) build();
   else if(relayout || layoutSig()!==builtSig){ build(); }
@@ -3020,6 +3081,8 @@ function paint(d){
 
   $('host').textContent=d.host||'';
   paintHealth(d);
+  paintAppStates();
+  paintBanner();
   drawSparks(d);
   paintLinks(d.links||{});
   // uptime lives in the settings pane now; the home screen stays clean
@@ -3028,6 +3091,89 @@ function paint(d){
     '<span'+(footIssue?' style="color:var(--warn)"':'')+'>up '+footUp[0]+' '+footUp[1]+'</span>';
   mv.title = footIssue && footNote ? footNote : '';
   lastTick=Date.now();
+}
+
+/* ---------- update progress ---------------------------------------------
+   An update goes: tapped -> queued (a file the root worker picks up within a
+   minute) -> running, with a percentage from the midclt job -> done or failed.
+   Every step shows, on the tile and in a banner on the home screen, because
+   a tap that seemingly did nothing for a minute reads as broken. */
+const localQueued={};             // app -> when it was tapped, until the server confirms
+function updState(app){
+  const st=((data&&data.updates)||{})[app];
+  const now=Date.now()/1000, age=(st&&st.t) ? now-st.t : 1e9;
+  if(st && st.state==='running' && age<1800)
+    return {k:'running', pct:Math.max(0,Math.min(100,st.pct||0)), msg:st.msg||''};
+  const tapped=localQueued[app];
+  const pending=((data&&data.queued)||[]).indexOf(app)>=0 ||
+    (tapped && Date.now()-tapped<120000 && !(st && st.t*1000>=tapped-2000));
+  if(pending) return {k:'queued', pct:0};
+  if(st && st.state==='done' && age<600) return {k:'done'};
+  if(st && st.state==='failed' && age<3600) return {k:'failed', msg:st.msg||''};
+  return null;
+}
+function updLabel(u){
+  return u.k==='queued' ? 'Queued' : u.k==='running' ? u.pct+'%'
+       : u.k==='done' ? 'Updated' : 'Failed';
+}
+function paintAppStates(){
+  document.querySelectorAll('.apptile[data-app]').forEach(t=>{
+    const u=updState(t.dataset.app);
+    if(!u){ delete t.dataset.ust; return; }
+    t.dataset.ust=u.k;
+    const l=t.querySelector('.ust'); if(l) l.textContent=updLabel(u);
+    const bar=t.querySelector('.uprog i');
+    if(bar) bar.style.width = u.k==='running' ? Math.max(4,u.pct)+'%' : '';
+  });
+}
+// Dashy's own update ends with its container restarting, so for a few
+// minutes after it a lost connection is expected, not a fault.
+function selfBusy(){
+  const u=updState('_self');
+  if(u && (u.k==='queued' || u.k==='running')) return true;
+  const st=((data&&data.updates)||{})._self;
+  return !!(st && st.state==='done' && Date.now()/1000-(st.t||0) < 180);
+}
+let justUpdated=null;
+try{
+  const j=JSON.parse(sessionStorage.getItem('dashy.updated')||'null');
+  if(j && Date.now()-j.at<60000) justUpdated=j;
+  sessionStorage.removeItem('dashy.updated');
+}catch(e){}
+function paintBanner(){
+  const el=$('upbanner'); if(!el) return;
+  const show=(state,title,sub,pct)=>{
+    el.hidden=false; el.dataset.ust=state;
+    $('ub-t').textContent=title; $('ub-s').textContent=sub||'';
+    $('ub-bar').style.width = state==='running' ? Math.max(4,pct||0)+'%' : '';
+  };
+  const me=updState('_self');
+  if(me && (me.k==='queued'||me.k==='running'))
+    return show(me.k, 'Updating Dashy',
+      me.k==='queued' ? 'starts within a minute' : me.pct+'% \u00b7 the page reloads by itself when it is done', me.pct);
+  if(selfBusy() && document.body.classList.contains('stale'))
+    return show('queued','Dashy is restarting','finishing the update');
+  const busy=((data&&data.services)||[]).map(s=>[s,updState(s.app)])
+    .filter(([s,u])=>u && (u.k==='queued'||u.k==='running'));
+  if(busy.length===1){
+    const [s,u]=busy[0];
+    return show(u.k, 'Updating '+s.name,
+      u.k==='queued' ? 'starts within a minute' : u.pct+'% \u00b7 a snapshot was taken first', u.pct);
+  }
+  if(busy.length>1){
+    const run=busy.filter(([s,u])=>u.k==='running');
+    const pct=run.length ? Math.round(run.reduce((n,[s,u])=>n+u.pct,0)/run.length) : 0;
+    return show(run.length?'running':'queued', 'Updating '+busy.length+' apps',
+      busy.map(([s])=>s.name).join(', '), pct);
+  }
+  if(justUpdated && Date.now()-justUpdated.at<60000)
+    return show('done','Dashy updated', 'now on '+((data&&data.version)||''));
+  const failed=((data&&data.services)||[]).map(s=>[s,updState(s.app)])
+    .filter(([s,u])=>u && u.k==='failed');
+  if(me && me.k==='failed') return show('failed','Dashy did not update', me.msg);
+  if(failed.length) return show('failed', failed[0][0].name+' did not update',
+                                failed[0][1].msg || 'see TrueNAS for the error');
+  el.hidden=true; delete el.dataset.ust;
 }
 
 /* The collector looks every half hour, which is the right cadence for a
@@ -3078,6 +3224,8 @@ function paintSelfUpdate(){
   // and a worker that died mid-update would leave 'Updating...' forever.
   const age=(st && st.t) ? (Date.now()/1000 - st.t) : 1e9;
   if(checking) return set('checking','Checking\u2026','');
+  const me=updState('_self');
+  if(me && me.k==='queued') return set('running','Update queued\u2026','starts within a minute');
   if(st && st.state==='running' && age < 900)
     return set('running','Updating\u2026', st.pct ? st.pct+'%' : (st.msg||''));
   // An available update outranks a stale failure. The other order looks
@@ -3281,8 +3429,11 @@ function healthRows(d){
   else rows.push(['ok','Apps','all '+svc.length+' responding']);
 
   const upd=svc.filter(s=>s.update).length;
-  rows.push(upd ? ['warn','Updates',upd===1?'1 app update':upd+' app updates']
-                : ['ok','Updates','all apps current']);
+  const going=svc.filter(s=>{const u=updState(s.app); return u && (u.k==='queued'||u.k==='running');});
+  if(going.length) rows.push(['info','Updates', going.length===1 ? 'updating '+going[0].name
+                                                                 : 'updating '+going.length+' apps']);
+  else rows.push(upd ? ['warn','Updates',upd===1?'1 app update':upd+' app updates']
+                     : ['ok','Updates','all apps current']);
 
   const t=d.cpu_temp;
   if(t===null||t===undefined) rows.push(['info','CPU','no sensor']);
@@ -3305,6 +3456,24 @@ function upWord(sec){
   const h=Math.floor(sec/3600);
   if(h>=2) return h+' hours';
   return Math.max(1,Math.floor(sec/60))+' min';
+}
+
+// "4 cores · 8 threads · 32 GiB memory, ECC · Supermicro X11SCL-F", from system.info
+function hardwareLine(sys){
+  sys=sys||{};
+  const bits=[];
+  if(sys.cores) bits.push(sys.cores+(sys.cores===1?' core':' cores'));
+  if(sys.threads && sys.threads!==sys.cores) bits.push(sys.threads+' threads');
+  if(sys.memory) bits.push(ram(sys.memory)+' memory'+(sys.ecc===true?', ECC':''));
+  const board=[sys.maker,sys.product].filter(Boolean).join(' ');
+  if(board) bits.push(board);
+  return bits.join(' \u00b7 ');
+}
+function cpuModelRow(){
+  const sys=(data&&data.system)||{};
+  if(!sys.cpu) return '';
+  return '<div class="row"><span class="l"><span class="t1">'+esc(sys.cpu)+'</span>'+
+    '<span class="t2">'+esc(hardwareLine(sys))+'</span></span></div>';
 }
 
 function rowsCores(){
@@ -3519,6 +3688,14 @@ function rowsSystem(){
 
   // what is normal, so the sheet says something either way
   const normal = [];
+  // the machine itself, as TrueNAS describes it
+  const sys = data.system || {};
+  if (sys.version || sys.hostname)
+    normal.push(srow('ok', 'TrueNAS ' + String(sys.version || '').replace(/^TrueNAS-?/i, ''),
+                     [sys.hostname, sys.timezone].filter(Boolean).join(' \u00b7 ')));
+  const hw = hardwareLine(sys);
+  if (sys.cpu || hw)
+    normal.push(srow('ok', sys.cpu || 'Hardware', hw));
   normal.push(srow('ok', 'Dashy ' + data.version,
                    su.checked ? 'Checked for updates ' + agoWord(Math.max(0, Math.round(Date.now()/1000 - su.checked))) : ''));
   normal.push(srow('ok', svc.length + ' apps installed',
@@ -3567,17 +3744,16 @@ function srow(level, title, sub, pop){
 
 function rowsApps(){
   const list=data.services||[];
-  const st=data.updates||{};
   if(!list.length) return '<div class="row"><span class="t2">Nothing published yet.</span></div>';
   return '<div class="appgrid">'+list.map(s=>
     '<a class="apptile" data-up="'+(s.code?'1':'0')+'"'+
-      ' data-uid="'+esc(s.id)+'" data-name="'+esc(s.name)+'"'+
+      ' data-uid="'+esc(s.id)+'" data-name="'+esc(s.name)+'" data-app="'+esc(s.app)+'"'+
       ' href="'+esc(appURL(s)||'#')+'"'+
       ' role="button" aria-label="'+esc(s.name)+' details">'+
       '<span class="sdot"></span>'+
       (s.update?'<button class="upd" data-app="'+esc(s.app)+'" data-name="'+esc(s.name)+'" '+
                  'data-ver="'+esc(s.version||'')+'" aria-label="Update '+esc(s.name)+'"></button>':'')+
-      (st[s.app]?'<span class="ust '+esc(st[s.app].state)+'">'+esc(st[s.app].msg||'')+'</span>':'')+
+      '<span class="ust"></span><span class="uprog"><i></i></span>'+
       (isPinned(s)?'<span class="pin" aria-hidden="true"></span>':'')+
       appIcon(s)+
       '<span class="an">'+esc(s.name)+'</span>'+
@@ -3835,7 +4011,7 @@ function uptimeChart(){
 
 const POPS={
   system:()=>['System', rowsSystem()],
-  cpu:   ()=>['CPU', loadRow()+powerChart()+
+  cpu:   ()=>['CPU', cpuModelRow()+loadRow()+powerChart()+
             (data.power!==null&&data.power!==undefined
               ? '<div class="row"><span class="l"><span class="t1">Package power</span>'+
                 '<span class="t2">whole chip \\u2014 this CPU reports no per-core figure</span></span>'+
@@ -4059,7 +4235,7 @@ document.addEventListener('click',ev=>{
   const vb=ev.target.closest('button[data-vmact]');
   if(vb){
     const id=vb.dataset.vm, act=vb.dataset.vmact;
-    // Stopping a VM can take the house with it - Home Assistant runs in one.
+    // Stopping a VM can take down whatever runs in it, a router or a home hub.
     // A single stray tap must not do that, so stop and restart ask twice.
     if(act!=='start' && vb.dataset.armed!=='1'){
       const label=vb.textContent;
@@ -4092,8 +4268,13 @@ document.addEventListener('click',ev=>{
       .then(r=>r.json())
       .then(r=>{
         if(!r || !r.ok) return fail((r && r.msg) || 'that did not work');
-        if(self) setTimeout(closePop, 900);
-        else setTimeout(()=>{ openPop('apps'); }, 600);
+        // back to the home screen; the tile and the banner carry it from here
+        localQueued[self ? '_self' : btn.dataset.app]=Date.now();
+        closePop();
+        if(settingsOpen()) closeSettings();
+        if(data) paintHealth(data);
+        paintAppStates(); paintBanner(); paintSelfUpdate();
+        window.scrollTo({top:0, behavior:'smooth'});
       })
       .catch(()=>fail('could not reach the NAS'));
     return;
@@ -4182,8 +4363,16 @@ function paintStale(){
   const since=lastTick||pageStart, gap=Date.now()-since;
   const old=gap>12000;
   document.body.classList.toggle('stale', old);
+  paintBanner();
   if(!old) return;
   const wrap=document.querySelector('.cardwrap[data-k="health"]');
+  if(selfBusy()){
+    // expected: the update restarts the container. Say so calmly.
+    if(wrap) wrap.dataset.state='';
+    const v=$('v-health'); if(v) v.textContent='Dashy is restarting';
+    const sb=$('s-health'); if(sb) sb.textContent='finishing its update \u00b7 back in a moment';
+    return;
+  }
   if(wrap) wrap.dataset.state='bad';
   const v=$('v-health'); if(v) v.textContent='No contact with Dashy';
   const sec=Math.round(gap/1000);
