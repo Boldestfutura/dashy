@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.22.0"
+APP_VERSION = "0.23.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1567,6 +1567,24 @@ PAGE = """<!doctype html>
   .hcard .hv{font-size:14px;font-weight:620;letter-spacing:-.01em;margin:4px 0 0;
              line-height:1.3;text-align:left}
   .hcard .hfoot{font-size:11px;color:var(--muted);margin:auto 0 0;padding-top:6px;text-align:left}
+  /* The checklist: one line per part of the machine, so "all normal" shows
+     its working. Status colour always comes with a glyph (tick, !, x), never
+     colour alone. Too cramped at 1x, so it starts at 2x, where it replaces
+     "everything else normal". */
+  .hlist{display:none}
+  .cardwrap[data-w="2"] .hlist,.cardwrap[data-w="4"] .hlist{
+    display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px 14px;margin-top:12px}
+  .cardwrap[data-w="2"] #s-health,.cardwrap[data-w="4"] #s-health{display:none}
+  .hrow{display:flex;align-items:center;gap:7px;min-width:0;font-size:11.5px;text-align:left}
+  .hrow b{font-weight:650;color:var(--ink);flex:0 0 auto}
+  .hrow span{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .hrow i{width:15px;height:15px;flex:0 0 auto;border-radius:50%;display:grid;place-items:center;
+          font-style:normal;font-size:9.5px;font-weight:800;line-height:1;color:#fff;background:var(--ok)}
+  .hrow[data-level="warn"] i{background:var(--warn)}
+  .hrow[data-level="bad"] i{background:var(--bad)}
+  .hrow[data-level="info"] i{background:var(--faint);color:var(--muted)}
+  .hrow[data-level="warn"] span{color:var(--warn)}
+  .hrow[data-level="bad"] span{color:var(--bad)}
   .cardwrap[data-state="warn"] .hcard .hv{color:var(--warn)}
   .cardwrap[data-state="bad"] .hcard .hv{color:var(--bad)}
   .lbl{font-size:11px;letter-spacing:.02em;color:var(--muted);
@@ -2616,6 +2634,7 @@ function cardHTML(c){
                '<p class="lbl">Health</p>'+
                '<p class="hv" id="v-health">\u2013</p>'+
                '<p class="sub" id="s-health"></p>'+
+               '<div class="hlist" id="l-health"></div>'+
                '<p class="hfoot" id="f-health"></p>'+
              '</button>'+cardTools(c.k)+
            '</div></div>';
@@ -2973,8 +2992,7 @@ function paint(d){
   // uptime lives in the settings pane now; the home screen stays clean
   const mv=$('settings-version');
   mv.innerHTML='<span>'+(d.app||'Dashy')+' v'+d.version+'</span>'+
-    '<span class="rt"><i class="pdot '+(footIssue?'warn':'ok')+'"></i>up '+
-    footUp[0]+' '+footUp[1]+'</span>';
+    '<span'+(footIssue?' style="color:var(--warn)"':'')+'>up '+footUp[0]+' '+footUp[1]+'</span>';
   mv.title = footIssue && footNote ? footNote : '';
   lastTick=Date.now();
 }
@@ -3172,6 +3190,60 @@ function paintHealth(d){
   if(sb) sb.textContent = sev==='ok' ? '' : 'everything else normal';
   const f=$('f-health');
   if(f) f.textContent = (d.uptime||d.uptime===0) ? ('up '+upWord(d.uptime)) : '';
+  const l=$('l-health');
+  if(l) l.innerHTML = healthRows(d).map(([lv,name,txt])=>
+    '<div class="hrow" data-level="'+lv+'"><i>'+
+      ({ok:'\u2713',warn:'!',bad:'\u00d7',info:'\u2013'}[lv])+
+    '</i><b>'+name+'</b><span title="'+txt+'">'+txt+'</span></div>').join('');
+}
+
+/* Same thresholds as severity() and headline(), split per subsystem. Each
+   row is [level, name, text]; 'info' is for something that is neither good
+   nor bad, like no VMs at all. */
+function healthRows(d){
+  const rows=[], pools=d.pools||[], drives=d.drives||[], svc=d.services||[],
+        vms=d.vms||[], ps=d.poolstatus||{};
+
+  const sick=pools.find(p=>(p.health||'').toUpperCase()!=='ONLINE');
+  const errs=pools.find(p=>{const st=ps[p.name]; return st && (st.read||st.write||st.cksum);});
+  const full=pools.slice().sort((a,b)=>b.pct-a.pct)[0];
+  if(!pools.length) rows.push(['info','Pools','no data']);
+  else if(sick) rows.push(['bad','Pools',sick.name+' '+sick.health.toLowerCase()]);
+  else if(errs) rows.push(['bad','Pools',errs.name+' has disk errors']);
+  else if(full && full.pct>=85) rows.push(['warn','Pools',full.name+' '+full.pct.toFixed(0)+'% full']);
+  else rows.push(['ok','Pools', pools.length===1 ? 'online' : pools.length+' online']);
+
+  const failed=drives.find(x=>x.ok===false), hot=drives.find(x=>x.level==='bad'),
+        warm=drives.find(x=>x.level==='warn');
+  const temps=drives.map(x=>x.temp).filter(t=>t!==null&&t!==undefined);
+  const range=temps.length ? Math.min(...temps)+'\u2013'+Math.max(...temps)+'\u00b0C' : '';
+  if(!drives.length) rows.push(['info','Drives','no data']);
+  else if(failed) rows.push(['bad','Drives',failed.dev+' SMART failure']);
+  else if(hot) rows.push(['bad','Drives',hot.dev+' at '+hot.temp+'\u00b0C']);
+  else if(warm) rows.push(['warn','Drives',warm.dev+' at '+warm.temp+'\u00b0C']);
+  else rows.push(['ok','Drives',drives.length+' healthy'+(range?' \u00b7 '+range:'')]);
+
+  const down=svc.filter(s=>!s.code);
+  if(!svc.length) rows.push(['info','Apps','none found']);
+  else if(down.length) rows.push(['warn','Apps',
+    down.length===1 ? down[0].name+' down' : down.length+' down']);
+  else rows.push(['ok','Apps','all '+svc.length+' responding']);
+
+  const upd=svc.filter(s=>s.update).length;
+  rows.push(upd ? ['warn','Updates',upd===1?'1 app update':upd+' app updates']
+                : ['ok','Updates','all apps current']);
+
+  const t=d.cpu_temp;
+  if(t===null||t===undefined) rows.push(['info','CPU','no sensor']);
+  else rows.push([t>=85?'bad':t>=75?'warn':'ok','CPU',t.toFixed(0)+'\u00b0C'+
+    (d.cpu!==null&&d.cpu!==undefined ? ' \u00b7 '+d.cpu.toFixed(0)+'% busy' : '')]);
+
+  // a VM that should start on boot but is not running is the one worth flagging
+  const stopped=vms.filter(v=>v.autostart && (v.state||'').toUpperCase()!=='RUNNING');
+  if(!vms.length) rows.push(['info','VMs','none']);
+  else if(stopped.length) rows.push(['warn','VMs',stopped.length+' stopped']);
+  else rows.push(['ok','VMs',vms.filter(v=>(v.state||'').toUpperCase()==='RUNNING').length+' running']);
+  return rows;
 }
 
 function upWord(sec){
