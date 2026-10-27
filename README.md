@@ -6,9 +6,6 @@ add and remove things.
 
 ![Dashy on a desktop browser](docs/01-desktop.png)
 
-> **Early days.** This is pre-1.0 and still finding its shape. It runs happily
-> every day on the NAS it was built for, but expect things to move around.
-
 > **The app, the repository, the image and the TrueNAS app id are all called
 > `dashy`.** The identifiers moved to `dashy` deliberately last, because moving
 > them earlier would have broken self-update for anyone already installed.
@@ -22,17 +19,22 @@ add and remove things.
   apart rather than averaged over each process's life. Storage adds scrub
   state, fragmentation and ZFS's read, write and checksum counters, which are
   where a failing disk shows up first. Drives carry model, hours and SMART
-  state. Health lists what actually wants you: a Dashy update, app updates,
-  anything not responding, a pool filling up, a drive running warm.
+  state. Health lists what actually wants you: a pool that is degraded,
+  filling up or logging disk errors, a drive failing or running warm, an app
+  not responding, a VM that should be running and is not, and readings that
+  have stopped arriving. If the page itself loses contact it says so rather
+  than showing the last figures as if they were live.
 - **Your apps, found automatically.** Nothing is hard-coded and nothing to
   configure. Every app on the NAS gets a tile, with its real icon, version and
   status. If you use Tailscale Serve, the apps you publish get their tailnet
   address; everything else is linked on your LAN. Hide what you do not want.
 - **Updates from the dashboard.** Apps with an update show a marker; tapping it
-  queues the upgrade and a recursive ZFS snapshot is taken first. Dashy updates
-  itself the same way, straight from this repository.
+  queues the upgrade and a recursive ZFS snapshot is taken first; the newest
+  five per app are kept. Dashy updates itself the same way, from the image CI
+  publishes, and only offers a version once that image exists.
 - **Virtual machines.** Every VM on the box, whether it is running, and what
-  it has been given. Tapping one offers start, stop and restart; the container
+  it has been given. Tapping one offers start, stop and restart (stop and
+  restart ask for a second tap); the container
   cannot reach the hypervisor, so the request goes to the same root worker
   that performs app upgrades and runs within a minute.
 - **Grouped by what it is.** System, Storage, Apps and Virtual machines, each under its own
@@ -40,7 +42,7 @@ add and remove things.
   needs you. A pool gets its own card rather than one aggregate number.
 - **Make it yours.** Hold a tile to resize or remove it: normal, double width
   with a sparkline, or 4x — two by two, with a full-height chart. Light, dark
-  or system theme and a choice of five accent colours.
+  or system theme and a choice of four accent colours.
   **Layout and theme are stored on the server**, so they follow you to every
   device and apply within seconds without a refresh.
 - **Tailnet or local, your choice.** Apps default to LAN when Tailscale is off.

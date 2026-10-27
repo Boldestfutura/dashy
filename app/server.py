@@ -7,12 +7,13 @@ import socket
 import threading
 from collections import deque
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.23.1"
+APP_VERSION = "1.0.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -472,7 +473,9 @@ def boot_history():
     for i, s in enumerate(sessions):
         if i > 0 and not s["end"]:
             s["end"] = sessions[i - 1]["start"]
-    return sessions[:12]
+    # all of them: the availability figure needs every boot in its window, and
+    # trimming here once counted a thirteenth reboot's uptime as downtime
+    return sessions
 
 
 def _epoch(iso):
@@ -635,100 +638,105 @@ def vitals_loop():
     prev_io = disk_snapshot()
     while True:
         time.sleep(2.0)
-        cur_agg, cur_cores = cpu_snapshot()
-        pct = _pct(prev_agg, cur_agg)
-        per = []
-        for name in sorted(cur_cores, key=lambda n: int(n[3:]) if n[3:].isdigit() else 0):
-            v = _pct(prev_cores.get(name), cur_cores[name])
-            if v is not None:
-                per.append({"name": name.replace("cpu", "CPU "), "pct": v})
-        prev_agg, prev_cores = cur_agg, cur_cores
+        # One bad reading must not end the loop. A thread that dies here is
+        # silent: the page keeps serving the last figures as if they were live.
+        try:
+            cur_agg, cur_cores = cpu_snapshot()
+            pct = _pct(prev_agg, cur_agg)
+            per = []
+            for name in sorted(cur_cores, key=lambda n: int(n[3:]) if n[3:].isdigit() else 0):
+                v = _pct(prev_cores.get(name), cur_cores[name])
+                if v is not None:
+                    per.append({"name": name.replace("cpu", "CPU "), "pct": v})
+            prev_agg, prev_cores = cur_agg, cur_cores
 
-        cur_net, now_t = net_snapshot(), time.time()
-        gap = now_t - prev_t
-        nets = []
-        for name, cur in sorted(cur_net.items()):
-            old = prev_net.get(name)
-            down = up = None
-            if old and gap > 0:
-                down = max(0, (cur["rx"] - old["rx"]) / gap)
-                up = max(0, (cur["tx"] - old["tx"]) / gap)
-            nets.append({"name": name, "rx": cur["rx"], "tx": cur["tx"],
-                         "down": down, "up": up,
-                         "errors": cur["rx_err"] + cur["tx_err"],
-                         "speed": link_speed(name)})
-        prev_net, prev_t = cur_net, now_t
+            cur_net, now_t = net_snapshot(), time.time()
+            gap = now_t - prev_t
+            nets = []
+            for name, cur in sorted(cur_net.items()):
+                old = prev_net.get(name)
+                down = up = None
+                if old and gap > 0:
+                    down = max(0, (cur["rx"] - old["rx"]) / gap)
+                    up = max(0, (cur["tx"] - old["tx"]) / gap)
+                nets.append({"name": name, "rx": cur["rx"], "tx": cur["tx"],
+                             "down": down, "up": up,
+                             "errors": cur["rx_err"] + cur["tx_err"],
+                             "speed": link_speed(name)})
+            prev_net, prev_t = cur_net, now_t
 
-        cur_io = disk_snapshot()
-        ios, rd_tot, wr_tot = [], 0, 0
-        for name, cur in sorted(cur_io.items()):
-            old = prev_io.get(name)
-            rd = wr = None
-            if old and gap > 0:
-                rd = max(0, (cur[0] - old[0]) / gap)
-                wr = max(0, (cur[1] - old[1]) / gap)
-                rd_tot += rd
-                wr_tot += wr
-            ios.append({"name": name, "read": rd, "write": wr})
-        prev_io = cur_io
+            cur_io = disk_snapshot()
+            ios, rd_tot, wr_tot = [], 0, 0
+            for name, cur in sorted(cur_io.items()):
+                old = prev_io.get(name)
+                rd = wr = None
+                if old and gap > 0:
+                    rd = max(0, (cur[0] - old[0]) / gap)
+                    wr = max(0, (cur[1] - old[1]) / gap)
+                    rd_tot += rd
+                    wr_tot += wr
+                ios.append({"name": name, "read": rd, "write": wr})
+            prev_io = cur_io
 
-        stamp = int(now_t)
-        for n in nets:
-            if n["down"] is None:
-                continue
-            _hist.setdefault(n["name"], deque(maxlen=HIST)).append(
-                [stamp, round(n["down"]), round(n["up"])])
-        pools, age = pools_now()
-        with _lock:
-            if pct is not None:
-                _state["cpu"] = pct
-            _state["mem"] = mem_now()
-            _state["load"] = load_now()
-            _state["uptime"] = uptime_now()
-            _state["pools"] = pools
-            _state["pools_age"] = age
-            _state["cpu_temp"] = cpu_temp_now()
-            _state["drives"] = drives_now()
-            if per:
-                _state["cpu_cores"] = per
-            _state["core_temps"] = core_temps()
-            boots = boot_history()
-            _state["boots"] = boots
-            rep = uptime_report(boots)
-            _state["uptime_info"] = rep
-            _state["availability"] = rep["pct"]
-            if nets:
-                _state["net"] = nets
-                _state["net_hist"] = {k: list(v) for k, v in _hist.items()}
-            if ios:
-                _state["io"] = ios
-                _io_hist.append([stamp, round(rd_tot), round(wr_tot)])
-                _state["io_hist"] = list(_io_hist)
-            m = _state["mem"]
-            if m:
-                _mem_hist.append([stamp, m["apps"], m["arc"]])
-                _state["mem_hist"] = list(_mem_hist)
+            stamp = int(now_t)
+            for n in nets:
+                if n["down"] is None:
+                    continue
+                _hist.setdefault(n["name"], deque(maxlen=HIST)).append(
+                    [stamp, round(n["down"]), round(n["up"])])
+            pools, age = pools_now()
+            with _lock:
+                if pct is not None:
+                    _state["cpu"] = pct
+                _state["mem"] = mem_now()
+                _state["load"] = load_now()
+                _state["uptime"] = uptime_now()
+                _state["pools"] = pools
+                _state["pools_age"] = age
+                _state["cpu_temp"] = cpu_temp_now()
+                _state["drives"] = drives_now()
+                if per:
+                    _state["cpu_cores"] = per
+                _state["core_temps"] = core_temps()
+                boots = boot_history()
+                _state["boots"] = boots[:12]
+                rep = uptime_report(boots)
+                _state["uptime_info"] = rep
+                _state["availability"] = rep["pct"]
+                if nets:
+                    _state["net"] = nets
+                    _state["net_hist"] = {k: list(v) for k, v in _hist.items()}
+                if ios:
+                    _state["io"] = ios
+                    _io_hist.append([stamp, round(rd_tot), round(wr_tot)])
+                    _state["io_hist"] = list(_io_hist)
+                m = _state["mem"]
+                if m:
+                    _mem_hist.append([stamp, m["apps"], m["arc"]])
+                    _state["mem_hist"] = list(_mem_hist)
 
-            # the wide tiles want a sparkline each, so keep a short trail for
-            # the figures that previously had none
-            c = _state["cpu"]
-            if c is not None:
-                _cpu_hist.append([stamp, round(c, 1)])
-                _state["cpu_hist"] = list(_cpu_hist)
-            ct = _state["cpu_temp"]
-            if ct is not None:
-                _ctemp_hist.append([stamp, round(ct)])
-                _state["ctemp_hist"] = list(_ctemp_hist)
-            pools = _state["pools"] or []
-            if pools:
-                worst = max((p.get("pct") or 0) for p in pools)
-                _store_hist.append([stamp, round(worst, 1)])
-                _state["store_hist"] = list(_store_hist)
+                # the wide tiles want a sparkline each, so keep a short trail for
+                # the figures that previously had none
+                c = _state["cpu"]
+                if c is not None:
+                    _cpu_hist.append([stamp, round(c, 1)])
+                    _state["cpu_hist"] = list(_cpu_hist)
+                ct = _state["cpu_temp"]
+                if ct is not None:
+                    _ctemp_hist.append([stamp, round(ct)])
+                    _state["ctemp_hist"] = list(_ctemp_hist)
+                pools = _state["pools"] or []
+                if pools:
+                    worst = max((p.get("pct") or 0) for p in pools)
+                    _store_hist.append([stamp, round(worst, 1)])
+                    _state["store_hist"] = list(_store_hist)
 
-            pw = power_now()
-            if pw:
-                _state["power_hist"] = pw
-                _state["power"] = pw[-1][1]
+                pw = power_now()
+                if pw:
+                    _state["power_hist"] = pw
+                    _state["power"] = pw[-1][1]
+        except Exception:
+            traceback.print_exc()
 
 
 def installed_apps():
@@ -1030,8 +1038,12 @@ def discover():
         app_name = a.get("name") if isinstance(a, dict) else None
         if not isinstance(app_name, str) or not app_name.strip():
             continue
-        ports = sorted(int(p) for p in (a.get("ports") or []) if p)
-        pport, ppath = portal_of(a)
+        ports = sorted(p for p in (a.get("ports") or [])
+                       if isinstance(p, int) and 0 < p < 65536)
+        try:
+            pport, ppath = portal_of(a)
+        except (AttributeError, TypeError):
+            pport, ppath = None, ""
 
         # In order of how much the answer is worth: the app's own portal when
         # Tailscale also publishes it, then anything Tailscale publishes (the
@@ -1091,40 +1103,43 @@ def probe(port):
 
 def services_loop():
     while True:
-        found = []
-        over = (load_prefs() or {}).get("urls") or {}
-        tn = tailnet_host()
-        for svc in discover():
-            svc = dict(svc)
-            code, ms = probe(svc["lport"])
-            svc["code"] = code
-            svc["rt_ms"] = ms
-            path = svc.get("path") or "/"
-            # Keep discovered LAN/tailnet URLs and the corresponding overrides
-            # separate. The owner can correct either mode without affecting the
-            # other mode or relying on a guessed published port.
-            auto_lan = "http://%s:%d%s" % (LINK_HOST, svc["lport"], path)
-            auto_ts = ("https://%s:%d%s" % (tn, svc["port"], path)
-                       if (tn and svc.get("port")) else None)
-            entry = over.get(svc.get("id") or "") or {}
-            if isinstance(entry, str):       # defensive migration for old prefs
-                entry = {"lan": entry, "ts": entry}
-            svc["url_lan_auto"] = auto_lan
-            svc["url_ts_auto"] = auto_ts
-            svc["url_lan"] = entry.get("lan") or auto_lan
-            svc["url_ts"] = entry.get("ts") or auto_ts
-            svc["url"] = svc["url_ts"] or svc["url_lan"]
-            # Latency trail, one sample per pass. Only a reachable reply is a
-            # figure worth plotting; a down app must not add a zero that would
-            # read as "fast".
-            stamp = int(time.time())
-            if ms is not None:
-                d = _app_hist.setdefault(svc["id"], deque(maxlen=APP_HIST))
-                d.append([stamp, ms])
-            svc["rt_hist"] = list(_app_hist.get(svc["id"]) or [])
-            found.append(svc)
-        with _lock:
-            _state["services"] = found
+        try:
+            found = []
+            over = (load_prefs() or {}).get("urls") or {}
+            tn = tailnet_host()
+            for svc in discover():
+                svc = dict(svc)
+                code, ms = probe(svc["lport"])
+                svc["code"] = code
+                svc["rt_ms"] = ms
+                path = svc.get("path") or "/"
+                # Keep discovered LAN/tailnet URLs and the corresponding overrides
+                # separate. The owner can correct either mode without affecting the
+                # other mode or relying on a guessed published port.
+                auto_lan = "http://%s:%d%s" % (LINK_HOST, svc["lport"], path)
+                auto_ts = ("https://%s:%d%s" % (tn, svc["port"], path)
+                           if (tn and svc.get("port")) else None)
+                entry = over.get(svc.get("id") or "") or {}
+                if isinstance(entry, str):       # defensive migration for old prefs
+                    entry = {"lan": entry, "ts": entry}
+                svc["url_lan_auto"] = auto_lan
+                svc["url_ts_auto"] = auto_ts
+                svc["url_lan"] = entry.get("lan") or auto_lan
+                svc["url_ts"] = entry.get("ts") or auto_ts
+                svc["url"] = svc["url_ts"] or svc["url_lan"]
+                # Latency trail, one sample per pass. Only a reachable reply is a
+                # figure worth plotting; a down app must not add a zero that would
+                # read as "fast".
+                stamp = int(time.time())
+                if ms is not None:
+                    d = _app_hist.setdefault(svc["id"], deque(maxlen=APP_HIST))
+                    d.append([stamp, ms])
+                svc["rt_hist"] = list(_app_hist.get(svc["id"]) or [])
+                found.append(svc)
+            with _lock:
+                _state["services"] = found
+        except Exception:
+            traceback.print_exc()
         time.sleep(20)
 
 
@@ -1229,8 +1244,6 @@ PAGE = """<!doctype html>
   .id h1{font-size:clamp(20px,4.4vw,26px);margin:0;letter-spacing:-.02em;font-weight:700;
          display:flex;align-items:baseline;gap:8px;min-width:0}
   .id h1 .host{font-size:12.5px;font-weight:600;color:var(--muted);letter-spacing:0}
-  .beta{font-size:9.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
-        color:var(--muted);margin:1px 0 0}
   .id p{margin:1px 0 0;font-size:12.5px;color:var(--muted);
         overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .mark{width:34px;height:34px;flex:0 0 auto;border-radius:9px;
@@ -1597,6 +1610,9 @@ PAGE = """<!doctype html>
   .hrow[data-level="bad"] span{color:var(--bad)}
   .cardwrap[data-state="warn"] .hcard .hv{color:var(--warn)}
   .cardwrap[data-state="bad"] .hcard .hv{color:var(--bad)}
+  /* lost contact: every reading is frozen, so stop them looking live */
+  body.stale #vitals .cardwrap:not([data-k="health"]),body.stale .hlist{opacity:.45;filter:saturate(.25)}
+  body.stale .cardwrap[data-w] #s-health{display:block}
   .lbl{font-size:11px;letter-spacing:.02em;color:var(--muted);
        font-weight:600;margin:0;text-align:left;align-self:flex-start}
   .vmico{width:22px;height:22px;border-radius:6px;flex:0 0 auto;color:#fff;
@@ -1889,8 +1905,7 @@ PAGE = """<!doctype html>
           <rect x="30.5" y="11" width="6.5" height="27" rx="3.25"/>
         </g>
       </svg>
-      <div style="min-width:0"><h1>Dashy<span class="host" id="host"></span></h1>
-        <p class="beta">beta</p></div>
+      <div style="min-width:0"><h1>Dashy<span class="host" id="host"></span></h1></div>
     </div>
     <div class="hdr-r">
 
@@ -2037,7 +2052,7 @@ PAGE = """<!doctype html>
         warnings up top.</span></p>
       <p class="feat"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor"
          stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17h16M4 7h16M4 12h10"/></svg>
-        <span><b>Make it yours.</b> Drag, resize and hide tiles. Your layout
+        <span><b>Make it yours.</b> Resize and hide tiles. Your layout
         follows you to every device.</span></p>
     </div>
 
@@ -2163,6 +2178,14 @@ const CARDS=[
 ];
 const SECTIONS=[['system','System'],['storage','Storage'],['apps','Apps'],['vms','Virtual machines']];
 const CARDK=CARDS.map(c=>c.k);
+/* Pool cards are made from the data, so their keys are not in CARDK. They are
+   lower-cased to the same alphabet the server accepts for a prefs key: a pool
+   called HDDs used to be resized as pool-HDDs, which both ends then threw away
+   as unknown, and the card went back to 1x on the next reload. */
+function poolKey(name){
+  return 'pool-'+String(name).toLowerCase().replace(/[^a-z0-9_-]/g,'_').slice(0,27);
+}
+function knownKey(k){ return CARDK.indexOf(k)>=0 || /^pool-[a-z0-9_-]{1,27}$/.test(k); }
 
 /* ---------- preferences ------------------------------------------------
    Per device, in localStorage. Dashy has no login, so there is nowhere else
@@ -2199,8 +2222,8 @@ function loadPrefs(){
       const d=JSON.parse(raw)||{};
       if(['system','light','dark'].indexOf(d.theme)>=0) prefs.theme=d.theme;
       if(d.accent) prefs.accent=migrateAccent(d.accent);
-      if(Array.isArray(d.hidden)) prefs.hidden=d.hidden.filter(k=>CARDK.indexOf(k)>=0);
-      if(Array.isArray(d.wide)) prefs.wide=d.wide.filter(k=>CARDK.indexOf(k)>=0);
+      if(Array.isArray(d.hidden)) prefs.hidden=d.hidden.filter(knownKey);
+      if(Array.isArray(d.wide)) prefs.wide=d.wide.filter(knownKey);
       if(d.size && typeof d.size==='object') prefs.size=cleanSize(d.size);
       migrateSizes();
       if(d.setup && typeof d.setup==='object') prefs.setup=d.setup;
@@ -2258,7 +2281,7 @@ function adoptPrefs(P){
     if(!same(next, prefs.order)){ prefs.order=next; layoutChanged=true; }
   }
   if(Array.isArray(P.hidden)){
-    const next=P.hidden.filter(k=>CARDK.indexOf(k)>=0);
+    const next=P.hidden.filter(knownKey);
     if(!same(next, prefs.hidden)){ prefs.hidden=next; layoutChanged=true; }
   }
   if(P.size && typeof P.size==='object'){
@@ -2271,7 +2294,7 @@ function adoptPrefs(P){
     if(JSON.stringify(prefs.size)!==had) layoutChanged=true;
   }
   if(Array.isArray(P.wide)){
-    const next=P.wide.filter(k=>CARDK.indexOf(k)>=0);
+    const next=P.wide.filter(knownKey);
     if(!same(next, prefs.wide)){ prefs.wide=next; layoutChanged=true; }
   }
   if(P.setup && typeof P.setup==='object') prefs.setup=P.setup;
@@ -2572,7 +2595,7 @@ function nextSize(k){ return SIZES[(SIZES.indexOf(sizeOf(k))+1) % SIZES.length];
 function cleanSize(o){
   const out={};
   for(const k in o){
-    if(CARDK.indexOf(k)<0) continue;
+    if(!knownKey(k)) continue;
     const n=Number(o[k]);
     if(SIZES.indexOf(n)>=0 && n!==1) out[k]=n;
   }
@@ -2703,7 +2726,7 @@ function paintMemDonut(m){
    to know. */
 function poolCards(){
   return ((data&&data.pools)||[]).map(p=>({
-    k:'pool-'+p.name, label:p.name, sec:'storage', pop:'store', pool:p.name}));
+    k:poolKey(p.name), label:esc(p.name), sec:'storage', pop:'store', pool:p.name}));
 }
 function layoutSig(){
   const vms=((data&&data.vms)||[]).map(v=>v.id+':'+v.state).join(',');
@@ -2935,7 +2958,7 @@ function paint(d){
   }
 
   (d.pools||[]).forEach(p=>{
-    const k='pool-'+p.name;
+    const k=poolKey(p.name);
     const v=$('v-'+k); if(!v) return;
     const fp=diskParts(p.free);
     v.innerHTML=fp[0]+'<small>'+fp[1]+' free</small>';
@@ -2987,7 +3010,7 @@ function paint(d){
   if(ui.pct!==null && ui.pct!==undefined && ui.pct < 99.9){
     note = durLong(ui.down)+' down in 90 days'
          + (ui.restarts>1 ? ' \\u00b7 '+ui.restarts+' restarts' : '');
-    bad=true;
+    issue=true;
   }else if(recent!==null && recent < 86400){
     note = 'restarted '+durLong(recent)+' ago';
     issue=true;
@@ -3025,7 +3048,8 @@ function doCheck(){
   // a registry that never answers would otherwise spin for ever
   const ac=('AbortController' in window) ? new AbortController() : null;
   const bail=setTimeout(()=>{ if(ac) ac.abort(); }, 20000);
-  fetch('/api/check',{method:'POST', signal: ac ? ac.signal : undefined})
+  fetch('/api/check',{method:'POST', headers:{'Content-Type':'application/json'},
+                      body:'{}', signal: ac ? ac.signal : undefined})
     .then(r=>r.json())
     .then(r=>{ clearTimeout(bail); done(r && r.msg); tick(); })
     .catch(e=>{ clearTimeout(bail);
@@ -3176,56 +3200,72 @@ function paintLinks(L){
   if(nas && document.activeElement!==nas) nas.value = su.truenas || L.truenas || '';
 }
 
-// the single most pressing thing about the machine, worst first
-/* How bad is it, in one word. The card colours itself from this, which is
-   the whole point: an amber border reads as "this one" far faster than an
-   amber digit inside an identical white box. */
+/* How bad is it, in one word, and what to say about it. Both come from
+   healthRows, so the card's colour, its headline and its checklist can never
+   disagree. They did: a pool logging disk errors put a red row in the list
+   under a headline that said all systems normal. Updates are not counted - an
+   update waiting is housekeeping, not a fault. */
+function issues(d){
+  return healthRows(d).filter(r=>(r[0]==='bad'||r[0]==='warn') && r[1]!=='Updates');
+}
 function severity(d){
-  const pools=d.pools||[], drives=d.drives||[], svc=d.services||[];
-  if(pools.some(p=>(p.health||'').toUpperCase()!=='ONLINE')) return 'bad';
-  if(drives.some(x=>x.ok===false)) return 'bad';
-  if(drives.some(x=>x.level==='bad')) return 'bad';
-  if(svc.some(s=>!s.code)) return 'warn';
-  if(pools.some(p=>p.pct>=85)) return 'warn';
-  if(drives.some(x=>x.level==='warn')) return 'warn';
-  return 'ok';
+  const list=issues(d);
+  return list.some(r=>r[0]==='bad') ? 'bad' : list.length ? 'warn' : 'ok';
+}
+function headline(d){
+  const list=issues(d);
+  const worst=list.find(r=>r[0]==='bad') || list[0];
+  return worst ? (worst[3] || worst[2]) : 'all systems normal';
 }
 
 function paintHealth(d){
-  const sev=severity(d), msg=headline(d);
+  const sev=severity(d), msg=headline(d), n=issues(d).length;
   const wrap=document.querySelector('.cardwrap[data-k="health"]');
   if(wrap) wrap.dataset.state = sev==='ok' ? '' : sev;
   const v=$('v-health'); if(v) v.textContent = sev==='ok' ? 'All systems normal' : msg;
   const sb=$('s-health');
-  if(sb) sb.textContent = sev==='ok' ? '' : 'everything else normal';
+  if(sb) sb.textContent = sev==='ok' ? ''
+                        : n>1 ? (n-1)+' more '+(n===2?'issue':'issues')
+                        : 'everything else normal';
   const f=$('f-health');
   if(f) f.textContent = (d.uptime||d.uptime===0) ? ('up '+upWord(d.uptime)) : '';
   const l=$('l-health');
   if(l) l.innerHTML = healthRows(d).map(([lv,name,txt])=>
     '<div class="hrow" data-level="'+lv+'"><i>'+
       ({ok:'\u2713',warn:'!',bad:'\u00d7',info:'\u2013'}[lv])+
-    '</i><b>'+name+'</b><span title="'+txt+'">'+txt+'</span></div>').join('');
+    '</i><b>'+esc(name)+'</b><span title="'+esc(txt)+'">'+esc(txt)+'</span></div>').join('');
 }
 
-/* Same thresholds as severity() and headline(), split per subsystem. Each
-   row is [level, name, text]; 'info' is for something that is neither good
-   nor bad, like no VMs at all. */
+/* Every health judgement Dashy makes, one row per subsystem. Each row is
+   [level, name, text, headline]; the headline is how the row reads on its own
+   when it is the worst thing on the card, and defaults to the text. 'info' is
+   neither good nor bad, like having no VMs at all. */
 function healthRows(d){
   const rows=[], pools=d.pools||[], drives=d.drives||[], svc=d.services||[],
         vms=d.vms||[], ps=d.poolstatus||{};
 
-  const sick=pools.find(p=>(p.health||'').toUpperCase()!=='ONLINE');
-  const errs=pools.find(p=>{const st=ps[p.name]; return st && (st.read||st.write||st.cksum);});
+  const sick=pools.find(p=>String(p.health||'').toUpperCase()!=='ONLINE');
+  const errs=pools.find(p=>{const st=ps[p.name];
+    return st && ((st.read||0)+(st.write||0)+(st.cksum||0) > 0 ||
+                  (st.errors && st.errors!=='No known data errors'));});
   const full=pools.slice().sort((a,b)=>b.pct-a.pct)[0];
+  const age=d.pools_age;
+  // the collector writes pool data every minute; three missed runs means it
+  // has stopped, and everything it reports - pools, drives, VMs - is old news
+  const stale=(typeof age==='number' && age>180);
   if(!pools.length) rows.push(['info','Pools','no data']);
-  else if(sick) rows.push(['bad','Pools',sick.name+' '+sick.health.toLowerCase()]);
+  else if(sick){ const h=String(sick.health||'unknown').toLowerCase();
+    rows.push(['bad','Pools',sick.name+' '+h, sick.name+' is '+h]); }
   else if(errs) rows.push(['bad','Pools',errs.name+' has disk errors']);
-  else if(full && full.pct>=85) rows.push(['warn','Pools',full.name+' '+full.pct.toFixed(0)+'% full']);
+  else if(stale) rows.push(['warn','Pools','data '+agoWord(Math.round(age)),
+                            'NAS readings stopped '+agoWord(Math.round(age))]);
+  else if(full && full.pct>=85) rows.push([full.pct>=90?'bad':'warn','Pools',
+    full.name+' '+full.pct.toFixed(0)+'% full']);
   else rows.push(['ok','Pools', pools.length===1 ? 'online' : pools.length+' online']);
 
   const failed=drives.find(x=>x.ok===false), hot=drives.find(x=>x.level==='bad'),
         warm=drives.find(x=>x.level==='warn');
-  const temps=drives.map(x=>x.temp).filter(t=>t!==null&&t!==undefined);
+  const temps=drives.map(x=>x.temp).filter(t=>typeof t==='number');
   const range=temps.length ? Math.min(...temps)+'\u2013'+Math.max(...temps)+'\u00b0C' : '';
   if(!drives.length) rows.push(['info','Drives','no data']);
   else if(failed) rows.push(['bad','Drives',failed.dev+' SMART failure']);
@@ -3236,7 +3276,8 @@ function healthRows(d){
   const down=svc.filter(s=>!s.code);
   if(!svc.length) rows.push(['info','Apps','none found']);
   else if(down.length) rows.push(['warn','Apps',
-    down.length===1 ? down[0].name+' down' : down.length+' down']);
+    down.length===1 ? down[0].name+' down' : down.length+' down',
+    down.length===1 ? down[0].name+' not responding' : down.length+' apps not responding']);
   else rows.push(['ok','Apps','all '+svc.length+' responding']);
 
   const upd=svc.filter(s=>s.update).length;
@@ -3246,13 +3287,15 @@ function healthRows(d){
   const t=d.cpu_temp;
   if(t===null||t===undefined) rows.push(['info','CPU','no sensor']);
   else rows.push([t>=85?'bad':t>=75?'warn':'ok','CPU',t.toFixed(0)+'\u00b0C'+
-    (d.cpu!==null&&d.cpu!==undefined ? ' \u00b7 '+d.cpu.toFixed(0)+'% busy' : '')]);
+    (d.cpu!==null&&d.cpu!==undefined ? ' \u00b7 '+d.cpu.toFixed(0)+'% busy' : ''),
+    'CPU at '+t.toFixed(0)+'\u00b0C']);
 
   // a VM that should start on boot but is not running is the one worth flagging
-  const stopped=vms.filter(v=>v.autostart && (v.state||'').toUpperCase()!=='RUNNING');
+  const stopped=vms.filter(v=>v.autostart && String(v.state||'').toUpperCase()!=='RUNNING');
   if(!vms.length) rows.push(['info','VMs','none']);
-  else if(stopped.length) rows.push(['warn','VMs',stopped.length+' stopped']);
-  else rows.push(['ok','VMs',vms.filter(v=>(v.state||'').toUpperCase()==='RUNNING').length+' running']);
+  else if(stopped.length) rows.push(['warn','VMs',stopped.length+' stopped',
+    stopped.length===1 ? vmName(stopped[0])+' is not running' : stopped.length+' VMs not running']);
+  else rows.push(['ok','VMs',vms.filter(v=>String(v.state||'').toUpperCase()==='RUNNING').length+' running']);
   return rows;
 }
 
@@ -3264,31 +3307,11 @@ function upWord(sec){
   return Math.max(1,Math.floor(sec/60))+' min';
 }
 
-function headline(d){
-  const pools=d.pools||[], drives=d.drives||[], svc=d.services||[];
-  const sick=pools.find(p=>(p.health||'').toUpperCase()!=='ONLINE');
-  if(sick) return sick.name+' '+sick.health;
-  const failed=drives.find(x=>x.ok===false);
-  if(failed) return failed.dev+' SMART failure';
-  const hotDrive=drives.find(x=>x.level==='bad');
-  if(hotDrive) return hotDrive.dev+' at '+hotDrive.temp+'\\u00b0C';
-  const down=svc.filter(s=>!s.code);
-  if(down.length) return down.length===1 ? down[0].name+' not responding'
-                                         : down.length+' apps not responding';
-  const full=pools.slice().sort((a,b)=>b.pct-a.pct)[0];
-  if(full && full.pct>=85) return full.name+' '+full.pct.toFixed(0)+'% full';
-  // the old header pill used to carry this; keep the signal, lose the box
-  if(d.pools_age!==null&&d.pools_age!==undefined&&d.pools_age>180) return 'pool data stale';
-  const warm=drives.find(x=>x.level==='warn');
-  if(warm) return warm.dev+' at '+warm.temp+'\\u00b0C';
-  return 'all systems normal';
-}
-
 function rowsCores(){
   const list=data.cpu_cores||[];
   if(!list.length) return '<div class="row"><span class="t2">No per-thread data yet.</span></div>';
   return list.map(c=>
-    '<div class="row"><span class="tag">'+c.name.trim()+'</span>'+
+    '<div class="row"><span class="tag">'+esc(String(c.name).trim())+'</span>'+
       '<div class="bar"><i style="width:'+c.pct+'%" data-level="'+level(c.pct)+'"></i></div>'+
       '<span class="val" data-level="'+level(c.pct)+'">'+c.pct.toFixed(0)+'%</span></div>').join('');
 }
@@ -3299,7 +3322,7 @@ function rowsCoreTemps(){
   return list.map(c=>{
     const lv=c.temp>=85?'bad':c.temp>=75?'warn':'ok';
     const w=Math.max(4,Math.min(100,(c.temp-25)/70*100));
-    return '<div class="row"><span class="tag">'+c.name+'</span>'+
+    return '<div class="row"><span class="tag">'+esc(c.name)+'</span>'+
       '<div class="bar"><i style="width:'+w+'%" data-level="'+lv+'"></i></div>'+
       '<span class="val" data-level="'+lv+'">'+c.temp.toFixed(0)+'\\u00b0</span></div>';
   }).join('');
@@ -3339,18 +3362,18 @@ function poolNote(name){
   const errs = (st.read||0) + (st.write||0) + (st.cksum||0);
   const bad = errs > 0 || (st.errors && st.errors !== 'No known data errors');
   if (errs) bits.push(st.read + ' read / ' + st.write + ' write / ' + st.cksum + ' checksum errors');
-  else if (st.errors) bits.push(st.errors.toLowerCase());
+  else if (st.errors) bits.push(String(st.errors).toLowerCase());
   if (!bits.length) return '';
-  return '<p class="pnote'+(bad ? ' bad' : '')+'">'+bits.join('  \u00b7  ')+'</p>';
+  return '<p class="pnote'+(bad ? ' bad' : '')+'">'+esc(bits.join('  \u00b7  '))+'</p>';
 }
 
 function rowsPools(){
   return (data.pools||[]).map(p=>{
     const ok=(p.health||'').toUpperCase()==='ONLINE', lv=level(p.pct);
     const col = lv==='ok' ? 'var(--accent)' : lv==='warn' ? 'var(--warn)' : 'var(--bad)';
-    return '<div class="row"><span class="l"><span class="t1">'+p.name+'</span>'+
+    return '<div class="row"><span class="l"><span class="t1">'+esc(p.name)+'</span>'+
       '<span class="t2">'+disk(p.used)+' used \\u00b7 '+disk(p.free)+' free of '+disk(p.size)+'</span></span>'+
-      '<span class="smart '+(ok?'ok':'bad')+'">'+(p.health||'?')+'</span>'+
+      '<span class="smart '+(ok?'ok':'bad')+'">'+esc(p.health||'?')+'</span>'+
       '<span class="val" data-level="'+lv+'">'+p.pct.toFixed(0)+'%</span></div>'+
       '<div class="stackbar" style="height:10px;margin:0 16px 8px">'+
         '<i style="width:'+p.pct+'%;background:'+col+'"></i></div>'+
@@ -3364,8 +3387,8 @@ function rowsDrives(){
     const smt=x.ok===true?'SMART OK':x.ok===false?'SMART FAIL':'SMART ?';
     const yrs=x.hours?' \\u00b7 '+(x.hours/8766).toFixed(1)+' yrs on':'';
     return '<div class="row"><span class="tag">'+x.kind+'</span>'+
-      '<span class="l"><span class="t1">'+x.dev+'</span>'+
-      '<span class="t2">'+(x.size?disk(x.size):'')+(x.model?' \\u00b7 '+x.model:'')+yrs+'</span></span>'+
+      '<span class="l"><span class="t1">'+esc(x.dev)+'</span>'+
+      '<span class="t2">'+(x.size?disk(x.size):'')+(x.model?' \\u00b7 '+esc(x.model):'')+yrs+'</span></span>'+
       '<span class="smart '+sm+'">'+smt+'</span>'+
       '<span class="val"'+(x.level?' data-level="'+x.level+'"':'')+'>'+
         (typeof x.temp==='number'?x.temp+'\\u00b0':'\\u2013')+'</span></div>';
@@ -3380,7 +3403,7 @@ function rowsDrives(){
 function loadRow(){
   const l = data.load || [];
   if (!l.length) return '';
-  const n = (data.procs && data.procs.ncpu) || (data.cpu_cores || 0);
+  const n = (data.procs && data.procs.ncpu) || data.cores || 0;
   const lv = n ? (l[0] >= n ? 'bad' : l[0] >= n * .7 ? 'warn' : 'ok') : '';
   return '<div class="row"><span class="l"><span class="t1">Load average</span>'+
     '<span class="t2">'+l.map(x=>x.toFixed(2)).join('  \u00b7  ')+
@@ -3433,7 +3456,7 @@ function rowsSystem(){
   const ps = data.poolstatus || {};
 
   if (su.available)
-    out.push(srow('bad', 'Dashy ' + su.latest + ' is available',
+    out.push(srow('warn', 'Dashy ' + su.latest + ' is available',
                   'You are on ' + (su.current || data.version) +
                   '. Install it from the settings pane.'));
 
@@ -3457,7 +3480,7 @@ function rowsSystem(){
                     disk(p.free) + ' left of ' + disk(p.size)));
     else if (p.pct >= 85)
       out.push(srow('warn', p.name + ' is ' + p.pct.toFixed(0) + '% full',
-                    disk(p.free) + ' left of ' + disk(p.size), 'pool'));
+                    disk(p.free) + ' left of ' + disk(p.size), 'store'));
     const errs = (st.read || 0) + (st.write || 0) + (st.cksum || 0);
     if (errs)
       out.push(srow('bad', p.name + ' has logged errors',
@@ -3475,11 +3498,24 @@ function rowsSystem(){
   drives.filter(d => d.level === 'warn').forEach(d =>
     out.push(srow('warn', d.dev + ' is warm', d.temp + '°C')));
 
+  // the rest of what the Health card judges, so the card and this sheet agree
+  const age = data.pools_age;
+  if (typeof age === 'number' && age > 180)
+    out.push(srow('warn', 'NAS readings stopped ' + agoWord(Math.round(age)),
+                  'The collector cron job has not run since. Pools, drives and VMs below are from then.'));
+  const t = data.cpu_temp;
+  if (typeof t === 'number' && t >= 75)
+    out.push(srow(t >= 85 ? 'bad' : 'warn', 'CPU at ' + t.toFixed(0) + '°C', ''));
+  (data.vms || []).filter(v => v.autostart && String(v.state || '').toUpperCase() !== 'RUNNING')
+    .forEach(v => out.push(srow('warn', vmName(v) + ' is not running',
+                                'It is set to start with the server.', 'vm-' + v.id)));
+
   const head = out.length
     ? '<p class="shead">' + out.length + (out.length === 1 ? ' thing wants' : ' things want') +
       ' your attention</p>'
     : '<div class="allok"><p>Nothing needs you.</p>' +
-      '<p class="t2">Every app is answering, every pool is online and no drive is warm.</p></div>';
+      '<p class="t2">Every app is answering, every pool is online, no drive is warm '+
+      'and every VM that should be running is.</p></div>';
 
   // what is normal, so the sheet says something either way
   const normal = [];
@@ -3524,8 +3560,8 @@ function srow(level, title, sub, pop){
   return '<' + (pop ? tag : 'div') + ' class="srow' + (pop ? ' go' : '') +
     '" data-level="' + level + '">' +
     '<i class="sdotL"></i>' +
-    '<span class="l"><span class="t1">' + title + '</span>' +
-    (sub ? '<span class="t2">' + sub + '</span>' : '') + '</span>' +
+    '<span class="l"><span class="t1">' + esc(title) + '</span>' +
+    (sub ? '<span class="t2">' + esc(sub) + '</span>' : '') + '</span>' +
     '</' + (pop ? 'button' : 'div') + '>';
 }
 
@@ -3536,16 +3572,16 @@ function rowsApps(){
   return '<div class="appgrid">'+list.map(s=>
     '<a class="apptile" data-up="'+(s.code?'1':'0')+'"'+
       ' data-uid="'+esc(s.id)+'" data-name="'+esc(s.name)+'"'+
-      ' href="'+appURL(s)+'"'+
+      ' href="'+esc(appURL(s)||'#')+'"'+
       ' role="button" aria-label="'+esc(s.name)+' details">'+
       '<span class="sdot"></span>'+
-      (s.update?'<button class="upd" data-app="'+s.app+'" data-name="'+s.name+'" '+
-                 'data-ver="'+(s.version||'')+'" aria-label="Update '+s.name+'"></button>':'')+
-      (st[s.app]?'<span class="ust '+st[s.app].state+'">'+st[s.app].msg+'</span>':'')+
+      (s.update?'<button class="upd" data-app="'+esc(s.app)+'" data-name="'+esc(s.name)+'" '+
+                 'data-ver="'+esc(s.version||'')+'" aria-label="Update '+esc(s.name)+'"></button>':'')+
+      (st[s.app]?'<span class="ust '+esc(st[s.app].state)+'">'+esc(st[s.app].msg||'')+'</span>':'')+
       (isPinned(s)?'<span class="pin" aria-hidden="true"></span>':'')+
       appIcon(s)+
-      '<span class="an">'+s.name+'</span>'+
-      '<span class="ap">'+(s.version||'')+'</span></a>').join('')+'</div>';
+      '<span class="an">'+esc(s.name)+'</span>'+
+      '<span class="ap">'+esc(s.version||'')+'</span></a>').join('')+'</div>';
 }
 
 // Catalogue apps have an icon; custom ones do not, so those fall back to a
@@ -3627,14 +3663,17 @@ function appSheet(id){
   // NAS rather than being presented as container-level usage.
   const rt=(typeof s.rt_ms==='number')?s.rt_ms:null;
   const rtRows=s.rt_hist||[];
-  const netDev=(data.net||[]).slice().sort((a,b)=>(b.down+b.up)-(a.down+a.up))[0];
+  const netDev=(data.net||[]).filter(n=>n.down!==null&&n.down!==undefined)
+                 .sort((a,b)=>(b.down+b.up)-(a.down+a.up))[0];
   const netHist=netDev?(data.net_hist||{})[netDev.name]||[]:[];
   const netNow=netDev?(netDev.down||0)+(netDev.up||0):0;
   const ioNow=(data.io||[]).reduce((n,x)=>n+(x.read||0)+(x.write||0),0);
   const ioHist=(data.io_hist||[]).map(r=>[r[0],(r[1]||0)+(r[2]||0)]);
+  // apps only, like the Memory tile: the ZFS cache is handed back on demand,
+  // and counting it made this read 87% while the tile above said 50%
   const ramHist=(data.mem_hist||[]).map(r=>[
-    r[0], data.mem&&data.mem.total ? 100*((r[1]||0)+(r[2]||0))/data.mem.total : 0]);
-  const memPct=data.mem?Math.round(data.mem.pct):null;
+    r[0], data.mem&&data.mem.total ? 100*(r[1]||0)/data.mem.total : 0]);
+  const memPct=data.mem?Math.round(data.mem.apps_pct!==undefined?data.mem.apps_pct:data.mem.pct):null;
   const cards=
     '<div class="mcards">'+
       '<div class="mcard"><span class="ml">CPU \u00b7 NAS</span>'+
@@ -3748,7 +3787,7 @@ function rowsIo(){
   const list=(data.io||[]).filter(x=>x.read!==null&&x.read!==undefined&&(x.read||x.write));
   if(!list.length) return '';
   return list.map(x=>
-    '<div class="row"><span class="l"><span class="t1">'+x.name+'</span>'+
+    '<div class="row"><span class="l"><span class="t1">'+esc(x.name)+'</span>'+
       '<span class="t2">live disk activity</span></span>'+
       '<span class="val" style="min-width:92px">'+rate(x.read)+'<br>'+
       '<span style="font-size:11px;color:var(--muted);font-weight:600">'+rate(x.write)+' write</span>'+
@@ -3759,7 +3798,7 @@ function rowsNet(){
   const list=data.net||[];
   if(!list.length) return '<div class="row"><span class="t2">No interface data.</span></div>';
   return list.map(n=>
-    '<div class="row"><span class="l"><span class="t1">'+n.name+'</span>'+
+    '<div class="row"><span class="l"><span class="t1">'+esc(n.name)+'</span>'+
       '<span class="t2">'+(n.speed? n.speed+' Mb/s link \\u00b7 ':'')+
         disk(n.rx)+' in \\u00b7 '+disk(n.tx)+' out'+
         (n.errors? ' \\u00b7 '+n.errors+' errors':'')+'</span></span>'+
@@ -3916,14 +3955,14 @@ async function askSelfUpdate(){
 
 async function askUpdate(app,name,ver){
   const body=
-    '<div class="row"><span class="l"><span class="t1">'+name+'</span>'+
-      '<span class="t2">currently '+(ver||'unknown')+'</span></span></div>'+
+    '<div class="row"><span class="l"><span class="t1">'+esc(name)+'</span>'+
+      '<span class="t2">currently '+esc(ver||'unknown')+'</span></span></div>'+
     '<div class="row"><span class="t2 wrap">The app will restart while it upgrades, so it will be '+
       'briefly unavailable. A ZFS snapshot of its data is taken first, so there is a rollback '+
       'point. The upgrade starts within a minute.</span></div>'+
     '<div class="m-row" style="padding:12px 16px 14px;display:flex;gap:10px">'+
       '<button class="ubtn no" id="u-no">Cancel</button>'+
-      '<button class="ubtn yes" id="u-yes" data-app="'+app+'">Update '+name+'</button></div>';
+      '<button class="ubtn yes" id="u-yes" data-app="'+esc(app)+'">Update '+esc(name)+'</button></div>';
   $('sh-t').textContent='Update available';
   $('sh-s').textContent='';
   $('sh-b').innerHTML=body;
@@ -4020,6 +4059,17 @@ document.addEventListener('click',ev=>{
   const vb=ev.target.closest('button[data-vmact]');
   if(vb){
     const id=vb.dataset.vm, act=vb.dataset.vmact;
+    // Stopping a VM can take the house with it - Home Assistant runs in one.
+    // A single stray tap must not do that, so stop and restart ask twice.
+    if(act!=='start' && vb.dataset.armed!=='1'){
+      const label=vb.textContent;
+      vb.dataset.armed='1';
+      vb.textContent = act==='stop' ? 'Tap again to stop' : 'Tap again to restart';
+      setTimeout(()=>{ if(vb.isConnected && vb.dataset.armed==='1'){
+        vb.dataset.armed=''; vb.textContent=label; } }, 4000);
+      return;
+    }
+    vb.dataset.armed='';
     [].forEach.call(document.querySelectorAll('button[data-vmact]'),
                     b=>{ b.disabled=true; });
     vb.textContent = act==='start' ? 'Starting\u2026'
@@ -4031,20 +4081,21 @@ document.addEventListener('click',ev=>{
       .catch(()=>{ vb.textContent='could not reach the NAS'; });
     return;
   }
-  if(ev.target.id==='su-yes'){
-    ev.target.disabled=true; ev.target.textContent='Queued\u2026';
+  if(ev.target.id==='su-yes' || ev.target.id==='u-yes'){
+    const btn=ev.target, self=btn.id==='su-yes';
+    btn.disabled=true; btn.textContent='Queued\u2026';
+    // say so when it was refused; a sheet that closes either way looks like
+    // success, and the update then simply never happens
+    const fail=(msg)=>{ btn.textContent=msg; btn.disabled=false; };
     fetch('/api/update',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({app:'_self'})}).catch(()=>{});
-    setTimeout(closePop, 900);
-    return;
-  }
-  if(ev.target.id==='u-yes'){
-    const app=ev.target.dataset.app;
-    ev.target.disabled=true; ev.target.textContent='Queued\\u2026';
-    fetch('/api/update',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({app:app})})
-      .then(r=>r.json()).then(()=>{ setTimeout(()=>{ openPop('apps'); }, 600); })
-      .catch(()=>{ ev.target.textContent='Failed'; });
+      body:JSON.stringify({app: self ? '_self' : btn.dataset.app})})
+      .then(r=>r.json())
+      .then(r=>{
+        if(!r || !r.ok) return fail((r && r.msg) || 'that did not work');
+        if(self) setTimeout(closePop, 900);
+        else setTimeout(()=>{ openPop('apps'); }, 600);
+      })
+      .catch(()=>fail('could not reach the NAS'));
     return;
   }
   // --- settings menu -----------------------------------------------
@@ -4123,17 +4174,44 @@ document.addEventListener('click',ev=>{
 });
 document.addEventListener('keydown',ev=>{ if(ev.key==='Escape') closePop(); });
 
+/* Lost contact. Every figure on the page is the last one that arrived, so
+   without this a NAS that had gone down kept saying "All systems normal" for
+   as long as the tab stayed open. Four missed polls and the page says so. */
+const pageStart=Date.now();
+function paintStale(){
+  const since=lastTick||pageStart, gap=Date.now()-since;
+  const old=gap>12000;
+  document.body.classList.toggle('stale', old);
+  if(!old) return;
+  const wrap=document.querySelector('.cardwrap[data-k="health"]');
+  if(wrap) wrap.dataset.state='bad';
+  const v=$('v-health'); if(v) v.textContent='No contact with Dashy';
+  const sec=Math.round(gap/1000);
+  const sb=$('s-health');
+  if(sb) sb.textContent = lastTick
+    ? 'last reading '+(sec<90 ? sec+'s ago' : agoWord(sec))+' \u00b7 figures are frozen'
+    : 'waiting for the first reading';
+}
+
+let ticking=false;
 async function tick(){
+  if(ticking) return;           // a slow answer must not stack polls behind it
+  ticking=true;
+  const ac=('AbortController' in window) ? new AbortController() : null;
+  const bail=setTimeout(()=>{ if(ac) ac.abort(); }, 10000);
   try{
-    const r=await fetch('/api/stats',{cache:'no-store'});
+    const r=await fetch('/api/stats',{cache:'no-store', signal: ac ? ac.signal : undefined});
     if(!r.ok) throw new Error(r.status);
     paint(await r.json());
     renderPop();
   }catch(e){
-    // Swallowed on purpose - a dropped poll must not kill the page - but
-    // recorded, because an exception thrown inside paint() is invisible
+    // Recorded, because an exception thrown inside paint() is invisible
     // otherwise and has cost real debugging time more than once.
     window.__lastTickError = (e && e.stack) ? String(e.stack) : String(e);
+  }finally{
+    clearTimeout(bail);
+    ticking=false;
+    paintStale();
   }
 }
 // chrome first, so the theme and accent are right before any data lands
@@ -4206,7 +4284,10 @@ MANIFEST = {
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "soldash"
+    server_version = "dashy"
+    # a client that opens a connection and goes quiet must not hold a thread
+    # for ever; every legitimate request here completes in well under this
+    timeout = 30
 
     def log_message(self, fmt, *args):
         pass
@@ -4278,53 +4359,72 @@ class Handler(BaseHTTPRequestHandler):
 
     do_HEAD = do_GET
 
+    def _json_body(self, limit):
+        """The request body as a dict, or None once an error has been sent.
+
+        Every POST here acts on the NAS: it stops VMs, queues upgrades and
+        rewrites Tailscale Serve. So two things are refused outright.
+
+        A cross-site request. A page on any other site can make a browser POST
+        here; the browser says so in Sec-Fetch-Site. Requiring a JSON content
+        type closes the same door for older browsers, because a cross-origin
+        JSON POST needs a CORS preflight and this server never grants one.
+
+        A body over the limit. Reading only part of it would leave the rest in
+        the stream, where keep-alive parses it as the next request."""
+        if self.headers.get("Sec-Fetch-Site", "") == "cross-site":
+            self._fail(403, "cross-site request refused")
+            return None
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            self._fail(415, "send application/json")
+            return None
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = -1
+        if n < 0 or n > limit:
+            self._fail(413, "request too large")
+            return None
+        try:
+            body = json.loads(self.rfile.read(n) or b"{}")
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            self._fail(400, "expected a JSON object")
+            return None
+        return body
+
+    def _fail(self, code, msg):
+        self.close_connection = True
+        self._send(code, json.dumps({"ok": False, "msg": msg}),
+                   "application/json; charset=utf-8")
+
     def do_POST(self):
         path = self.path.split("?", 1)[0]
+        limits = {"/api/layout": 65536, "/api/check": 1024, "/api/vm": 4096,
+                  "/api/serve": 8192, "/api/update": 4096}
+        if path not in limits:
+            return self._fail(404, "not found")
+        body = self._json_body(limits[path])
+        if body is None:
+            return
         if path == "/api/layout":
-            try:
-                n = int(self.headers.get("Content-Length") or 0)
-                body = json.loads(self.rfile.read(min(n, 65536)) or b"{}")
-            except (ValueError, TypeError):
-                body = {}
             ok, msg, rev = save_prefs(body)
             return self._send(200 if ok else 400,
                               json.dumps({"ok": ok, "msg": msg, "rev": rev}),
                               "application/json; charset=utf-8")
         if path == "/api/check":
             ok, msg = check_now()
-            return self._send(200, json.dumps({"ok": ok, "msg": msg}),
-                              "application/json; charset=utf-8")
-        if path == "/api/vm":
-            try:
-                n = int(self.headers.get("Content-Length") or 0)
-                body = json.loads(self.rfile.read(min(n, 4096)) or b"{}")
-            except (ValueError, TypeError):
-                body = {}
+        elif path == "/api/vm":
             ok, msg = request_vm(body.get("id"), str(body.get("action", "")))
-            return self._send(200 if ok else 400,
-                              json.dumps({"ok": ok, "msg": msg}),
-                              "application/json; charset=utf-8")
-        if path == "/api/serve":
-            try:
-                n = int(self.headers.get("Content-Length") or 0)
-                body = json.loads(self.rfile.read(min(n, 8192)) or b"{}")
-            except (ValueError, TypeError):
-                body = {}
-            ok, msg = request_serve(body.get("host") or "")
-            return self._send(200 if ok else 400,
-                              json.dumps({"ok": ok, "msg": msg}),
-                              "application/json; charset=utf-8")
-        if path != "/api/update":
-            return self._send(404, json.dumps({"error": "not found"}),
-                              "application/json; charset=utf-8")
-        try:
-            n = int(self.headers.get("Content-Length") or 0)
-            body = json.loads(self.rfile.read(n) or b"{}")
-        except (ValueError, TypeError):
-            body = {}
-        ok, msg = request_upgrade(str(body.get("app", "")))
-        self._send(200 if ok else 400,
-                   json.dumps({"ok": ok, "msg": msg}),
+        elif path == "/api/serve":
+            ok, msg = request_serve(str(body.get("host") or ""))
+        else:
+            ok, msg = request_upgrade(str(body.get("app", "")))
+        # /api/check reports a failed lookup in its message, not its status
+        code = 200 if (ok or path == "/api/check") else 400
+        self._send(code, json.dumps({"ok": ok, "msg": msg}),
                    "application/json; charset=utf-8")
 
 

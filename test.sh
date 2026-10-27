@@ -2,7 +2,7 @@
 # Checks whether this box can run Dashy, and whether an existing install is
 # healthy. Safe to run at any time: it reads, it never changes anything.
 #
-#   ./test.sh              # check the default app name, 'overlook'
+#   ./test.sh              # check the default app name, 'dashy'
 #   APP_NAME=dashboard ./test.sh
 #
 # Exit code is the number of failures, so CI can use it.

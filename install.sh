@@ -54,10 +54,10 @@ info "pools: ${POOLS[*]}"
 # Prefer wherever TrueNAS already keeps its apps - it is the pool the user
 # chose for exactly this. "Has an Applications dataset" was the old rule and it
 # picked alphabetically on a box where two pools had one.
-DEFPOOL=$(midclt call docker.config 2>/dev/null | python3 -c '"'"'
+DEFPOOL=$(midclt call docker.config 2>/dev/null | python3 -c '
 import json,sys
 try: print((json.load(sys.stdin).get("pool") or "").strip())
-except Exception: pass'"'"' 2>/dev/null)
+except Exception: pass' 2>/dev/null)
 if [ -z "$DEFPOOL" ] || ! zfs list -H -o name "$DEFPOOL" >/dev/null 2>&1; then
   DEFPOOL="${POOLS[0]}"
   for p in "${POOLS[@]}"; do
@@ -159,6 +159,16 @@ info "LAN address $LAN_IP"
 # ---------------------------------------------------------------- ports
 say "picking ports"
 LPORT="${LPORT:-}"
+# A reinstall keeps the port it already has. Scanning for a free one found the
+# running Dashy holding it and picked the next, which moved every bookmark and
+# left the old tailnet entry pointing at nothing.
+if [ -z "$LPORT" ] && [ "$REINSTALL" = 1 ]; then
+  LPORT=$(midclt call app.config "$APP_NAME" 2>/dev/null | python3 -c '
+import json,sys
+try: s=list(json.load(sys.stdin)["services"].values())[0]
+except Exception: raise SystemExit
+print((s.get("environment") or {}).get("DASH_PORT") or "")' 2>/dev/null)
+fi
 if [ -z "$LPORT" ]; then
   for p in $(seq 30800 30899); do
     ss -ltn 2>/dev/null | grep -q ":$p " || { LPORT=$p; break; }
@@ -168,12 +178,25 @@ fi
 
 TPORT=""
 if [ "$TS" != 0 ]; then
-  if [ -z "${TPORT:-}" ]; then
-    USED=$(python3 -c "
-import json
-try: cfg=json.load(open('$SERVE'))
-except Exception: cfg={}
-print(' '.join((cfg.get('TCP') or {}).keys()))" 2>/dev/null)
+  # already published (a reinstall): keep that tailnet port
+  TPORT=$(python3 - "$SERVE" "$LPORT" <<'PY' 2>/dev/null
+import json, sys
+try: cfg = json.load(open(sys.argv[1]))
+except Exception: raise SystemExit
+for key, entry in (cfg.get("Web") or {}).items():
+    h = (entry.get("Handlers") or {}).get("/") or {}
+    if h.get("Proxy", "").endswith(":" + sys.argv[2]):
+        print(key.rsplit(":", 1)[1]); break
+PY
+)
+  if [ -z "$TPORT" ]; then
+    USED=$(python3 - "$SERVE" <<'PY' 2>/dev/null
+import json, sys
+try: cfg = json.load(open(sys.argv[1]))
+except Exception: cfg = {}
+print(" ".join((cfg.get("TCP") or {}).keys()))
+PY
+)
     for p in $(seq 8443 8499); do
       case " $USED " in *" $p "*) continue ;; esac
       TPORT=$p; break
@@ -287,8 +310,11 @@ midclt call -j app.pull_images "$APP_NAME" '{"redeploy": true}' >/dev/null 2>&1 
   && info "pulled" || info "could not pull; it will run whatever is cached"
 
 # ---------------------------------------------------------------- serve entry
-if [ "$TS" = 2 ]; then
-  say "setting up Tailscale Serve"
+# One path for both cases. serve_setup.py sets Serve up from nothing when it
+# has to, and when it is already there it only adds this port - reusing an
+# existing entry rather than writing a second one beside it.
+if [ "$TS" != 0 ]; then
+  say "publishing on the tailnet"
   [ -n "$SERVE" ] || SERVE="/mnt/$POOL/appconfig/serve.json"
   if python3 "$REPO/app/serve_setup.py" --host "$TSHOST" --tport "$TPORT" \
        --lport "$LPORT" --serve "$SERVE"; then
@@ -298,22 +324,6 @@ if [ "$TS" = 2 ]; then
     info "http://$LAN_IP:$LPORT - fix Tailscale and re-run this to publish it."
     TS=0
   fi
-fi
-
-if [ "$TS" = 1 ]; then
-say "publishing on the tailnet"
-python3 - "$SERVE" "$TSHOST" "$TPORT" "$LPORT" <<'PY'
-import json, shutil, sys, time
-path, host, tport, lport = sys.argv[1:5]
-shutil.copy2(path, path + ".bak-%d" % int(time.time()))
-cfg = json.load(open(path))
-# BOTH halves are required: TCP opens the listener and gets the cert, Web routes.
-cfg.setdefault("TCP", {})[tport] = {"HTTPS": True}
-cfg.setdefault("Web", {})["%s:%s" % (host, tport)] = {
-    "Handlers": {"/": {"Proxy": "http://127.0.0.1:%s" % lport}}}
-json.dump(cfg, open(path, "w"), indent=1)
-print("   added TCP %s and a Web handler -> 127.0.0.1:%s" % (tport, lport))
-PY
 fi
 
 # ---------------------------------------------------------------- cron

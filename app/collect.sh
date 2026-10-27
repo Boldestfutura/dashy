@@ -6,18 +6,29 @@ APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 BASE=$(dirname -- "$APP_DIR")
 D="$BASE/data"
 
+# One run at a time. A run takes most of its minute (the power sampling below
+# is 50 seconds of it), so anything slow - a disk that stalls smartctl, a busy
+# middleware - would otherwise start the next run on top of this one, and the
+# pile only grows. Skip a minute instead.
+exec 9>"$D/.collect.lock"
+flock -n 9 || exit 0
+
 # --- pools: name, size, allocated, free, health, then usable used and avail.
 # zpool list counts raw disk space, parity included, so on RAIDZ it overstates
 # both used and free by the parity share (4-wide RAIDZ1: a third). The root
 # dataset's used/avail from zfs list is what can actually be stored. Appended
 # as extra columns so an older server still reads the first five.
-if zpool list -Hp -o name,size,allocated,free,health > "$D/pools.tsv.zp" 2>/dev/null; then
-  zfs list -Hp -d 0 -o name,used,avail > "$D/pools.tsv.zfs" 2>/dev/null
+if timeout 30 zpool list -Hp -o name,size,allocated,free,health > "$D/pools.tsv.zp" 2>/dev/null; then
+  timeout 30 zfs list -Hp -d 0 -o name,used,avail > "$D/pools.tsv.zfs" 2>/dev/null
   awk -F'\t' -v Z="$D/pools.tsv.zfs" 'BEGIN{OFS="\t"
       while ((getline l < Z) > 0) { split(l, f, "\t"); u[f[1]] = f[2]; a[f[1]] = f[3] } }
     { if ($1 in u) print $0, u[$1], a[$1]; else print $0 }' \
     "$D/pools.tsv.zp" > "$D/pools.tsv.tmp" && mv "$D/pools.tsv.tmp" "$D/pools.tsv"
   rm -f "$D/pools.tsv.zp" "$D/pools.tsv.zfs"
+  # The stamp is how the dashboard tells fresh pool data from old. It used to
+  # be written at the end of every run whether or not zpool had answered, so a
+  # pool command that hung or failed still looked current.
+  date +%s > "$D/pools.stamp"
 fi
 
 # --- CPU package temperature, from the coretemp sensor
@@ -49,7 +60,8 @@ last -x --time-format=iso reboot shutdown 2>/dev/null | head -60 > "$D/boots.txt
 # --- drives: one JSON object per line
 : > "$D/drives.jsonl.tmp"
 for dev in $(lsblk -dno NAME 2>/dev/null | grep -Ev '^(loop|zd|sr)'); do
-  smartctl -j -H -A -i "/dev/$dev" 2>/dev/null | python3 -c "
+  # a failing disk is exactly the one that stalls smartctl, so bound it
+  timeout 30 smartctl -j -H -A -i "/dev/$dev" 2>/dev/null | python3 -c "
 import json,sys
 try: d=json.load(sys.stdin)
 except Exception: raise SystemExit
@@ -68,7 +80,7 @@ mv "$D/drives.jsonl.tmp" "$D/drives.jsonl"
 
 # --- installed apps and the host ports they publish, so the dashboard can
 # --- name a tailnet mapping without anything being hard-coded
-midclt call app.query 2>/dev/null | python3 -c "
+timeout 60 midclt call app.query 2>/dev/null | python3 -c "
 import json,sys
 try: apps=json.load(sys.stdin)
 except Exception: raise SystemExit
@@ -339,6 +351,32 @@ try:
 except Exception:
     vms = []
 
+# A USB device passed through by vendor and product id has no "device" name at
+# all, which the dashboard printed as "null". Name it the way TrueNAS's own
+# passthrough list does, from the same ids.
+names = {}
+if any((d.get("attributes") or {}).get("dtype") == "USB" or d.get("dtype") == "USB"
+       for v in (vms if isinstance(vms, list) else []) for d in (v.get("devices") or [])):
+    try:
+        ch = json.loads(subprocess.run(["midclt", "call", "vm.device.usb_passthrough_choices"],
+                                       capture_output=True, text=True, timeout=60).stdout)
+        for key, c in (ch or {}).items():
+            cap = c.get("capability") or {}
+            label = " ".join(x for x in (cap.get("vendor"), cap.get("product")) if x)
+            names[(cap.get("vendor_id"), cap.get("product_id"))] = label
+            names[key] = label
+    except Exception:
+        pass
+
+
+def usb_label(a):
+    ids = a.get("usb") or {}
+    vid, pid = ids.get("vendor_id"), ids.get("product_id")
+    dev = a.get("device")
+    return (names.get((vid, pid)) or (dev and names.get(dev)) or dev
+            or ("%s:%s" % (vid, pid) if vid and pid else "USB device"))
+
+
 for v in vms if isinstance(vms, list) else []:
     st = v.get("status") or {}
     devs = v.get("devices") or []
@@ -359,7 +397,7 @@ for v in vms if isinstance(vms, list) else []:
         "memory": v.get("memory"),
         "autostart": bool(v.get("autostart")),
         "devices": kinds,
-        "usb": [(d.get("attributes") or {}).get("device")
+        "usb": [usb_label(d.get("attributes") or {})
                 for d in devs
                 if (d.get("dtype") or (d.get("attributes") or {}).get("dtype")) == "USB"],
     })
@@ -388,8 +426,6 @@ if [ -r "$E" ]; then
   tail -n 200 "$D/power.tsv" > "$D/power.tmp" 2>/dev/null && mv "$D/power.tmp" "$D/power.tsv"
 fi
 
-date +%s > "$D/pools.stamp"
-
 # --- is there a newer Dashy? Checked every 30 min, not every minute: neither
 # --- GitHub nor ghcr needs 1440 requests a day to answer the same question.
 # ---
@@ -406,7 +442,7 @@ APPNAME=$(basename -- "$BASE")
 
 # One read of the app's own config gives both the image, which says how this
 # install is packaged, and the port, which says where to ask it its version.
-CFG=$(midclt call app.config "$APPNAME" 2>/dev/null)
+CFG=$(timeout 30 midclt call app.config "$APPNAME" 2>/dev/null)
 IMAGE=$(printf '%s' "$CFG" | python3 -c "
 import json,sys
 try: svc=list(json.load(sys.stdin)['services'].values())[0]
@@ -441,7 +477,10 @@ if [ $(( NOW - LAST )) -ge 1800 ]; then
   VER=""
   SRC="$REPO"
   case "$IMAGE" in
-    ghcr.io/*overlook:*|ghcr.io/*overlook)
+    # Both names. The image moved from overlook to dashy, and matching only the
+    # old one sent every install to GitHub instead, which offers a version a
+    # minute or more before CI has built an image of it to install.
+    ghcr.io/*/overlook:*|ghcr.io/*/overlook|ghcr.io/*/dashy:*|ghcr.io/*/dashy)
       # highest version tag the registry actually holds
       GREPO=${IMAGE#ghcr.io/}; GREPO=${GREPO%%:*}
       SRC="ghcr.io/$GREPO"

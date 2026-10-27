@@ -10,6 +10,45 @@ Q="$BASE/queue"
 D="$BASE/data"
 S="$D/updates.json"
 
+# One worker at a time. An upgrade or a VM restart easily outlasts the minute
+# between cron runs, and two workers writing updates.json at once lose each
+# other's status - a finished upgrade then reads "running" until it ages out.
+exec 9>"$D/.worker.lock"
+flock -n 9 || exit 0
+
+# status <key> <state> <msg> [pct]: record progress where the dashboard reads
+# it. Written to a temp file and renamed, so a poll never sees half a file.
+status(){ python3 - "$S" "$@" <<'PYS'
+import json, os, sys, time
+path, key, st, msg = sys.argv[1:5]
+pct = sys.argv[5] if len(sys.argv) > 5 else ""
+try:
+    d = json.load(open(path))
+    if not isinstance(d, dict):
+        d = {}
+except Exception:
+    d = {}
+row = {"state": st, "msg": msg, "t": int(time.time())}
+if pct.isdigit():
+    row["pct"] = int(pct)
+d[key] = row
+tmp = path + ".tmp"
+with open(tmp, "w") as fh:
+    json.dump(d, fh)
+os.replace(tmp, path)
+PYS
+}
+
+# prune <dataset> <regex for the snapshot name>: keep the newest five of the
+# snapshots this worker took, destroy the rest. Without it every update left a
+# rollback point behind for ever - 127 of them on the box this was built on.
+# Only names this script creates can match: the regex is anchored on both ends.
+prune(){
+  zfs list -H -t snapshot -o name -s creation -d 1 "$1" 2>/dev/null \
+    | grep -E "^$1@$2\$" | head -n -5 \
+    | while read -r snap; do zfs destroy -r "$snap" 2>/dev/null; done
+}
+
 # Tailscale substitutes ${TS_CERT_DOMAIN} inside serve.json, but the source
 # file retains the template. Resolve the node's real DNS name from the running
 # Tailscale container so Dashy can build clickable tailnet URLs automatically.
@@ -45,15 +84,7 @@ if re.match(r"^[a-z0-9][a-z0-9.-]*\.ts\.net$",name): print(name)
 if [ -f "$Q/_serve.req" ]; then
   REQ=$(cat "$Q/_serve.req" 2>/dev/null)
   rm -f "$Q/_serve.req"
-  snote(){ python3 - "$1" "$2" "$S" <<'PYS'
-import json,sys,time
-st,msg,path=sys.argv[1],sys.argv[2],sys.argv[3]
-try: d=json.load(open(path))
-except Exception: d={}
-d["_serve"]={"state":st,"msg":msg,"t":int(time.time())}
-json.dump(d,open(path,"w"))
-PYS
-  }
+  snote(){ status _serve "$1" "$2"; }
   snote running "setting up Tailscale Serve"
   # The app sends a list of local ports it has actually discovered. Validate
   # it here too: the queue is a file, and a file is not an argument list.
@@ -131,15 +162,7 @@ fi
 if [ -f "$Q/_vm.req" ]; then
   VMREQ=$(cat "$Q/_vm.req" 2>/dev/null)
   rm -f "$Q/_vm.req"
-  vnote(){ python3 - "$1" "$2" "$S" <<'PYV'
-import json,sys,time
-st,msg,path=sys.argv[1],sys.argv[2],sys.argv[3]
-try: d=json.load(open(path))
-except Exception: d={}
-d["_vm"]={"state":st,"msg":msg,"t":int(time.time())}
-json.dump(d,open(path,"w"))
-PYV
-  }
+  vnote(){ status _vm "$1" "$2"; }
   PARSED=$(printf '%s' "$VMREQ" | python3 -c "
 import json,sys
 try: r=json.load(sys.stdin)
@@ -205,18 +228,7 @@ if [ -f "$Q/_self.req" ]; then
   REPO="${UPDATE_REPO:-Boldestfutura/dashy}"
   BRANCH="${UPDATE_BRANCH:-main}"
   BASEURL="https://raw.githubusercontent.com/$REPO/$BRANCH/app"
-  note(){ python3 - "$1" "$2" "$S" "${3:-}" <<'PYN'
-import json,sys,time
-st,msg,path=sys.argv[1],sys.argv[2],sys.argv[3]
-pct=sys.argv[4] if len(sys.argv)>4 else ""
-try: d=json.load(open(path))
-except Exception: d={}
-row={"state":st,"msg":msg,"t":int(time.time())}
-if pct.isdigit(): row["pct"]=int(pct)
-d["_self"]=row
-json.dump(d,open(path,"w"))
-PYN
-  }
+  note(){ status _self "$1" "$2" "${3:-}"; }
 
   # Dashy is a published image, so an update is a pull. There used to be a
   # second path for a bind-mounted file install, which meant two ways to update
@@ -238,7 +250,8 @@ print(svc.get('image') or '')" 2>/dev/null)
       stamp=$(date +%Y%m%d-%H%M%S)
       ds=${BASE#/mnt/}
       zfs list -H -o name "$ds" >/dev/null 2>&1 && \
-        zfs snapshot -r "$ds@preupdate-$stamp" 2>/dev/null
+        zfs snapshot -r "$ds@preupdate-$stamp" 2>/dev/null && \
+        prune "$ds" 'preupdate-[0-9]{8}-[0-9]{6}'
       note running "pulling the new image" 10
       # midclt -j prints its own progress; read it as it goes and publish the
       # percentage, so the dashboard can say how far along it is rather than
@@ -300,29 +313,20 @@ for f in "$Q"/*.req; do
   # record "no such app" against a key the dashboard reads as a failed update,
   # which then hides the real one.
   case "$app" in _*) continue ;; esac
+  # TrueNAS's own rule for an app name. The queue is a directory the container
+  # can write to, so a file name is checked before it goes anywhere near the
+  # JSON filter or midclt below.
+  case "$app" in
+    ""|*[!a-z0-9-]*|-*) continue ;;
+  esac
 
   # only ever act on an app that actually exists
   known=$(midclt call app.query "[[\"name\",\"=\",\"$app\"]]" 2>/dev/null | head -c 20)
   case "$known" in
-    "[]"|"") python3 - "$app" "$S" <<'PY'
-import json,sys,time
-app,path=sys.argv[1],sys.argv[2]
-try: d=json.load(open(path))
-except Exception: d={}
-d[app]={"state":"failed","msg":"no such app","t":int(time.time())}
-json.dump(d,open(path,"w"))
-PY
-      continue ;;
+    "[]"|"") status "$app" failed "no such app"; continue ;;
   esac
 
-  python3 - "$app" "$S" "running" "upgrading" <<'PY'
-import json,sys,time
-app,path,st,msg=sys.argv[1:5]
-try: d=json.load(open(path))
-except Exception: d={}
-d[app]={"state":st,"msg":msg,"t":int(time.time())}
-json.dump(d,open(path,"w"))
-PY
+  status "$app" running "upgrading"
 
   # rollback point for the app's own data before the upgrade touches it
   stamp=$(date +%Y%m%d-%H%M%S)
@@ -334,7 +338,8 @@ PY
   for ds in "$apps_ds/$app" $ixcfg; do
     [ -n "$ds" ] || continue
     zfs list -H -o name "$ds" >/dev/null 2>&1 && \
-      zfs snapshot -r "$ds@preupgrade-$app-$stamp" 2>/dev/null
+      zfs snapshot -r "$ds@preupgrade-$app-$stamp" 2>/dev/null && \
+      prune "$ds" "preupgrade-$app-[0-9]{8}-[0-9]{6}"
   done
 
   if midclt call -j app.upgrade "$app" >/dev/null 2>&1; then
@@ -342,12 +347,5 @@ PY
   else
     res=failed; msg="upgrade failed"
   fi
-  python3 - "$app" "$S" "$res" "$msg" <<'PY'
-import json,sys,time
-app,path,st,msg=sys.argv[1:5]
-try: d=json.load(open(path))
-except Exception: d={}
-d[app]={"state":st,"msg":msg,"t":int(time.time())}
-json.dump(d,open(path,"w"))
-PY
+  status "$app" "$res" "$msg"
 done

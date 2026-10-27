@@ -11,7 +11,8 @@ screenshot of a real machine.
 ## Shipping a change
 
 1. Bump `APP_VERSION` at the top of `app/server.py`. Use minor for features, patch for
-   fixes. The project is still 0.x (beta).
+   fixes. 1.0.0 shipped on 2026-10-27 after a full audit; a breaking change to prefs,
+   the data files or the queue format would be 2.0.
 2. Test locally against real data (see below), in light and dark, at desktop and phone
    width.
 3. Commit as `Boldestfutura <102939353+Boldestfutura@users.noreply.github.com>`, then push
@@ -58,7 +59,24 @@ CDP and click things; a screenshot alone has missed real bugs here.
   never colour alone. Accents stay in the blue-to-stone range: Dusk (the default),
   Harbour, Heather and Granite.
 
-## Current design (0.23.0)
+## Things that must stay true (1.0 audit)
+
+- **Health is one set of rules.** `healthRows` judges everything; `severity` and
+  `headline` derive from it, and `rowsSystem` lists the same problems. Add a new check
+  to `healthRows`, never to the card alone. Updates are not faults.
+- **Frozen data must look frozen.** `paintStale` flags lost contact after 12s without a
+  good poll; `pools.stamp` is written only after `zpool list` succeeds, and the page
+  calls the collector stale after 180s.
+- **Every POST is refused unless it is same-site JSON** (`_json_body`). The page must
+  send `Content-Type: application/json` on every POST, even an empty one.
+- **Both cron scripts hold a `flock`**, and anything that can hang (`smartctl`, `zpool`,
+  `midclt`) runs under `timeout`. The worker writes status only through `status()`,
+  which renames into place.
+- The worker prunes its own `preupdate-`/`preupgrade-<app>-` snapshots to the newest
+  five, matched by an anchored regex. Never widen that match.
+- Escape anything from the NAS (`esc`) before it goes into markup.
+
+## Current design (1.0.0)
 
 - Every tile, home and settings, has a `--panel` fill, a 1px `--brd` outline and
   `--tile-shadow`. Shape scale: cards 16px, app tiles 12px.
