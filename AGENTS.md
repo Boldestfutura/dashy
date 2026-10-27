@@ -93,5 +93,12 @@ CDP and click things; a screenshot alone has missed real bugs here.
   1x, laid out like CPU temp, and an animated donut at 2x (`paintMemDonut`, SVG with
   circumference 100).
 - In arrange mode the overlay covering each tile carries the tile's name (`.ctname`).
+- App tiles are all one size: `.appgrid` uses `grid-auto-rows:1fr` and the name and version
+  never wrap. A long version once made Plex's row taller and dropped its neighbours' text.
+  The tile shows `niceVer()` ("Version 1.43.5", "Custom app"); the raw `human_version` stays
+  in the tooltip and the app sheet.
+- TrueNAS does not record a VM's guest OS. `vmOS()` guesses it from the name, description and
+  install ISO / disk names (`media` in vms.json) and puts that OS's logo on the card (`VM_OS`,
+  Simple Icons paths, inline). No match keeps the generic monitor icon.
 - Settings, System, App updates is one button. It checks; if a version is waiting it
   becomes "Update to x" and opens the install sheet.

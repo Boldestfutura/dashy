@@ -161,6 +161,7 @@ for a in apps:
                 'desc':desc[:90],
                 'ports':sorted(p for p in ports if p),
                 'version':a.get('human_version'),
+                'custom':bool(a.get('custom_app')),
                 'icon':md.get('icon') or md.get('icon_url') or '',
                 # TrueNAS's own answer to 'what URL opens this app', path included
                 'portals':a.get('portals') or {},
@@ -463,6 +464,13 @@ for v in vms if isinstance(vms, list) else []:
         "memory": v.get("memory"),
         "autostart": bool(v.get("autostart")),
         "devices": kinds,
+        # TrueNAS keeps no record of the guest OS. The install ISO and disk
+        # names ('haos_ova-16.2.qcow2', 'ubuntu-24.04-live-server.iso') are
+        # the best hint there is, so the page can put a logo on the card.
+        "media": sorted({os.path.basename(str((d.get("attributes") or {}).get("path") or ""))
+                         for d in devs
+                         if (d.get("dtype") or (d.get("attributes") or {}).get("dtype"))
+                         in ("CDROM", "DISK", "RAW")} - {""}),
         "usb": [usb_label(d.get("attributes") or {})
                 for d in devs
                 if (d.get("dtype") or (d.get("attributes") or {}).get("dtype")) == "USB"],
