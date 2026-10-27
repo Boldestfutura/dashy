@@ -88,7 +88,10 @@ CDP and click things; a screenshot alone has missed real bugs here.
 
 - Every tile, home and settings, has a `--panel` fill, a 1px `--brd` outline and
   `--tile-shadow`. Shape scale: cards 16px, app tiles 12px.
-- The health tile has a two-column checklist (`healthRows`) at 2x/4x sizes. The memory tile
-  has an animated donut (`paintMemDonut`, SVG with circumference 100).
+- Two sizes only, 1x and 2x (4x was removed in 1.1.2; a stored 4 loads as 2). The health
+  tile has a two-column checklist (`healthRows`) at 2x. The memory tile is a sparkline at
+  1x, laid out like CPU temp, and an animated donut at 2x (`paintMemDonut`, SVG with
+  circumference 100).
+- In arrange mode the overlay covering each tile carries the tile's name (`.ctname`).
 - Settings, System, App updates is one button. It checks; if a version is waiting it
   becomes "Update to x" and opens the install sheet.

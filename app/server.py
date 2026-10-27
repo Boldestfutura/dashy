@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -875,7 +875,7 @@ def _clean_prefs(d):
             except (TypeError, ValueError):
                 continue
             if n in (2, 4):
-                clean[k] = n
+                clean[k] = 2         # 4x is retired; keep the card big, not normal
         out["size"] = clean
 
     # Per-app launch URL overrides, kept separately for LAN and tailnet.
@@ -1441,8 +1441,11 @@ PAGE = """<!doctype html>
             -webkit-user-select:none;user-select:none;
             -webkit-touch-callout:none}
   .cardwrap .card{width:100%}
-  .cardtools{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
-             gap:7px;background:color-mix(in srgb,var(--panel) 97%,transparent);
+  /* the overlay covers the card, so it carries the card's name: without it a
+     page of identical size buttons left you guessing which tile was which */
+  .cardtools{position:absolute;inset:0;display:none;flex-direction:column;
+             align-items:center;justify-content:center;
+             gap:8px;background:color-mix(in srgb,var(--panel) 97%,transparent);
              border-radius:var(--r-md);z-index:3}
   body.editing .cardtools{display:flex}
   .cardtools button{width:30px;height:30px;border-radius:9px;border:1px solid var(--brd);
@@ -1451,6 +1454,8 @@ PAGE = """<!doctype html>
                     padding:0}
   .cardtools button:disabled{opacity:.3;cursor:default}
   .cardtools .wbtn{font-size:11px;font-weight:700;letter-spacing:-.02em}
+  .ctname{font-size:13px;font-weight:650;color:var(--ink);max-width:88%;text-align:center;
+          overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   /* The corner badge you get on a phone home screen: a white disc with a dark
      glyph, hanging off the top-left corner. x removes a tile, + puts a removed
      one back. It sits above the tools overlay, which covers the whole card. */
@@ -1495,15 +1500,8 @@ PAGE = """<!doctype html>
 
   /* a wide tile spans two columns; at phone width that is the full row */
   .cardwrap[data-w="2"]{grid-column:span 2}
-  /* and a big one spans two of each - four cells, hence 4x */
-  .cardwrap[data-w="4"]{grid-column:span 2;grid-row:span 2}
-  .cardwrap[data-w="4"] .jig,
-  .cardwrap[data-w="4"] .card{min-height:100%}
   .spark{margin-top:0;height:20px;width:100%;display:block;overflow:visible}
   .cardwrap[data-w="2"] .spark{height:40px}
-  /* the container has a fixed height, so a taller chart drew straight out
-     through the bottom of the card. Give it the room it is asking for. */
-  .cardwrap[data-w="4"] .spark{margin-top:14px;height:132px}
   /* Inset enough to clear the card's corner radius: drawn flush, the curve
      gets clipped at both ends and reads as a rendering fault. */
   .card .sparkwrap{margin-top:auto;padding-top:10px;padding-bottom:3px;
@@ -1614,9 +1612,9 @@ PAGE = """<!doctype html>
      colour alone. Too cramped at 1x, so it starts at 2x, where it replaces
      "everything else normal". */
   .hlist{display:none}
-  .cardwrap[data-w="2"] .hlist,.cardwrap[data-w="4"] .hlist{
+  .cardwrap[data-w="2"] .hlist{
     display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px 14px;margin-top:12px}
-  .cardwrap[data-w="2"] #s-health,.cardwrap[data-w="4"] #s-health{display:none}
+  .cardwrap[data-w="2"] #s-health{display:none}
   .hrow{display:flex;align-items:center;gap:7px;min-width:0;font-size:11.5px;text-align:left}
   .hrow b{font-weight:650;color:var(--ink);flex:0 0 auto}
   .hrow span{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1899,23 +1897,21 @@ PAGE = """<!doctype html>
   :root{--mem-cache:color-mix(in srgb,var(--accent) 60%,var(--panel))}
   .memrow{display:flex;align-items:center;gap:12px;flex:1}
   .memtxt{flex:1;min-width:0}
-  /* 2x reads like the other double tiles: words at the top, a trend line along
-     the bottom. The donut stays on the 1x and 4x cards, where it has the room. */
-  .memspark{display:none}
-  .cardwrap[data-w="2"] .memspark{display:block}
-  .cardwrap[data-w="2"] .donut{display:none}
-  .cardwrap[data-w="2"] .memrow{align-items:flex-start;flex:0 0 auto}
+  /* 1x reads like CPU temp beside it: the figures at the top, a trend line
+     along the bottom. The donut needs the room a 2x card gives it. */
+  .cardwrap[data-w="1"] .donut{display:none}
+  .cardwrap[data-w="1"] .memrow{align-items:flex-start;flex:0 0 auto}
+  .cardwrap[data-w="2"] .memspark{display:none}
   .donut{flex:0 0 auto;width:50px;height:50px;transform:rotate(-90deg);overflow:visible}
   .cardwrap[data-w="2"] .donut{width:104px;height:104px}
-  .cardwrap[data-w="4"] .donut{width:150px;height:150px}
-  .donut circle{fill:none;stroke-width:7;stroke-dasharray:0 100;
+  .donut circle{fill:none;stroke-width:6;stroke-dasharray:0 100;
     transition:stroke-dasharray .7s cubic-bezier(.4,0,.2,1),
                stroke-dashoffset .7s cubic-bezier(.4,0,.2,1)}
   .donut .apps{stroke:var(--accent)}
   .donut .cache{stroke:var(--mem-cache)}
   .donut .free{stroke:var(--faint)}
   .mleg{display:none}
-  .cardwrap[data-w="2"] .mleg,.cardwrap[data-w="4"] .mleg{display:grid;gap:4px;margin-top:12px;
+  .cardwrap[data-w="2"] .mleg{display:grid;gap:4px;margin-top:12px;
     font-size:11.5px;color:var(--muted);max-width:190px}
   .mleg span{display:flex;align-items:center;gap:7px}
   .mleg u{width:8px;height:8px;border-radius:3px;flex:0 0 auto}
@@ -2647,7 +2643,9 @@ function setEditing(on){
   if(!on) savePrefs();
 }
 // Sizes a card can be, in the order the button walks through them.
-const SIZES=[1,2,4];
+// 4x (two by two) was removed in 1.1.2: nobody used it. A card saved at 4x
+// comes back as 2x rather than dropping to normal.
+const SIZES=[1,2];
 function sizeOf(k){ const n=prefs.size[k]; return SIZES.indexOf(n)>=0 ? n : 1; }
 function nextSize(k){ return SIZES[(SIZES.indexOf(sizeOf(k))+1) % SIZES.length]; }
 
@@ -2655,7 +2653,7 @@ function cleanSize(o){
   const out={};
   for(const k in o){
     if(!knownKey(k)) continue;
-    const n=Number(o[k]);
+    const n=Number(o[k])===4 ? 2 : Number(o[k]);
     if(SIZES.indexOf(n)>=0 && n!==1) out[k]=n;
   }
   return out;
@@ -2711,8 +2709,9 @@ function resetLayout(){
   savePrefs(); build(); if(data) paint(data);
 }
 
-function cardTools(k){
+function cardTools(k, label){
   return '<div class="cardtools">'+
+      '<span class="ctname">'+(label||'')+'</span>'+
       '<button type="button" class="wbtn" data-wide="'+k+'" aria-label="Change size"></button>'+
     '</div>'+
     '<button type="button" class="xbtn" data-eye="'+k+'" aria-label="Remove"></button>';
@@ -2728,7 +2727,7 @@ function cardHTML(c){
                '<p class="sub" id="s-health"></p>'+
                '<div class="hlist" id="l-health"></div>'+
                '<p class="hfoot" id="f-health"></p>'+
-             '</button>'+cardTools(c.k)+
+             '</button>'+cardTools(c.k, c.label)+
            '</div></div>';
   }
   const head = c.dot
@@ -2740,7 +2739,7 @@ function cardHTML(c){
   const spark = (c.trend || c.k==='mem')
     ? '<div class="sparkwrap'+(c.k==='mem'?' memspark':'')+'"><svg class="spark" id="k-'+c.k+
       '" preserveAspectRatio="none" viewBox="0 0 160 20"></svg></div>' : '';
-  const tools=cardTools(c.k);
+  const tools=cardTools(c.k, c.label);
   return '<div class="cardwrap" data-k="'+c.k+'">'+
            '<div class="jig">'+
              '<button class="card" data-pop="'+(c.pop||c.k)+'">'+
@@ -2931,7 +2930,7 @@ function drawSparks(d){
     const w=wrap ? wrap.dataset.w : '1';
     const [rows, colour, cap]=SPARKS[k](d);
     // every card that has history shows it; the bigger sizes just get more room
-    const h = w==='4' ? 112 : (w==='2' ? 40 : 20);
+    const h = w==='2' ? 40 : 20;
     // the viewBox is written into the markup, so it has to follow the height
     // or the path simply draws out through the bottom of the card
     el.setAttribute('viewBox', '0 0 300 '+h);

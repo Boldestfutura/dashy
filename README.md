@@ -40,8 +40,8 @@ add and remove things.
 - **Grouped by what it is.** System, Storage, Apps and Virtual machines, each under its own
   heading, with a Health card that leads and says in words whether anything
   needs you. A pool gets its own card rather than one aggregate number.
-- **Make it yours.** Hold a tile to resize or remove it: normal, double width
-  with a sparkline, or 4x — two by two, with a full-height chart. Light, dark
+- **Make it yours.** Hold a tile to resize or remove it: normal, or double
+  width with a sparkline. Light, dark
   or system theme and a choice of four accent colours.
   **Layout and theme are stored on the server**, so they follow you to every
   device and apply within seconds without a refresh.
