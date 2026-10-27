@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "0.21.0"
+APP_VERSION = "0.22.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1801,6 +1801,28 @@ PAGE = """<!doctype html>
   .optbox .none{font-size:12px;color:var(--muted);padding:2px 0 6px}
 
 
+  /* Memory donut: apps / ZFS cache / free, the split TrueNAS's own gauge
+     uses. Cache is the accent mixed 60% into the card - checked against both
+     themes, 40% read as grey. Every segment eases to its new size each poll. */
+  :root{--mem-cache:color-mix(in srgb,var(--accent) 60%,var(--panel))}
+  .memrow{display:flex;align-items:center;gap:12px;flex:1}
+  .memtxt{flex:1;min-width:0}
+  .donut{flex:0 0 auto;width:50px;height:50px;transform:rotate(-90deg);overflow:visible}
+  .cardwrap[data-w="2"] .donut{width:104px;height:104px}
+  .cardwrap[data-w="4"] .donut{width:150px;height:150px}
+  .donut circle{fill:none;stroke-width:5;stroke-dasharray:0 100;
+    transition:stroke-dasharray .7s cubic-bezier(.4,0,.2,1),
+               stroke-dashoffset .7s cubic-bezier(.4,0,.2,1)}
+  .donut .apps{stroke:var(--accent)}
+  .donut .cache{stroke:var(--mem-cache)}
+  .donut .free{stroke:var(--faint)}
+  .mleg{display:none}
+  .cardwrap[data-w="2"] .mleg,.cardwrap[data-w="4"] .mleg{display:grid;gap:4px;margin-top:12px;
+    font-size:11.5px;color:var(--muted);max-width:190px}
+  .mleg span{display:flex;align-items:center;gap:7px}
+  .mleg u{width:8px;height:8px;border-radius:3px;flex:0 0 auto}
+  .mleg b{margin-left:auto;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+  @media (prefers-reduced-motion:reduce){ .donut circle{transition:none} }
   .stackbar{display:flex;height:16px;border-radius:999px;overflow:hidden;margin:10px 16px 10px;
             background:var(--faint)}
   .stackbar i{display:block;height:100%}
@@ -2603,7 +2625,7 @@ function cardHTML(c){
         '<p class="big" id="v-'+c.k+'">\u2013</p></div>'+
       '<p class="sub" id="s-'+c.k+'"></p>'
     : '<p class="big" id="v-'+c.k+'">\u2013</p><p class="sub" id="s-'+c.k+'"></p>';
-  const body = head;
+  const body = c.k==='mem' ? memBody(head) : head;
   const spark = c.trend
     ? '<div class="sparkwrap"><svg class="spark" id="k-'+c.k+
       '" preserveAspectRatio="none" viewBox="0 0 160 20"></svg></div>' : '';
@@ -2615,6 +2637,35 @@ function cardHTML(c){
              '</button>'+tools+
            '</div>'+
          '</div>';
+}
+
+function memBody(head){
+  const seg=k=>'<circle class="'+k+'" id="d-'+k+'" cx="18" cy="18" r="15.915"><title></title></circle>';
+  const leg=(k,name)=>'<span><u style="background:var(--'+
+    (k==='apps'?'accent':k==='cache'?'mem-cache':'faint')+')"></u>'+name+'<b id="lm-'+k+'"></b></span>';
+  return '<div class="memrow"><div class="memtxt">'+head+
+           '<div class="mleg">'+leg('apps','Apps')+leg('cache','ZFS cache')+leg('free','Free')+'</div>'+
+         '</div><svg class="donut" viewBox="0 0 36 36" aria-hidden="true">'+
+           seg('apps')+seg('cache')+seg('free')+'</svg></div>';
+}
+
+/* Circumference is 100, so a share of memory is a dash length directly. Each
+   segment is shortened by G to leave a gap of card surface between them. */
+function paintMemDonut(m){
+  const apps=(m.apps!==undefined)?m.apps:m.used, arc=m.arc||0;
+  const free=Math.max(0, m.total-apps-arc), G=1.6;
+  let at=0;
+  [['apps',apps,'Apps'],['cache',arc,'ZFS cache'],['free',free,'Free']].forEach(([k,v,name])=>{
+    const len=v/m.total*100, c=$('d-'+k), b=$('lm-'+k);
+    if(c){
+      const dash=Math.max(0, len-G);
+      c.style.strokeDasharray=dash.toFixed(2)+' '+(100-dash).toFixed(2);
+      c.style.strokeDashoffset=(-(at+G/2)).toFixed(2);
+      c.firstChild.textContent=name+' '+ram(v);
+    }
+    if(b) b.textContent=ram(v);
+    at+=len;
+  });
 }
 
 /* The pools are not known until the first poll, so the Storage section is
@@ -2832,8 +2883,10 @@ function paint(d){
   if(d.mem){
     const p=(d.mem.apps_pct!==undefined)?d.mem.apps_pct:d.mem.pct;
     $('v-mem').innerHTML=p.toFixed(0)+'<small>%</small>';
-    $('s-mem').textContent=ram(d.mem.apps!==undefined?d.mem.apps:d.mem.used)+' of '+ram(d.mem.total)
-      +(d.mem.arc?' \\u00b7 '+ram(d.mem.arc)+' cache':'');
+    // the cache is in the donut (and its legend at the bigger sizes), so this
+    // line stays short enough to sit beside the donut on the smallest card
+    $('s-mem').textContent=ram(d.mem.apps!==undefined?d.mem.apps:d.mem.used)+' of '+ram(d.mem.total);
+    paintMemDonut(d.mem);
   }
 
   if(d.cpu_temp!==null && d.cpu_temp!==undefined){
@@ -3176,11 +3229,11 @@ function memBreakdown(){
   const free=Math.max(0, m.total-apps-arc), pc=n=>(n/m.total*100);
   return '<div class="stackbar">'+
       '<i style="width:'+pc(apps)+'%;background:var(--accent)"></i>'+
-      '<i style="width:'+pc(arc)+'%;background:var(--brand)"></i>'+
+      '<i style="width:'+pc(arc)+'%;background:var(--mem-cache)"></i>'+
       '<i style="width:'+pc(free)+'%;background:transparent"></i></div>'+
     '<div class="legend">'+
       '<span><u style="background:var(--accent)"></u>Apps '+ram(apps)+'</span>'+
-      '<span><u style="background:var(--brand)"></u>ZFS cache '+ram(arc)+'</span>'+
+      '<span><u style="background:var(--mem-cache)"></u>ZFS cache '+ram(arc)+'</span>'+
       '<span><u style="background:var(--faint)"></u>Free '+ram(free)+'</span></div>'+
     '<div class="row"><span class="l"><span class="t1">Installed</span></span>'+
       '<span class="val">'+ram(m.total)+'</span></div>'+
@@ -3602,7 +3655,7 @@ function ioChart(){
 }
 function memChart(){
   return chart(data.mem_hist||[],
-    [{key:1,colour:'var(--accent)',label:'apps'},{key:2,colour:'var(--brand)',label:'ZFS cache'}], ram);
+    [{key:1,colour:'var(--accent)',label:'apps'},{key:2,colour:'var(--mem-cache)',label:'ZFS cache'}], ram);
 }
 function powerChart(){
   return chart(data.power_hist||[],
