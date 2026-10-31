@@ -28,6 +28,11 @@ add and remove things.
   configure. Every app on the NAS gets a tile, with its real icon, version and
   status. If you use Tailscale Serve, the apps you publish get their tailnet
   address; everything else is linked on your LAN. Hide what you do not want.
+- **Live tiles.** While Plex is playing, its tile widens to show the artwork,
+  the title, Direct Play / Direct Stream / Transcode with the bitrate, and how
+  far through it is; its sheet lists every stream. Plex's token is read on the
+  NAS by the root cron job into a file only Dashy can read, and never reaches
+  the browser. A Scrutiny tile widens into a bar chart of drive temperatures.
 - **Updates from the dashboard.** Apps with an update show a marker; tapping it
   queues the upgrade and a recursive ZFS snapshot is taken first; the newest
   five per app are kept. Dashy updates itself the same way, from the image CI

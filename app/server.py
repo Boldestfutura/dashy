@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -614,6 +614,103 @@ def request_vm(vm_id, action):
     return True, "queued"
 
 
+# --- live tiles ------------------------------------------------------------
+# Plex's address and token are left by the root cron job in plex.json (root:apps
+# 0640). The token stays in this process: the page gets titles and timings, and
+# artwork comes through /api/plex/art, never straight from Plex.
+_plex_cache = {"at": 0.0, "val": None}
+_plex_art = {}
+
+
+def _plex_cfg():
+    cfg = _read_json("plex.json", {})
+    return cfg if cfg.get("token") and cfg.get("port") else None
+
+
+def _plex_get(cfg, path, accept="application/json", timeout=3):
+    req = urllib.request.Request("http://%s:%d%s" % (HOST_IP, int(cfg["port"]), path),
+                                 headers={"X-Plex-Token": cfg["token"], "Accept": accept})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def _plex_session(m):
+    media = (m.get("Media") or [{}])[0]
+    ts = m.get("TranscodeSession")
+    if not ts:
+        how = "Direct Play"
+    elif ts.get("videoDecision", "copy") == "copy" and ts.get("audioDecision", "copy") == "copy":
+        how = "Direct Stream"           # streams copied as-is, only the container repackaged
+    else:
+        how = "Transcode (hw)" if ts.get("transcodeHwFullPipeline") or ts.get("transcodeHwEncoding") \
+            else "Transcode"
+    kind = m.get("type")
+    if kind == "episode":
+        title = m.get("grandparentTitle") or m.get("title")
+        sub = "S%02dE%02d" % (int(m.get("parentIndex") or 0), int(m.get("index") or 0))
+        art = m.get("grandparentArt") or m.get("art")
+    elif kind == "track":
+        title = m.get("title")
+        sub = " \u00b7 ".join(x for x in (m.get("grandparentTitle"), m.get("parentTitle")) if x)
+        art = m.get("parentThumb") or m.get("thumb")
+    else:
+        title = m.get("title")
+        sub = str(m.get("year") or "")
+        art = m.get("art") or m.get("thumb")
+    kbps = (m.get("Session") or {}).get("bandwidth") or media.get("bitrate") or 0
+    player = m.get("Player") or {}
+    return {"id": str(m.get("sessionKey") or ""), "kind": kind, "title": title or "",
+            "sub": sub, "ep": m.get("title") if kind == "episode" else "",
+            "art": art if isinstance(art, str) and re.match(r"^/library/metadata/\d+/(art|thumb)/\d+$", art) else "",
+            "state": player.get("state") or "playing",
+            "offset": int(m.get("viewOffset") or 0), "duration": int(m.get("duration") or 0),
+            "how": how, "mbps": round(kbps / 1000.0, 1) if kbps else None,
+            "res": media.get("videoResolution") or "",
+            "user": (m.get("User") or {}).get("title") or "",
+            "player": player.get("title") or player.get("product") or "",
+            "local": bool(player.get("local"))}
+
+
+def plex_live():
+    """What Plex is playing, or None when there is no Plex to ask."""
+    cfg = _plex_cfg()
+    if not cfg:
+        return None
+    now = time.time()
+    with _lock:
+        if now - _plex_cache["at"] < 3:
+            return _plex_cache["val"]
+    try:
+        mc = json.loads(_plex_get(cfg, "/status/sessions")).get("MediaContainer") or {}
+        val = {"app": cfg.get("app") or "plex", "at": now,
+               "sessions": [_plex_session(m) for m in mc.get("Metadata") or []]}
+    except (OSError, ValueError, urllib.error.URLError):
+        val = {"app": cfg.get("app") or "plex", "at": now, "sessions": [], "error": True}
+    with _lock:
+        _plex_cache.update(at=now, val=val)
+    return val
+
+
+def plex_art(path):
+    """Artwork for a now-playing tile, resized by Plex and cached here."""
+    if not re.match(r"^/library/metadata/\d+/(art|thumb)/\d+$", path or ""):
+        return None
+    if path in _plex_art:
+        return _plex_art[path]
+    cfg = _plex_cfg()
+    if not cfg:
+        return None
+    q = urllib.parse.urlencode({"width": 640, "height": 360, "minSize": 1, "upscale": 1, "url": path})
+    try:
+        blob = _plex_get(cfg, "/photo/:/transcode?" + q, accept="image/jpeg", timeout=5)
+    except (OSError, urllib.error.URLError):
+        return None
+    if len(_plex_art) > 24:
+        _plex_art.clear()
+    _plex_art[path] = blob
+    return blob
+
+
 def pool_status():
     """Scrub state and error counters, which zpool list does not carry."""
     return _read_json("poolstatus.json", {})
@@ -1187,6 +1284,7 @@ def snapshot():
     out["procs"] = procs_now()
     out["poolstatus"] = pool_status()
     out["vms"] = vms_now()
+    out["live"] = {"plex": plex_live()}
     out["links"] = header_links(svc, (out["prefs"] or {}).get("setup"))
     return out
 
@@ -1845,6 +1943,45 @@ PAGE = """<!doctype html>
     .apptile .upd{right:3px}
     .apptile .pin{right:20px}
   }
+  /* live tiles: twice as wide and twice as tall, and the grid packs around them */
+  .appgrid{grid-auto-flow:row dense}
+  .apptile.wide{grid-column:span 2;grid-row:span 2;overflow:hidden;
+                grid-template-columns:36px minmax(0,.8fr) minmax(0,2fr);grid-template-rows:1fr auto auto;
+                align-content:stretch;padding:12px 14px 12px 12px;column-gap:12px}
+  .apptile.wide .aico{grid-row:1;grid-column:1;align-self:start}
+  .apptile.wide .an{grid-row:2;grid-column:1/3;align-self:end}
+  .apptile.wide .ap{grid-row:3;grid-column:1/3}
+  .apptile.wide .sdot{top:14px}
+  .apptile.wide .upd{top:8px}
+  .apptile.wide .ust{top:9px}
+  .apptile .live{grid-column:3;grid-row:1/4;display:flex;flex-direction:column;justify-content:flex-end;
+                 gap:3px;min-width:0;padding-right:4px}
+  .live .lk{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .live .lt{font-size:14px;font-weight:600;line-height:1.25;overflow:hidden;
+            display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+  .live .lbar{display:block;height:4px;border-radius:2px;margin:5px 0 3px;overflow:hidden;
+              background:color-mix(in srgb,var(--ink) 14%,transparent)}
+  .live .lbar i{display:block;height:100%;width:0;border-radius:2px;background:var(--accent);transition:width 1s linear}
+  .live .lm{display:flex;justify-content:space-between;gap:8px;font-size:11.5px;color:var(--muted);
+            font-variant-numeric:tabular-nums;white-space:nowrap}
+  .live .lm span:first-child{overflow:hidden;text-overflow:ellipsis}
+  /* the artwork sits behind, faded into the tile so the text reads in either theme */
+  .apptile.plexing{background:
+      linear-gradient(90deg,var(--panel) 22%,color-mix(in srgb,var(--panel) 74%,transparent) 52%,
+                      color-mix(in srgb,var(--panel) 50%,transparent)),
+      var(--art,none) center/cover no-repeat,var(--panel)}
+  @media (max-width: 520px){
+    .apptile.wide{grid-template-columns:36px minmax(0,.5fr) minmax(0,2.5fr)}
+  }
+  .live .bars{display:flex;align-items:flex-end;gap:6px;height:76px;margin-top:2px}
+  .live .b{flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;justify-content:flex-end}
+  .live .b em{font-style:normal;font-size:10px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .live .b i{display:block;width:100%;max-width:20px;border-radius:5px;margin-top:2px;
+             background:color-mix(in srgb,var(--ok) 75%,var(--panel))}
+  .live .b i[data-level="warn"]{background:var(--warn)}
+  .live .b i[data-level="bad"]{background:var(--bad)}
+  .live .b u{text-decoration:none;font-size:10px;color:var(--muted);margin-top:3px;
+             max-width:100%;overflow:hidden;text-overflow:clip;white-space:nowrap}
   .uprog{display:none;height:3px;border-radius:2px;overflow:hidden;
          background:color-mix(in srgb,var(--accent) 18%,transparent)}
   .uprog i{display:block;height:100%;width:0;border-radius:2px;background:var(--accent);
@@ -1911,6 +2048,8 @@ PAGE = """<!doctype html>
   .urow .uv{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
             text-decoration:none;color:var(--ink)}
   .urow .uv.on{color:var(--accent);font-weight:650}
+  .urow.plx{align-items:flex-start}
+  .urow.plx .uv{white-space:normal;line-height:1.45}
   .appacts{position:sticky;bottom:-8px;z-index:3;display:flex;gap:9px;
            margin-top:8px;padding:12px 16px max(12px,env(safe-area-inset-bottom));
            background:var(--panel);border-top:1px solid var(--brd)}
@@ -3163,6 +3302,7 @@ function paint(d){
   $('host').textContent=d.host||'';
   paintHealth(d);
   paintAppStates();
+  paintLive();
   paintBanner();
   drawSparks(d);
   paintLinks(d.links||{});
@@ -3206,6 +3346,102 @@ function paintAppStates(){
     const bar=t.querySelector('.uprog i');
     if(bar) bar.style.width = u.k==='running' ? Math.max(4,u.pct)+'%' : '';
   });
+}
+// ---- live tiles -----------------------------------------------------------
+// Plex's own position only moves when its player reports in, every few seconds,
+// so the clock runs on here between polls and only jumps when the gap is real:
+// a seek, a new episode, or a pause.
+const liveClock={};
+function fmtDur(ms){
+  let s=Math.max(0,Math.floor((ms||0)/1000));
+  const h=Math.floor(s/3600); s-=h*3600; const m=Math.floor(s/60); s-=m*60;
+  const p=n=>String(n).padStart(2,'0');
+  return h ? h+':'+p(m)+':'+p(s) : m+':'+p(s);
+}
+function liveNow(x){
+  const c=liveClock[x.id]; if(!c) return x.offset;
+  const o=c.offset+(x.state==='playing' ? Date.now()-c.at : 0);
+  return Math.min(x.duration||o, o);
+}
+function plexLive(){ return (data&&data.live&&data.live.plex)||null; }
+function plexTile(){
+  const L=plexLive(); if(!L) return null;
+  return document.querySelector('.apptile[data-app="'+CSS.escape(L.app)+'"]');
+}
+function liveBox(t){
+  let b=t.querySelector('.live');
+  if(!b){ b=document.createElement('span'); b.className='live'; t.appendChild(b); }
+  return b;
+}
+function dropLive(t,cls){
+  t.classList.remove('wide',cls); const b=t.querySelector('.live'); if(b) b.remove();
+}
+function paintLive(){
+  const L=plexLive(), t=plexTile();
+  if(L){
+    const seen={};
+    (L.sessions||[]).forEach(x=>{
+      seen[x.id]=1;
+      const c=liveClock[x.id];
+      const guess=c ? c.offset+(c.state==='playing'?Date.now()-c.at:0) : null;
+      if(guess===null || x.state!=='playing' || c.state!=='playing' || Math.abs(x.offset-guess)>15000)
+        liveClock[x.id]={offset:x.offset, at:Date.now(), state:x.state};
+    });
+    Object.keys(liveClock).forEach(k=>{ if(!seen[k]) delete liveClock[k]; });
+  }
+  if(t){
+    const ss=L.sessions||[], x=ss[0];
+    if(!x){ dropLive(t,'plexing'); t.style.removeProperty('--art'); delete t.dataset.art; }
+    else{
+      t.classList.add('wide','plexing');
+      if(t.dataset.art!==x.art){
+        t.dataset.art=x.art;
+        t.style.setProperty('--art', x.art ? 'url("/api/plex/art?p='+encodeURIComponent(x.art)+'")' : 'none');
+      }
+      liveBox(t).innerHTML=
+        '<span class="lk">'+(x.state==='paused'?'Paused':'Now playing')+
+          (ss.length>1?' · '+(ss.length-1)+' more':'')+'</span>'+
+        '<span class="lt">'+esc(x.title)+(x.sub?' · '+esc(x.sub):'')+'</span>'+
+        '<span class="lbar"><i></i></span>'+
+        '<span class="lm"><span>'+esc(x.how)+(x.mbps?' · '+x.mbps+' Mbps':'')+'</span>'+
+          '<span class="ltime"></span></span>';
+      tickLive();
+    }
+  }
+  // drive temperatures, on whichever tile is Scrutiny
+  const st=document.querySelector('.apptile[data-app*="scrutiny"]');
+  if(st){
+    const dr=(data.drives||[]).filter(x=>typeof x.temp==='number');
+    if(!dr.length){ dropLive(st,'temps'); }
+    else{
+      st.classList.add('wide','temps');
+      const lo=25, top=Math.max(55,...dr.map(x=>x.temp));
+      liveBox(st).innerHTML='<span class="lk">Temperatures</span><span class="bars">'+dr.map(x=>{
+        const h=Math.round(8+38*Math.max(0,x.temp-lo)/(top-lo));
+        const nm=String(x.dev||'').replace(/^nvme(\\d+)n\\d+$/,'nv$1');
+        return '<span class="b" title="'+esc(x.dev)+' · '+x.temp+'°C"><em>'+x.temp+'</em>'+
+               '<i data-level="'+esc(x.level||'ok')+'" style="height:'+h+'px"></i><u>'+esc(nm)+'</u></span>';
+      }).join('')+'</span>';
+    }
+  }
+}
+function tickLive(){
+  const L=plexLive(), t=plexTile();
+  if(!L||!t||!(L.sessions||[]).length) return;
+  const x=L.sessions[0], o=liveNow(x);
+  const tm=t.querySelector('.ltime'); if(tm) tm.textContent=fmtDur(o)+' / '+fmtDur(x.duration);
+  const b=t.querySelector('.lbar i'); if(b) b.style.width=(x.duration?Math.min(100,100*o/x.duration):0)+'%';
+}
+setInterval(tickLive,1000);
+// every stream, for the Plex sheet
+function plexRows(s){
+  const L=plexLive();
+  if(!L || L.app!==s.app || !(L.sessions||[]).length) return '';
+  return '<div class="appurls"><div class="lbl">Now playing</div>'+L.sessions.map(x=>
+    '<div class="urow plx"><span class="uk">'+esc(String(x.user||'Someone').split(' ')[0])+'</span><span class="uv">'+
+      esc(x.title)+(x.sub?' · '+esc(x.sub):'')+(x.ep?' · '+esc(x.ep):'')+'<br>'+
+      esc(x.player)+' · '+esc(x.how)+(x.mbps?' · '+x.mbps+' Mbps':'')+
+      (x.res?' · '+esc(x.res):'')+(x.state==='paused'?' · paused':'')+'</span></div>').join('')+'</div>';
 }
 // Dashy's own update ends with its container restarting, so for a few
 // minutes after it a lost connection is expected, not a fault.
@@ -3361,6 +3597,7 @@ function setLinks(mode){
   paintServeOffer();
   if(openKey==='apps') renderPop(false);
   build();
+  if(data) paintLive();
   // choosing the tailnet is also a request to make those addresses exist
   if(mode==='ts' && data && data.detected && data.detected.tailscale) publishAll();
 }
@@ -3984,7 +4221,7 @@ function appSheet(id){
       (s.desc?'<div class="appdesc">'+esc(s.desc)+'</div>':'')+
       '<div class="appstat">'+head+
         '<span class="appver">'+(ver?esc(ver):'')+(newer?' \u2192 '+esc(newer):'')+'</span></div>'+
-      response+cards+urls+'<div id="ap-optbox"></div>'+acts+
+      response+cards+plexRows(s)+urls+'<div id="ap-optbox"></div>'+acts+
     '</div>', sub];
 }
 
@@ -4259,6 +4496,7 @@ function saveAppURL(id){
   savePrefs();
   if(data) paint(data);            // refresh the tiles behind the sheet
   build();                         // prefs.urls is not in layoutSig, so force it
+  if(data) paintLive();
   $('sh-b')._html=null;            // force the open sheet to re-read prefs
   renderPop(false);
 }
@@ -4321,6 +4559,7 @@ document.addEventListener('click',ev=>{
     delete prefs.urls[appUrlId];
     savePrefs(); if(data) paint(data);
     build();
+    if(data) paintLive();
     // the sheet is still open - rebuild it so the pin marker and the listed
     // address go back to auto straight away, not on the next poll
     const box=$('ap-optbox'); if(box){ box._open=false; box.innerHTML=''; }
@@ -4624,6 +4863,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send_appicon(path[len("/appicon/"):])
         elif path in ICONS:
             self._send_icon(ICONS[path])
+        elif path == "/api/plex/art":
+            q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            blob = plex_art((q.get("p") or [""])[0])
+            if blob:
+                self._send(200, blob, "image/jpeg", cache="public, max-age=86400")
+            else:
+                self._send(404, b"", "image/jpeg")
         elif path == "/figtree.woff2":
             self._send_icon("figtree.woff2", "font/woff2")
         elif path == "/manifest.webmanifest":

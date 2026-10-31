@@ -169,6 +169,48 @@ for a in apps:
 json.dump(out,sys.stdout)
 " > "$D/apps.json.tmp" 2>/dev/null && mv "$D/apps.json.tmp" "$D/apps.json"
 
+# --- live tiles: where Plex is, and its token. The token lives in Plex's own
+# --- Preferences.xml, which only root can read; it is handed to the container in
+# --- a file owned root:apps 0640, so it never reaches a browser or the apps list.
+# --- Plex is found by what it is, not by name, and its config folder by the mount
+# --- Plex itself reads, so this works for any Plex install. Every 30 minutes is
+# --- plenty: the token only changes if the server is signed out and back in.
+if [ ! -s "$D/plex.json" ] || [ -n "$(find "$D/plex.json" -mmin +30 2>/dev/null)" ]; then
+  timeout 60 midclt call app.query 2>/dev/null | python3 -c "
+import json,os,re,sys
+D=sys.argv[1]
+try: apps=json.load(sys.stdin)
+except Exception: raise SystemExit
+PREF='Library/Application Support/Plex Media Server/Preferences.xml'
+found=None
+for a in apps:
+    md=a.get('metadata') or {}
+    if 'plex' not in (str(a.get('name'))+' '+str(md.get('title'))).lower(): continue
+    if a.get('state')!='RUNNING': continue
+    wl=a.get('active_workloads') or {}
+    for c in wl.get('container_details') or []:
+        for m in c.get('volume_mounts') or []:
+            p=os.path.join(m.get('source') or '',PREF)
+            if os.path.isfile(p):
+                ports=[hp.get('host_port') for w in wl.get('used_ports') or [] for hp in w.get('host_ports') or []]
+                # host-networked Plex publishes nothing, but always listens on 32400
+                port=32400 if (32400 in ports or not ports) else ports[0]
+                found=(a.get('name'),p,port)
+    if found: break
+tmp=os.path.join(D,'plex.json.tmp')
+if not found:
+    try: os.remove(os.path.join(D,'plex.json'))
+    except OSError: pass
+    raise SystemExit
+m=re.search(r'PlexOnlineToken=\"([^\"]+)\"',open(found[1]).read())
+if not m: raise SystemExit
+fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o640)
+with os.fdopen(fd,'w') as fh: json.dump({'app':found[0],'port':found[2],'token':m.group(1)},fh)
+os.chown(tmp,0,568); os.chmod(tmp,0o640)
+os.replace(tmp,os.path.join(D,'plex.json'))
+" "$D" 2>/dev/null
+fi
+
 # --- cache app icons locally, so the browser never calls out to the internet
 # --- and the grid still works with no WAN. Refresh when TrueNAS metadata changes;
 # --- icon managers store custom images as data URIs rather than remote URLs.

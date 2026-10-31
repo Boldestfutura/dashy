@@ -238,7 +238,7 @@ say "installing files"
 # collect.sh and worker.sh always land on disk: they run on the host from cron,
 # whichever way the app itself is packaged. The rest matter only to a file
 # install, but copying them costs nothing and keeps the directory honest.
-cp "$REPO/app/"*.py "$REPO/app/"*.sh "$REPO/app/"*.png "$BASE/app/" \
+cp "$REPO/app/"*.py "$REPO/app/"*.sh "$REPO/app/"*.png "$REPO/app/"*.woff2 "$REPO/app/"*.txt "$BASE/app/" \
   || die "could not write to $BASE/app - are you root or truenas_admin?"
 chmod +x "$BASE/app/collect.sh" "$BASE/app/worker.sh" "$BASE/app/entrypoint.sh"
 info "$(ls -1 "$BASE/app" | wc -l) files -> $BASE/app"
