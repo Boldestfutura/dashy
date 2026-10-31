@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.1.4"
+APP_VERSION = "1.1.5"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1335,6 +1335,12 @@ PAGE = """<!doctype html>
                   padding:5px 0;background:var(--bg);scrollbar-width:none}
     .settings-nav::-webkit-scrollbar{display:none}
     .settings-nav button{flex:0 0 auto;padding:8px 11px;font-size:12px}
+  }
+  /* Opened from the iOS home screen, the system blurs a band just below the status bar, so
+     the header and the sticky settings tabs sit clear of it. The browser is unaffected. */
+  @media(display-mode:standalone){
+    body{padding-top:calc(env(safe-area-inset-top,0px) + 34px)}
+    .settings-nav{top:calc(env(safe-area-inset-top,0px) + 16px)}
   }
 
   /* shared settings controls */
