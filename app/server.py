@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.4"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -632,7 +632,7 @@ def drives_now():
         spinning = bool(d.get("rpm"))
         t = d.get("temp")
         # spinning disks run cooler than flash and should be judged more strictly
-        warn, bad = (50, 55) if spinning else (60, 70)
+        warn, bad = (55, 60) if spinning else (60, 70)
         level = None
         if isinstance(t, (int, float)):
             level = "bad" if t >= bad else ("warn" if t >= warn else "ok")
