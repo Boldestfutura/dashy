@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.1.5"
+APP_VERSION = "1.2.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1205,6 +1205,9 @@ PAGE = """<!doctype html>
 <link rel="manifest" href="/manifest.webmanifest?v=ICON_VERSION">
 <title>Dashy</title>
 <style>
+  /* Figtree, bundled (SIL OFL, app/figtree-OFL.txt) so the page never calls out for it */
+  @font-face{font-family:Figtree;src:url(/figtree.woff2?v=ICON_VERSION) format("woff2");
+             font-weight:300 900;font-style:normal;font-display:swap}
   :root{
     color-scheme:light dark;
     --bg:#eaeeff; --panel:#ffffff; --surf:#fbfcff; --brd:rgba(16,20,28,.09);
@@ -1215,7 +1218,7 @@ PAGE = """<!doctype html>
     /* M3's shape scale rather than one radius everywhere. Mixing round and
        square is the point: uniform corners read as a template, varied ones
        read as a designed thing. */
-    --r-xs:8px; --r-sm:12px; --r-md:16px; --r-lg:22px; --r-xl:28px;
+    --r-xs:8px; --r-sm:12px; --r-md:26px; --r-lg:22px; --r-xl:28px;
     --r-full:999px;
     --r:var(--r-md);
     /* every tile, home and settings: a hairline outline and a soft drop */
@@ -1253,7 +1256,7 @@ PAGE = """<!doctype html>
   body{
     margin:0;background:var(--bg);color:var(--ink);
     padding:calc(env(safe-area-inset-top,0px) + 18px) 0 calc(env(safe-area-inset-bottom,0px) + 28px);
-    font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+    font:15px/1.45 Figtree,-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
     -webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%;
   }
   .wrap{width:100%;max-width:1180px;margin:0 auto;padding:0 clamp(14px,3vw,28px)}
@@ -1306,7 +1309,7 @@ PAGE = """<!doctype html>
   .settings-section>h3{margin:0 0 12px;font-size:17px;letter-spacing:-.01em}
   .settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr));
                  gap:12px}
-  .settings-card{min-width:0;padding:17px;border:1px solid var(--brd);border-radius:16px;
+  .settings-card{min-width:0;padding:17px;border:1px solid var(--brd);border-radius:var(--r-lg);
                   background:var(--panel);box-shadow:var(--tile-shadow)}
   .settings-glyph{width:32px;height:32px;display:grid;place-items:center;border-radius:50%;
                   margin-bottom:12px;background:color-mix(in srgb,var(--accent) 18%,var(--panel));
@@ -1782,29 +1785,31 @@ PAGE = """<!doctype html>
 
   /* every row the same height, so one long name or version can never stretch
      its neighbours and drop their text out of line */
-  .appgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(134px,1fr));
-           grid-auto-rows:1fr;gap:9px}
+  .appgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));
+           grid-auto-rows:56px;gap:8px}
   .sheet .appgrid{padding:12px 16px 14px}
-  /* Deliberately a smaller corner than the metric cards above them: the
-     shape is what separates the two groups now that nothing is outlined. */
-  .apptile{position:relative;text-decoration:none;color:inherit;display:flex;
-           flex-direction:column;gap:6px;background:var(--panel);
+  /* A 56px row, the Overlook tile: the icon in a 36px circle, the name over the
+     version, and the status dot (or update control) at the right edge. */
+  .apptile{position:relative;text-decoration:none;color:inherit;display:grid;
+           grid-template-columns:36px minmax(0,1fr);grid-template-rows:auto auto;
+           column-gap:12px;align-content:center;background:var(--panel);
            border:1px solid var(--brd);box-shadow:var(--tile-shadow);
-           border-radius:var(--r-sm);
-           padding:11px 12px;min-height:84px;transition:border-color .15s ease}
+           border-radius:var(--r-lg);
+           padding:0 40px 0 10px;min-height:56px;transition:border-color .15s ease}
   .apptile:hover{border-color:color-mix(in srgb,var(--accent) 40%,var(--brd))}
-  .apptile .sdot{position:absolute;top:13px;right:12px;width:6px;height:6px;
+  .apptile .sdot{position:absolute;top:calc(50% - 4px);right:16px;width:8px;height:8px;
                  border-radius:50%;background:var(--muted);opacity:.5}
   .apptile[data-up="1"] .sdot{background:var(--ok);opacity:1}
   .apptile[data-up="0"]{opacity:.62}
-  .apptile .aico{width:22px;height:22px;border-radius:6px;object-fit:cover;flex:0 0 auto}
+  .apptile .aico{grid-row:1/3;width:36px;height:36px;padding:8px;box-sizing:border-box;
+                 border-radius:50%;background:var(--faint);object-fit:contain}
   .apptile .aico.mono{display:flex;align-items:center;justify-content:center;color:#fff;
-                      font-size:10px;font-weight:700}
-  .apptile .an{font-size:12.5px;font-weight:600;line-height:1.2;margin-top:auto;
+                      padding:0;font-size:13px;font-weight:700}
+  .apptile .an{font-size:14px;font-weight:600;line-height:1.25;align-self:end;
                overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .apptile .ap{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;
+  .apptile .ap{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;align-self:start;
                overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .apptile .upd{position:absolute;top:24px;right:5px;cursor:pointer;appearance:none;
+  .apptile .upd{position:absolute;top:calc(50% - 11px);right:9px;cursor:pointer;appearance:none;
                 width:21px;height:21px;display:flex;align-items:center;justify-content:center;
                 padding:0;line-height:1;color:var(--warn);border-radius:50%;
                 border:1px solid color-mix(in srgb,var(--warn) 55%,transparent);
@@ -1817,22 +1822,34 @@ PAGE = """<!doctype html>
   .apptile .upd:hover::before{transform:rotate(-90deg) translateY(1px)}
   /* update progress. Queued and running are not warnings, so they wear the
      accent; only a finished or failed update takes a status colour. */
-  .apptile .ust{position:absolute;top:24px;right:6px;font-size:9px;font-weight:700;
+  .apptile .ust{position:absolute;top:calc(50% - 8px);right:8px;font-size:9px;font-weight:700;
                 letter-spacing:.04em;text-transform:uppercase;border-radius:999px;padding:2px 6px;
                 display:none;font-variant-numeric:tabular-nums}
   .apptile[data-ust] .ust{display:block}
-  .apptile[data-ust] .upd{display:none}
+  .apptile[data-ust] .sdot{display:none}
+  .apptile[data-ust] .upd,.apptile .upd ~ .sdot,.apptile:has(.upd) .sdot{display:none}
   .apptile[data-ust="queued"] .ust,.apptile[data-ust="running"] .ust{
     color:var(--accent);background:color-mix(in srgb,var(--accent) 16%,transparent)}
   .apptile[data-ust="done"] .ust{color:var(--ok);background:color-mix(in srgb,var(--ok) 18%,transparent)}
   .apptile[data-ust="failed"] .ust{color:var(--bad);background:color-mix(in srgb,var(--bad) 18%,transparent)}
   /* an app being upgraded is down on purpose; do not fade it like a fault */
   .apptile[data-ust="running"],.apptile[data-ust="queued"]{opacity:1}
+  /* two to a row on a phone, as in the Overlook phone dashboard */
+  @media(max-width:520px){
+    .appgrid{grid-template-columns:1fr 1fr}
+    .apptile{padding:0 22px 0 9px;column-gap:9px}
+    .apptile .an{font-size:13.5px}
+    .apptile .ap{font-size:11.5px}
+    .apptile .vw{display:none}
+    .apptile .sdot{right:10px;width:7px;height:7px}
+    .apptile .upd{right:3px}
+    .apptile .pin{right:20px}
+  }
   .uprog{display:none;height:3px;border-radius:2px;overflow:hidden;
          background:color-mix(in srgb,var(--accent) 18%,transparent)}
   .uprog i{display:block;height:100%;width:0;border-radius:2px;background:var(--accent);
            transition:width .6s ease}
-  .apptile .uprog{position:absolute;left:12px;right:12px;bottom:6px}
+  .apptile .uprog{position:absolute;left:58px;right:14px;bottom:6px}
   .apptile[data-ust="queued"] .uprog,.apptile[data-ust="running"] .uprog{display:block}
   /* queued has no percentage yet, so it moves without claiming one */
   [data-ust="queued"] .uprog i{width:35%;animation:indet 1.3s ease-in-out infinite}
@@ -1851,7 +1868,7 @@ PAGE = """<!doctype html>
   /* a custom address is a deliberate choice, so its tile carries a small pin
      marker rather than looking identical to the auto-resolved ones. The edit
      itself lives in the app sheet now, not on the tile. */
-  .apptile .pin{position:absolute;bottom:11px;right:11px;width:7px;height:7px;
+  .apptile .pin{position:absolute;top:calc(50% - 4px);right:31px;width:7px;height:7px;
                 border-radius:50% 50% 50% 0;transform:rotate(-45deg);
                 background:var(--accent);box-shadow:0 0 0 2px var(--surf)}
   .apptile{cursor:pointer}
@@ -3821,7 +3838,8 @@ function rowsApps(){
       (isPinned(s)?'<span class="pin" aria-hidden="true"></span>':'')+
       appIcon(s)+
       '<span class="an">'+esc(s.name)+'</span>'+
-      '<span class="ap" title="'+esc(s.version||'')+'">'+esc(niceVer(s))+'</span></a>').join('')+'</div>';
+      '<span class="ap" title="'+esc(s.version||'')+'">'+
+        esc(niceVer(s)).replace(/^Version /,'<span class="vw">Version </span>')+'</span></a>').join('')+'</div>';
 }
 
 // TrueNAS reports '1.43.5.11079-b3b13e506_1.3.21': the app's own version, a
@@ -4569,14 +4587,14 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
-    def _send_icon(self, name):
+    def _send_icon(self, name, ctype="image/png"):
         try:
             with open(os.path.join(APPDIR, name), "rb") as fh:
                 blob = fh.read()
         except OSError:
-            return self._send(404, b"", "image/png")
-        # icons only change with a rename, so let devices keep them
-        self._send(200, blob, "image/png", cache="public, max-age=604800")
+            return self._send(404, b"", ctype)
+        # icons and the font only change with a rename, so let devices keep them
+        self._send(200, blob, ctype, cache="public, max-age=604800")
 
     def _send_appicon(self, name):
         """App icons are cached to disk by the collector, so the browser never
@@ -4606,6 +4624,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_appicon(path[len("/appicon/"):])
         elif path in ICONS:
             self._send_icon(ICONS[path])
+        elif path == "/figtree.woff2":
+            self._send_icon("figtree.woff2", "font/woff2")
         elif path == "/manifest.webmanifest":
             self._send(200, json.dumps(MANIFEST), "application/manifest+json",
                        cache="public, max-age=86400")
