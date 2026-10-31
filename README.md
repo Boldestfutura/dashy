@@ -33,6 +33,11 @@ add and remove things.
   far through it is; its sheet lists every stream. Plex's token is read on the
   NAS by the root cron job into a file only Dashy can read, and never reaches
   the browser. A Scrutiny tile widens into a bar chart of drive temperatures.
+  A Pi-hole tile shows the last 24 hours: queries, blocked and the block rate,
+  with an hourly chart. Pi-hole 6 needs a login for its stats, so the cron job
+  reads the web password from the TrueNAS app's config and Dashy keeps a single
+  session open. Change the password in the app's settings, not in Pi-hole's own
+  page, or Dashy will not see it.
 - **Updates from the dashboard.** Apps with an update show a marker; tapping it
   queues the upgrade and a recursive ZFS snapshot is taken first; the newest
   five per app are kept. Dashy updates itself the same way, from the image CI

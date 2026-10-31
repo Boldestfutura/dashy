@@ -211,6 +211,51 @@ os.replace(tmp,os.path.join(D,'plex.json'))
 " "$D" 2>/dev/null
 fi
 
+# --- Pi-hole 6 answers its stats API only after a login, and the catalogue app keeps
+# --- the web password in its own config. Read it here, as root, so the container
+# --- never needs midclt. Every 30 minutes picks up a changed password.
+if [ ! -s "$D/pihole.json" ] || [ -n "$(find "$D/pihole.json" -mmin +30 2>/dev/null)" ]; then
+  timeout 60 midclt call app.query 2>/dev/null | python3 -c "
+import json,os,re,subprocess,sys
+D=sys.argv[1]
+try: apps=json.load(sys.stdin)
+except Exception: raise SystemExit
+def find(d,key):
+    if isinstance(d,dict):
+        for k,v in d.items():
+            if k==key and isinstance(v,str) and v: return v
+            r=find(v,key)
+            if r: return r
+    return None
+found=None
+for a in apps:
+    md=a.get('metadata') or {}
+    if not re.search(r'pi-?hole',(str(a.get('name'))+' '+str(md.get('title'))).lower()): continue
+    if a.get('state')!='RUNNING': continue
+    try: cfg=json.loads(subprocess.run(['midclt','call','app.config',a.get('name')],capture_output=True,timeout=30).stdout)
+    except Exception: continue
+    pw=find(cfg,'web_password')
+    if not pw: continue
+    port=((cfg.get('network') or {}).get('web_port') or {}).get('port_number')
+    if not port:
+        # otherwise whatever is published for the container's port 80; host networking means 80
+        wl=a.get('active_workloads') or {}
+        port=next((hp.get('host_port') for w in wl.get('used_ports') or [] if w.get('container_port')==80
+                   for hp in w.get('host_ports') or []),80)
+    found=(a.get('name'),port,pw)
+    break
+tmp=os.path.join(D,'pihole.json.tmp')
+if not found:
+    try: os.remove(os.path.join(D,'pihole.json'))
+    except OSError: pass
+    raise SystemExit
+fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o640)
+with os.fdopen(fd,'w') as fh: json.dump({'app':found[0],'port':found[1],'password':found[2]},fh)
+os.chown(tmp,0,568); os.chmod(tmp,0o640)
+os.replace(tmp,os.path.join(D,'pihole.json'))
+" "$D" 2>/dev/null
+fi
+
 # --- cache app icons locally, so the browser never calls out to the internet
 # --- and the grid still works with no WAN. Refresh when TrueNAS metadata changes;
 # --- icon managers store custom images as data URIs rather than remote URLs.

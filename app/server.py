@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -711,6 +711,67 @@ def plex_art(path):
     return blob
 
 
+_pihole_cache = {"at": 0, "val": None}
+_pihole_sid = {"sid": None}
+
+
+def _pihole_call(cfg, path, body=None, sid=None):
+    req = urllib.request.Request("http://%s:%d%s" % (HOST_IP, int(cfg["port"]), path),
+                                 data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"Content-Type": "application/json",
+                                          **({"X-FTL-SID": sid} if sid else {})})
+    with urllib.request.urlopen(req, timeout=4) as r:
+        return json.loads(r.read())
+
+
+def _pihole_get(cfg, path):
+    """Keep one session and reuse it. Pi-hole caps how many it holds, so logging in on
+    every poll would lock the admin page out within minutes."""
+    for attempt in (0, 1):
+        if not _pihole_sid["sid"]:
+            sess = _pihole_call(cfg, "/api/auth", {"password": cfg["password"]}).get("session") or {}
+            if not sess.get("valid"):
+                raise ValueError("pihole login refused")
+            _pihole_sid["sid"] = sess.get("sid")
+        try:
+            return _pihole_call(cfg, path, sid=_pihole_sid["sid"])
+        except urllib.error.HTTPError as e:
+            if e.code != 401 or attempt:
+                raise
+            _pihole_sid["sid"] = None     # expired: log in again, once
+
+
+def pihole_live():
+    """Queries and blocks over the last 24 hours, with an hourly history."""
+    cfg = _read_json("pihole.json", None)
+    if not cfg or not cfg.get("password"):
+        return None
+    now = time.time()
+    with _lock:
+        val = _pihole_cache["val"]
+        # stats move slowly; a failure waits a minute before the next login attempt
+        if val is not None and now - _pihole_cache["at"] < (60 if val.get("error") else 10):
+            return val
+    app = cfg.get("app") or "pihole"
+    try:
+        q = (_pihole_get(cfg, "/api/stats/summary").get("queries") or {})
+        slots = _pihole_get(cfg, "/api/history").get("history") or []
+        hours = {}
+        for x in slots:
+            h = int(x.get("timestamp", 0)) // 3600
+            t, b = hours.get(h, (0, 0))
+            hours[h] = (t + int(x.get("total") or 0), b + int(x.get("blocked") or 0))
+        top = int(now) // 3600
+        val = {"app": app, "total": int(q.get("total") or 0), "blocked": int(q.get("blocked") or 0),
+               "pct": round(float(q.get("percent_blocked") or 0), 1),
+               "hist": [list(hours.get(h, (0, 0))) for h in range(top - 23, top + 1)]}
+    except (OSError, ValueError, urllib.error.URLError):
+        val = {"app": app, "error": True}
+    with _lock:
+        _pihole_cache.update(at=now, val=val)
+    return val
+
+
 def pool_status():
     """Scrub state and error counters, which zpool list does not carry."""
     return _read_json("poolstatus.json", {})
@@ -1284,7 +1345,7 @@ def snapshot():
     out["procs"] = procs_now()
     out["poolstatus"] = pool_status()
     out["vms"] = vms_now()
-    out["live"] = {"plex": plex_live()}
+    out["live"] = {"plex": plex_live(), "pihole": pihole_live()}
     out["links"] = header_links(svc, (out["prefs"] or {}).get("setup"))
     return out
 
@@ -1973,6 +2034,15 @@ PAGE = """<!doctype html>
   @media (max-width: 520px){
     .apptile.wide{grid-template-columns:36px minmax(0,.5fr) minmax(0,2.5fr)}
   }
+  .live .nums{display:flex;gap:14px;margin:2px 0 6px}
+  .live .nums span{display:flex;flex-direction:column;min-width:0}
+  .live .nums b{font-size:16px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.15}
+  .live .nums u{text-decoration:none;font-size:10.5px;color:var(--muted)}
+  .live .nums span:last-child b{color:var(--accent)}
+  .live .hbars{display:flex;align-items:flex-end;gap:2px;height:34px}
+  .live .hbars i{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:flex-end;
+                 border-radius:2px;overflow:hidden;background:color-mix(in srgb,var(--ink) 16%,transparent)}
+  .live .hbars s{display:block;background:var(--accent)}
   .live .bars{display:flex;align-items:flex-end;gap:6px;height:76px;margin-top:2px}
   .live .b{flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;justify-content:flex-end}
   .live .b em{font-style:normal;font-size:10px;color:var(--muted);font-variant-numeric:tabular-nums}
@@ -3424,6 +3494,27 @@ function paintLive(){
       }).join('')+'</span>';
     }
   }
+  // Pi-hole: the last 24 hours, and an hourly chart with the blocked share filled in
+  const PH=data.live&&data.live.pihole;
+  const pt=PH&&document.querySelector('.apptile[data-app="'+CSS.escape(PH.app)+'"]');
+  if(pt){
+    if(PH.error||!PH.hist){ dropLive(pt,'dns'); }
+    else{
+      pt.classList.add('wide','dns');
+      const big=Math.max(1,...PH.hist.map(h=>h[0]));
+      liveBox(pt).innerHTML='<span class="lk">Last 24 hours</span><span class="nums">'+
+        [[kNum(PH.total),'Queries'],[kNum(PH.blocked),'Blocked'],[PH.pct.toFixed(1)+'%','Block rate']].map(
+          v=>'<span><b>'+v[0]+'</b><u>'+v[1]+'</u></span>').join('')+'</span><span class="hbars">'+
+        PH.hist.map(h=>'<i title="'+h[0].toLocaleString()+' queries · '+h[1].toLocaleString()+' blocked" style="height:'+
+          Math.max(2,Math.round(34*h[0]/big))+'px"><s style="height:'+(h[0]?Math.round(100*h[1]/h[0]):0)+'%"></s></i>').join('')+
+        '</span>';
+    }
+  }
+}
+function kNum(n){
+  if(n<10000) return n.toLocaleString();
+  if(n<1e6) return (n/1000).toFixed(n<1e5?1:0)+'k';
+  return (n/1e6).toFixed(1)+'M';
 }
 function tickLive(){
   const L=plexLive(), t=plexTile();
