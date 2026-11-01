@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.5.3"
+APP_VERSION = "1.5.4"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1769,9 +1769,13 @@ PAGE = """<!doctype html>
   header{display:grid;align-items:center;gap:14px;margin-bottom:20px;
          grid-template-columns:minmax(0,1fr) auto}
   .id{display:flex;align-items:center;gap:11px;min-width:0}
-  .id h1{font-size:clamp(20px,4.4vw,26px);margin:0;letter-spacing:-.02em;font-weight:700;
-         display:flex;align-items:baseline;gap:8px;min-width:0}
-  .id h1 .host{font-size:12.5px;font-weight:600;color:var(--muted);letter-spacing:0}
+  /* No wordmark: the server's name is the title (Dashy is named in Settings). With an
+     update running its status line sits underneath, and the pair spans the logo's height */
+  .id .idt{min-width:0;display:flex;flex-direction:column;justify-content:center;min-height:34px}
+  .id h1{font-size:18px;line-height:1.05;margin:0;letter-spacing:-.01em;font-weight:700;min-width:0;
+         overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .id h1 .host{letter-spacing:inherit}
+  .vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
   .id p{margin:1px 0 0;font-size:12.5px;color:var(--muted);
         overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .mark{width:34px;height:34px;flex:0 0 auto;border-radius:9px;
@@ -2444,11 +2448,12 @@ PAGE = """<!doctype html>
   /* queued has no percentage yet, so it moves without claiming one */
   [data-ust="queued"] .uprog i{width:35%;animation:indet 1.3s ease-in-out infinite}
   @keyframes indet{0%{transform:translateX(-100%)}100%{transform:translateX(290%)}}
-  /* Update status: a line of text tucked under the logo, not a card. While it
+  /* Update status: a line of text under the server name, beside the logo. While it
      runs it reads "Updating Plex..." with the dots lighting one, two, three
      in turn; done and failed say so in words, with the detail after a dot. */
-  .upbanner{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 8px;margin:-12px 0 16px;
-            padding:0 2px;font-size:13px}
+  .upbanner{display:flex;align-items:baseline;gap:6px;margin:1px 0 0;font-size:12.5px;line-height:1.15;
+            min-width:0;white-space:nowrap;overflow:hidden}
+  .upbanner>span{overflow:hidden;text-overflow:ellipsis}
   .upbanner[hidden]{display:none}
   /* the server name's colour and weight, so it informs without pulling focus */
   .upbanner b{font-weight:600;color:var(--muted)}
@@ -2590,7 +2595,10 @@ PAGE = """<!doctype html>
           <rect x="30.5" y="11" width="6.5" height="27" rx="3.25"/>
         </g>
       </svg>
-      <div style="min-width:0"><h1>Dashy<span class="host" id="host"></span></h1></div>
+      <div class="idt"><h1><span class="vh">Dashy \u00b7 </span><span class="host" id="host"></span></h1>
+        <div class="upbanner" id="upbanner" role="status" aria-live="polite" hidden>
+          <b><span id="ub-t"></span><span class="udots" aria-hidden="true"><i>.</i><i>.</i><i>.</i></span></b><span id="ub-s"></span>
+        </div></div>
     </div>
     <div class="hdr-r">
 
@@ -2703,9 +2711,6 @@ PAGE = """<!doctype html>
     <button class="done" id="eb-done" type="button">Done</button>
   </div>
 
-  <div class="upbanner" id="upbanner" role="status" aria-live="polite" hidden>
-    <b><span id="ub-t"></span><span class="udots" aria-hidden="true"><i>.</i><i>.</i><i>.</i></span></b><span id="ub-s"></span>
-  </div>
 
   <div id="vitals"></div>
 
