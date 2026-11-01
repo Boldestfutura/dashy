@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.4.3"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -861,8 +861,11 @@ def immich_live():
             "bytes": int(st.get("usage") or 0), "busy": busy[:3]}
 
 
+ABS_ITEM = re.compile(r"^[0-9A-Za-z_-]{8,64}$")
+
+
 def abs_live():
-    """What is being listened to now, or else the book most recently left off."""
+    """What is being listened to right now. Like Plex, nothing when nobody is."""
     svc, key = _svc_where(r"audiobookshelf"), _app_key("audiobookshelf")
     if not svc or not key:
         return None
@@ -873,20 +876,37 @@ def abs_live():
     sess = on.get("openSessions") or []
     if sess:
         x = max(sess, key=lambda x: x.get("updatedAt") or 0)
+        item = str(x.get("libraryItemId") or "")
         return {"app": svc["app"], "live": True, "title": x.get("displayTitle") or "",
                 "author": x.get("displayAuthor") or "", "at": float(x.get("currentTime") or 0),
-                "dur": float(x.get("duration") or 0), "listeners": len(sess)}
-    me = _app_json(svc, "/api/me", 60, h) or {}
-    prog = [p for p in me.get("mediaProgress") or [] if not p.get("isFinished") and not p.get("episodeId")
-            and (p.get("progress") or 0) > 0]
-    if not prog:
-        return {"app": svc["app"], "live": False}
-    p = max(prog, key=lambda p: p.get("lastUpdate") or 0)
-    inprog = _app_json(svc, "/api/me/items-in-progress", 60, h) or {}
-    title = next((((i.get("media") or {}).get("metadata") or {}).get("title") for i in inprog.get("libraryItems") or []
-                  if i.get("id") == p.get("libraryItemId")), "")
-    return {"app": svc["app"], "live": False, "title": title or "", "at": float(p.get("currentTime") or 0),
-            "dur": float(p.get("duration") or 0)}
+                "dur": float(x.get("duration") or 0), "listeners": len(sess),
+                "art": item if ABS_ITEM.match(item) else None}
+    return {"app": svc["app"], "live": False}
+
+
+_abs_art = {}
+
+
+def abs_art(item):
+    """Book covers through Dashy, so the page never holds Audiobookshelf's key."""
+    if not ABS_ITEM.match(item or ""):
+        return None
+    if item in _abs_art:
+        return _abs_art[item]
+    svc, key = _svc_where(r"audiobookshelf"), _app_key("audiobookshelf")
+    if not svc or not key:
+        return None
+    req = urllib.request.Request("http://%s:%d/api/items/%s/cover?width=512&format=jpeg" % (
+        svc.get("bind") or HOST_IP, int(svc["lport"]), item), headers={"Authorization": "Bearer " + key})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            blob = r.read(4_000_000)
+    except (OSError, urllib.error.URLError):
+        return None
+    if len(_abs_art) > 24:
+        _abs_art.clear()
+    _abs_art[item] = blob
+    return blob
 
 
 def sparky_live():
@@ -2334,8 +2354,8 @@ PAGE = """<!doctype html>
       linear-gradient(90deg,var(--panel) 22%,color-mix(in srgb,var(--panel) 74%,transparent) 52%,
                       color-mix(in srgb,var(--panel) 50%,transparent)),
       var(--art,none) center/cover no-repeat,var(--panel)}
-  /* tall Music Assistant: the album shows through the top and fades out under the text */
-  .apptile.maart.tall{background:
+  /* tall Music Assistant and Audiobookshelf: the cover shows through the top and fades out under the text */
+  .apptile.maart.tall,.apptile.abs.tall{background:
       linear-gradient(180deg,color-mix(in srgb,var(--panel) 62%,transparent),
                       color-mix(in srgb,var(--panel) 82%,transparent) 48%,var(--panel) 78%),
       var(--art,none) center/cover no-repeat,var(--panel)}
@@ -2350,6 +2370,9 @@ PAGE = """<!doctype html>
   /* Pi-hole's third figure is the rate; on Tally each player wears their colour instead */
   .apptile.tally .live .nums span:last-child b{color:inherit}
   .live .split{display:flex;gap:3px;height:8px;margin-top:4px}
+  .apptile.tally .live .nums{margin:0;gap:6px;justify-content:space-between}
+  .apptile.tally .live .nums b,.apptile.tally .live .nums u{white-space:nowrap}
+  .apptile.tally .live .split{flex:none;margin-top:2px}
   .live .split i,.live .pdot{display:block;min-width:4px;border-radius:4px;background:var(--accent)}
   .live .pdot{display:inline-block;width:7px;height:7px;min-width:0;margin-right:4px;vertical-align:1px}
   .live .split i[data-i="1"],.live .pdot[data-i="1"]{background:color-mix(in srgb,var(--warn) 85%,var(--panel))}
@@ -3863,13 +3886,15 @@ function paintLive(){
     const ps=TL.players||[];
     if(!ps.length){ dropLive(tt,'tally'); }
     else{
-      tt.classList.add('wide','tally');
+      tt.classList.add('tall','tally');
       const cap=k=>k.charAt(0).toUpperCase()+k.slice(1);
       const mo=TL.month||{}, tot=TL.total||{};
       const sum=ps.reduce((a,k)=>a+(tot[k]||0),0);
       const pd=/^(\\d{4})-(\\d{2})$/.exec(TL.period||'');
       const mname=pd?new Date(+pd[1],+pd[2]-1,1).toLocaleString(undefined,{month:'long'}):'This month';
-      liveBox(tt).innerHTML='<span class="lk">'+esc(mname)+'</span><span class="nums">'+
+      // half width leaves no room for the month's name, so it moves to the tooltip
+      tt.title=mname+' and all time';
+      liveBox(tt).innerHTML='<span class="nums">'+
         ps.map((k,i)=>'<span><b>'+(mo[k]||0)+'</b><u><i class="pdot" data-i="'+i+'"></i>'+esc(cap(k))+'</u></span>').join('')+
         '<span><b>'+ps.map(k=>tot[k]||0).join('–')+'</b><u>All time</u></span></span>'+
         '<span class="split">'+ps.map((k,i)=>'<i data-i="'+i+'" title="'+esc(cap(k))+' '+(tot[k]||0)+'" style="flex:'+
@@ -3889,18 +3914,22 @@ function paintLive(){
       '<span class="lm"><span>'+(b?'Processing '+esc(JOB[b[0]]||b[0])+'…':kNum(IM.videos)+' videos · '+disk(IM.bytes))+'</span>'+
       (b?'<span class="lacc">'+kNum(b[1])+' left</span>':'')+'</span>';
   }
-  // Audiobookshelf (tall): a live session, or the book left off most recently
+  // Audiobookshelf (tall): only while someone is listening, like Plex, with the cover behind
   const AB=data.live&&data.live.abs;
   const at=AB&&document.querySelector('.apptile[data-app="'+CSS.escape(AB.app)+'"]');
   if(at){
-    if(!AB.title){ dropLive(at,'abs'); }
+    if(!AB.live||!AB.title){ dropLive(at,'abs'); at.style.removeProperty('--art'); delete at.dataset.art; }
     else{
       at.classList.add('tall','abs');
+      if(at.dataset.art!==(AB.art||'')){
+        at.dataset.art=AB.art||'';
+        at.style.setProperty('--art', AB.art ? 'url("/api/abs/art?p='+encodeURIComponent(AB.art)+'")' : 'none');
+      }
       const pct=AB.dur?Math.min(100,100*AB.at/AB.dur):0, left=Math.max(0,AB.dur-AB.at);
       const h=Math.floor(left/3600), m=Math.round((left%3600)/60);
       liveBox(at).innerHTML='<span class="lt">'+esc(AB.title)+'</span>'+
         '<span class="lbar"><i style="width:'+pct.toFixed(1)+'%"></i></span>'+
-        '<span class="lm"><span'+(AB.live?' class="lacc"':'')+'>'+(AB.live?'Listening now':Math.round(pct)+'%')+'</span>'+
+        '<span class="lm"><span>'+(AB.author?esc(AB.author):'Listening')+'</span>'+
         '<span>'+(h?h+'h ':'')+m+'m left</span></span>';
     }
   }
@@ -5469,9 +5498,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send_appicon(path[len("/appicon/"):])
         elif path in ICONS:
             self._send_icon(ICONS[path])
-        elif path in ("/api/plex/art", "/api/ma/art"):
+        elif path in ("/api/plex/art", "/api/ma/art", "/api/abs/art"):
             q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
-            blob = (plex_art if path == "/api/plex/art" else ma_art)((q.get("p") or [""])[0])
+            art = {"/api/plex/art": plex_art, "/api/ma/art": ma_art, "/api/abs/art": abs_art}[path]
+            blob = art((q.get("p") or [""])[0])
             if blob:
                 self._send(200, blob, "image/jpeg", cache="public, max-age=86400")
             else:
