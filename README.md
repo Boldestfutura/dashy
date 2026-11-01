@@ -42,8 +42,8 @@ add and remove things.
   running, starting, stopping, stopped, crashed, or being removed. Only an app
   that should be answering and is not counts as a problem; one you stopped is
   shown grey, and one you deleted drops off with a note in Health for an hour.
-- **Updates from the dashboard.** Apps with an update show a marker; tapping it
-  queues the upgrade and a recursive ZFS snapshot is taken first; the newest
+- **Updates from the dashboard.** An app with an update is outlined in amber;
+  its sheet has an Update button, which queues the upgrade and a recursive ZFS snapshot is taken first; the newest
   five per app are kept. Dashy updates itself the same way, from the image CI
   publishes, and only offers a version once that image exists.
 - **Virtual machines.** Every VM on the box, whether it is running, and what
@@ -293,6 +293,27 @@ Everything is optional — the app discovers or asks for all of it.
 | `IMAGE` | `ghcr.io/boldestfutura/dashy:latest` (installer only) |
 | `UPDATE_REPO` / `UPDATE_BRANCH` | `Boldestfutura/dashy` / `main` |
 | `IMAGE_UPDATE_SWEEP` | `1` — nudge TrueNAS to re-check image registries |
+
+### API keys for live tiles
+
+Plex, Pi-hole, Scrutiny, Ollama and Tally need nothing. Four apps only answer
+with a key, which you create in the app and put in `keys.json`, next to the
+`data` folder (`<pool>/Applications/dashy/keys.json`), readable by you alone:
+
+```json
+{"immich": "...", "audiobookshelf": "...", "sparkyfitness": "...", "music-assistant": "..."}
+```
+
+| App | Key | Tile |
+|---|---|---|
+| Immich | Account Settings → API Keys (`server.statistics`, `job.read`) | photos, videos, size; jobs still running |
+| Audiobookshelf | Settings → API Keys | the book being listened to, or the one left off |
+| SparkyFitness | Settings → API Keys | the fast under way |
+| Music Assistant | a long-lived token from its settings | what each speaker is playing, album art behind |
+
+The container cannot see that folder. The collector copies the file into
+`data/` as root, readable only by the app, and the keys are used server-side;
+the browser never receives them. Leave an app out and its tile stays plain.
 
 ## Uninstall
 

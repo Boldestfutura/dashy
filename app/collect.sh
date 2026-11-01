@@ -154,15 +154,20 @@ try:
 except Exception: pass
 out=[]
 for a in apps:
-    ports=set()
+    ports=set(); bind={}
     for w in (a.get('active_workloads') or {}).get('used_ports') or []:
         for hp in w.get('host_ports') or []:
-            if hp.get('host_ip') in ('0.0.0.0','::'):
-                ports.add(hp.get('host_port'))
+            ip=hp.get('host_ip'); port=hp.get('host_port')
+            if not port: continue
+            ports.add(port)
+            # published on one address only, so it has to be reached there
+            if ip and ip not in ('0.0.0.0','::'): bind[str(port)]=ip
     md=a.get('metadata') or {}
     # a custom app carries the catalogue's placeholder ('Custom App', 'This is a
     # custom app where...'), which says nothing about what it actually is
     if a.get('custom_app'): md=dict(md, title='', description='')
+    # and HexOS's app calls itself 'iX App', which names the publisher, not the app
+    if str(md.get('title') or '').strip().lower()=='ix app': md=dict(md, title='')
     desc=' '.join(str(md.get('description') or '').split())
     # the catalogue's first sentence is the useful part
     desc=desc.split('. ')[0].rstrip('.')
@@ -171,6 +176,7 @@ for a in apps:
                 'title':str(md.get('title') or ''),
                 'desc':desc[:90],
                 'ports':sorted(p for p in ports if p),
+                'bind':bind,
                 'version':a.get('human_version'),
                 'custom':bool(a.get('custom_app')),
                 'icon':md.get('icon') or md.get('icon_url') or '',
@@ -266,6 +272,18 @@ with os.fdopen(fd,'w') as fh: json.dump({'app':found[0],'port':found[1],'passwor
 os.chown(tmp,0,568); os.chmod(tmp,0o640)
 os.replace(tmp,os.path.join(D,'pihole.json'))
 " "$D" 2>/dev/null
+fi
+
+# --- API keys for the live tiles of apps that need one (Immich, Audiobookshelf,
+# --- SparkyFitness). The owner keeps them in keys.json beside the data folder, where
+# --- the container cannot see it; this copies it in, readable by the app alone.
+K="$(dirname "$D")/keys.json"
+if [ -s "$K" ]; then
+  if ! cmp -s "$K" "$D/keys.json" 2>/dev/null; then
+    install -m 640 -o 0 -g 568 "$K" "$D/keys.json.tmp" 2>/dev/null && mv "$D/keys.json.tmp" "$D/keys.json"
+  fi
+else
+  rm -f "$D/keys.json"
 fi
 
 # --- cache app icons locally, so the browser never calls out to the internet

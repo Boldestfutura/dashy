@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Dashy dashboard: host vitals plus every tailnet-published app, no dependencies."""
+import datetime
 import json
 import os
 import re
@@ -13,7 +14,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -773,6 +774,223 @@ def pihole_live():
     return val
 
 
+_app_live = {}      # app -> {"at", "val"}
+
+
+def _svc_where(pattern):
+    """The first discovered app whose name matches, and where it answers."""
+    with _lock:
+        svcs = list(_state["services"])
+    for x in svcs:
+        if re.search(pattern, x.get("app") or "") and x.get("lport") and x.get("status") == "up":
+            return x
+    return None
+
+
+def _app_key(name):
+    """An owner-supplied API key from keys.json, or None."""
+    k = (_read_json("keys.json", {}) or {}).get(name)
+    return k.strip() if isinstance(k, str) and k.strip() else None
+
+
+def _app_json(svc, path, ttl, headers=None):
+    """GET one of an app's JSON endpoints, cached for ttl seconds."""
+    now = time.time()
+    key = svc["app"] + path
+    with _lock:
+        hit = _app_live.get(key)
+        if hit and now - hit["at"] < ttl:
+            return hit["val"]
+    try:
+        url = "http://%s:%d%s" % (svc.get("bind") or HOST_IP, int(svc["lport"]), path)
+        req = urllib.request.Request(url, headers=dict(headers or {}, Accept="application/json"))
+        with urllib.request.urlopen(req, timeout=4) as r:
+            val = json.loads(r.read())
+    except (OSError, ValueError, urllib.error.URLError):
+        val = None
+    with _lock:
+        _app_live[key] = {"at": now, "val": val}
+    return val
+
+
+def ollama_live():
+    """Which models Ollama has loaded, how much of each sits on the GPU, and when
+    it lets go. It shares the GPU with Plex, so this is the 'why is it slow' tile."""
+    svc = _svc_where(r"ollama")
+    if not svc:
+        return None
+    d = _app_json(svc, "/api/ps", 5)
+    if not isinstance(d, dict):
+        return None
+    out = []
+    for m in d.get("models") or []:
+        size = int(m.get("size") or 0)
+        vram = int(m.get("size_vram") or 0)
+        exp = m.get("expires_at") or ""
+        try:
+            # 2026-11-01T01:37:24.091006276Z: Python wants at most microseconds
+            left = datetime.datetime.strptime(exp[:19], "%Y-%m-%dT%H:%M:%S").replace(
+                tzinfo=datetime.timezone.utc).timestamp() - time.time()
+        except ValueError:
+            left = None
+        out.append({"name": m.get("name") or m.get("model") or "",
+                    "params": (m.get("details") or {}).get("parameter_size") or "",
+                    "size": size, "gpu": round(100 * vram / size) if size else 0,
+                    "left": round(left) if left is not None else None})
+    return {"app": svc["app"], "models": out}
+
+
+def immich_live():
+    """Library size, and whatever Immich is still chewing through after an upload."""
+    svc, key = _svc_where(r"immich"), _app_key("immich")
+    if not svc or not key:
+        return None
+    h = {"x-api-key": key}
+    st = _app_json(svc, "/api/server/statistics", 300, h)
+    jobs = _app_json(svc, "/api/jobs", 15, h)
+    if not isinstance(st, dict):
+        return None
+    busy = []
+    for name, j in (jobs or {}).items():
+        c = (j or {}).get("jobCounts") or {}
+        n = int(c.get("active") or 0) + int(c.get("waiting") or 0)
+        if n:
+            busy.append([name, n])
+    busy.sort(key=lambda x: -x[1])
+    return {"app": svc["app"], "photos": int(st.get("photos") or 0), "videos": int(st.get("videos") or 0),
+            "bytes": int(st.get("usage") or 0), "busy": busy[:3]}
+
+
+def abs_live():
+    """What is being listened to now, or else the book most recently left off."""
+    svc, key = _svc_where(r"audiobookshelf"), _app_key("audiobookshelf")
+    if not svc or not key:
+        return None
+    h = {"Authorization": "Bearer " + key}
+    on = _app_json(svc, "/api/users/online", 15, h)
+    if not isinstance(on, dict):
+        return None
+    sess = on.get("openSessions") or []
+    if sess:
+        x = max(sess, key=lambda x: x.get("updatedAt") or 0)
+        return {"app": svc["app"], "live": True, "title": x.get("displayTitle") or "",
+                "author": x.get("displayAuthor") or "", "at": float(x.get("currentTime") or 0),
+                "dur": float(x.get("duration") or 0), "listeners": len(sess)}
+    me = _app_json(svc, "/api/me", 60, h) or {}
+    prog = [p for p in me.get("mediaProgress") or [] if not p.get("isFinished") and not p.get("episodeId")
+            and (p.get("progress") or 0) > 0]
+    if not prog:
+        return {"app": svc["app"], "live": False}
+    p = max(prog, key=lambda p: p.get("lastUpdate") or 0)
+    inprog = _app_json(svc, "/api/me/items-in-progress", 60, h) or {}
+    title = next((((i.get("media") or {}).get("metadata") or {}).get("title") for i in inprog.get("libraryItems") or []
+                  if i.get("id") == p.get("libraryItemId")), "")
+    return {"app": svc["app"], "live": False, "title": title or "", "at": float(p.get("currentTime") or 0),
+            "dur": float(p.get("duration") or 0)}
+
+
+def sparky_live():
+    """The fast under way, if there is one."""
+    svc, key = _svc_where(r"sparky"), _app_key("sparkyfitness")
+    if not svc or not key:
+        return None
+    cur = _app_json(svc, "/api/fasting/current", 30, {"x-api-key": key})
+    if not isinstance(cur, dict) or not cur.get("start_time"):
+        return {"app": svc["app"], "fast": None}
+    def ts(v):
+        try:
+            return datetime.datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return {"app": svc["app"], "fast": {"start": ts(cur.get("start_time")), "end": ts(cur.get("target_end_time")),
+                                        "type": cur.get("fasting_type") or ""}}
+
+
+_ma_art = {}
+MA_ART = re.compile(r"^/imageproxy/[0-9a-f]{16,128}$")
+
+
+def ma_live():
+    """Every Music Assistant player that is playing right now, with what is on."""
+    svc, key = _svc_where(r"music-?assistant"), _app_key("music-assistant")
+    if not svc or not key:
+        return None
+    now = time.time()
+    hit = _app_live.get("ma-players")
+    if hit and now - hit["at"] < 5:
+        players = hit["val"]
+    else:
+        try:
+            req = urllib.request.Request(
+                "http://%s:%d/api" % (svc.get("bind") or HOST_IP, int(svc["lport"])),
+                data=json.dumps({"message_id": "dashy", "command": "players/all", "args": {}}).encode(),
+                headers={"Content-Type": "application/json", "Authorization": "Bearer " + key})
+            with urllib.request.urlopen(req, timeout=4) as r:
+                players = json.loads(r.read())
+        except (OSError, ValueError, urllib.error.URLError):
+            players = None
+        with _lock:
+            _app_live["ma-players"] = {"at": now, "val": players}
+    if not isinstance(players, list):
+        return None
+    out = []
+    for p in players:
+        if p.get("state") != "playing" or not p.get("available") or p.get("hide_in_ui") or p.get("synced_to"):
+            continue
+        cm = p.get("current_media") or {}
+        art = urllib.parse.urlsplit(str(cm.get("image_url") or "")).path
+        el = float(cm.get("elapsed_time") or p.get("elapsed_time") or 0)
+        upd = p.get("elapsed_time_last_updated")
+        if isinstance(upd, (int, float)) and upd > 0:
+            el += max(0.0, now - upd)          # it has been playing since that reading
+        out.append({"player": p.get("display_name") or p.get("name") or "", "title": cm.get("title") or "",
+                    "artist": cm.get("artist") or "", "album": cm.get("album") or "",
+                    "dur": float(cm.get("duration") or 0), "at": el,
+                    "art": art if MA_ART.match(art) else None})
+    return {"app": svc["app"], "playing": out}
+
+
+def ma_art(path):
+    """Album art through Dashy, so the page never needs Music Assistant's address."""
+    if not MA_ART.match(path or ""):
+        return None
+    if path in _ma_art:
+        return _ma_art[path]
+    svc = _svc_where(r"music-?assistant")
+    if not svc:
+        return None
+    try:
+        with urllib.request.urlopen("http://%s:%d%s?size=512&fmt=jpg" % (
+                svc.get("bind") or HOST_IP, int(svc["lport"]), path), timeout=5) as r:
+            blob = r.read(4_000_000)
+    except (OSError, urllib.error.URLError):
+        return None
+    if len(_ma_art) > 24:
+        _ma_art.clear()
+    _ma_art[path] = blob
+    return blob
+
+
+def tally_live():
+    """Cameron-vs-Paget style scoreboards: every whole-number field is a player."""
+    svc = _svc_where(r"^tally")
+    if not svc:
+        return None
+    d = _app_json(svc, "/api/state", 10)
+    if not isinstance(d, dict):
+        return None
+    players = [k for k, v in d.items() if isinstance(v, int) and not isinstance(v, bool)]
+    if not players:
+        return None
+    month = d.get("month") if isinstance(d.get("month"), dict) else {}
+    hist = [m for m in (d.get("months") or []) if isinstance(m, dict)][-6:]
+    return {"app": svc["app"], "players": players, "total": {k: d[k] for k in players},
+            "period": str(d.get("period") or ""),
+            "month": {k: int(month.get(k) or 0) for k in players},
+            "months": [{"period": str(m.get("period") or ""),
+                        **{k: int(m.get(k) or 0) for k in players}} for m in hist]}
+
+
 def pool_status():
     """Scrub state and error counters, which zpool list does not carry."""
     return _read_json("poolstatus.json", {})
@@ -940,8 +1158,9 @@ def request_serve(host=""):
     # Read the NAS app inventory directly: an enable click can arrive before
     # the first 20s service probe has filled the in-memory list.
     svcs = discover()
+    # an app bound to one LAN address cannot be reached by Serve's 127.0.0.1 proxy
     want = sorted({int(s["lport"]) for s in svcs
-                   if s.get("lport") and not s.get("port")})
+                   if s.get("lport") and not s.get("port") and not s.get("bind")})
     if PORT not in {int(s["lport"]) for s in svcs if s.get("lport")}:
         want.append(PORT)              # Dashy publishes no ports of its own
     want = sorted(set(want))
@@ -1211,6 +1430,8 @@ def app_status(svc):
         return "stopped"
     if state == "CRASHED":
         return "crashed"
+    if not svc.get("lport"):
+        return "up" if state == "RUNNING" else "stopped"   # nothing to probe
     return "up" if svc.get("code") else "noreply"
 
 
@@ -1262,9 +1483,11 @@ def discover():
         # it had been removed. Remember where it was last seen.
         if chosen is None and a.get("state") != "RUNNING" and app_name in _last_port:
             chosen, ppath = _last_port[app_name]
-        if chosen is None:
-            continue                 # host networking, or nothing web-facing
-        _last_port[app_name] = (chosen, ppath if chosen == pport else "/")
+        # Tailscale, HexOS, RustDesk: installed and running, but nothing to open.
+        # They still get a tile, judged on what TrueNAS says rather than a probe.
+        if chosen is not None:
+            _last_port[app_name] = (chosen, ppath if chosen == pport else "/")
+        bind = (a.get("bind") or {}).get(str(chosen)) if chosen else None
         # The catalogue's own title and one-line description. A custom app
         # has neither, so it is titled from its name on the NAS.
         if me:
@@ -1272,7 +1495,8 @@ def discover():
         else:
             label = str(a.get("title") or "").strip() or app_name.replace("-", " ").title()
             desc = str(a.get("desc") or "").strip()
-        out.append({"port": pub.get(chosen), "lport": chosen,
+        out.append({"port": pub.get(chosen) if chosen else None, "lport": chosen,
+                    "bind": bind,
                     "path": ppath if chosen == pport else "/",
                     "name": label, "desc": desc,
                     "state": a.get("state"), "job": a.get("job"), "app": app_name,
@@ -1298,13 +1522,13 @@ def _installed_names():
         return []
 
 
-def probe(port):
+def probe(port, host=None):
     """Is something answering on the host at this port? Any HTTP reply counts as up.
 
     The time it takes to answer is returned alongside the code: it is the one
     live figure that is genuinely per-app, and a service creeping from 20ms to
     two seconds is worth seeing before it stops answering at all."""
-    url = "http://%s:%d/" % (HOST_IP, port)
+    url = "http://%s:%d/" % (host or HOST_IP, port)
     req = urllib.request.Request(url, method="GET")
     t0 = time.monotonic()
     try:
@@ -1324,17 +1548,19 @@ def services_loop():
             tn = tailnet_host()
             for svc in discover():
                 svc = dict(svc)
-                if svc.get("state") in ("STOPPED", "STOPPING", "DEPLOYING") or svc.get("job"):
+                if (svc.get("state") in ("STOPPED", "STOPPING", "DEPLOYING") or svc.get("job")
+                        or not svc["lport"]):
                     code, ms = None, None
                 else:
-                    code, ms = probe(svc["lport"])
+                    code, ms = probe(svc["lport"], svc.get("bind"))
                 svc["code"] = code
                 svc["rt_ms"] = ms
                 path = svc.get("path") or "/"
                 # Keep discovered LAN/tailnet URLs and the corresponding overrides
                 # separate. The owner can correct either mode without affecting the
                 # other mode or relying on a guessed published port.
-                auto_lan = "http://%s:%d%s" % (LINK_HOST, svc["lport"], path)
+                auto_lan = ("http://%s:%d%s" % (svc.get("bind") or LINK_HOST, svc["lport"], path)
+                            if svc["lport"] else None)
                 auto_ts = ("https://%s:%d%s" % (tn, svc["port"], path)
                            if (tn and svc.get("port")) else None)
                 entry = over.get(svc.get("id") or "") or {}
@@ -1405,7 +1631,9 @@ def snapshot():
     out["procs"] = procs_now()
     out["poolstatus"] = pool_status()
     out["vms"] = vms_now()
-    out["live"] = {"plex": plex_live(), "pihole": pihole_live()}
+    out["live"] = {"plex": plex_live(), "pihole": pihole_live(),
+                   "ollama": ollama_live(), "tally": tally_live(), "immich": immich_live(),
+                   "abs": abs_live(), "sparky": sparky_live(), "ma": ma_live()}
     out["links"] = header_links(svc, (out["prefs"] or {}).get("setup"))
     return out
 
@@ -1725,7 +1953,6 @@ PAGE = """<!doctype html>
     transform:scale(.967);transition-duration:.09s}
   .ibtn:active{transform:scale(.94);transition-duration:.09s}
   .sw button:active{transform:scale(.88);transition-duration:.09s}
-  .apptile .upd:active{transform:scale(.88);transition-duration:.09s}
   @media (prefers-reduced-motion:reduce){
     .card:active,.apptile:active,.mi:active,.x:active,.seg button:active,
     .cardtools button:active,.editbar button:active,.ubtn:active,
@@ -2021,7 +2248,9 @@ PAGE = """<!doctype html>
            border-radius:var(--r-lg);
            padding:0 40px 0 10px;min-height:56px;transition:border-color .15s ease}
   .apptile:hover{border-color:color-mix(in srgb,var(--accent) 40%,var(--brd))}
-  .apptile .sdot{position:absolute;top:calc(50% - 4px);right:16px;width:8px;height:8px;
+  /* the dot is centred as far in from the right edge as the icon is from the left,
+     so the tile reads as balanced */
+  .apptile .sdot{position:absolute;top:calc(50% - 4px);right:24px;width:8px;height:8px;
                  border-radius:50%;background:var(--muted);opacity:.5}
   /* green when answering, red when it should be and is not, amber while TrueNAS
      is starting or stopping it, and a grey, faded tile when it is off on purpose */
@@ -2040,25 +2269,18 @@ PAGE = """<!doctype html>
                overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .apptile .ap{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;align-self:start;
                overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .apptile .upd{position:absolute;top:calc(50% - 11px);right:9px;cursor:pointer;appearance:none;
-                width:21px;height:21px;display:flex;align-items:center;justify-content:center;
-                padding:0;line-height:1;color:var(--warn);border-radius:50%;
-                border:1px solid color-mix(in srgb,var(--warn) 55%,transparent);
-                background:color-mix(in srgb,var(--warn) 9%,transparent)}
-  .apptile .upd:hover{border-color:var(--warn);
-                      background:color-mix(in srgb,var(--warn) 17%,transparent)}
-  .apptile .upd::before{content:"\\203a";display:block;font-size:15px;line-height:1;
-                        transform:rotate(-90deg) translateY(-1px);
-                        transition:transform .15s ease, opacity .15s ease}
-  .apptile .upd:hover::before{transform:rotate(-90deg) translateY(1px)}
+  /* an update is waiting: the tile is outlined, and the Update button is in its sheet */
+  .apptile[data-upd]{border-color:color-mix(in srgb,var(--warn) 80%,transparent);
+                     box-shadow:var(--tile-shadow),inset 0 0 0 1px color-mix(in srgb,var(--warn) 45%,transparent)}
+  .apptile[data-upd]:hover{border-color:var(--warn)}
   /* update progress. Queued and running are not warnings, so they wear the
      accent; only a finished or failed update takes a status colour. */
-  .apptile .ust{position:absolute;top:calc(50% - 8px);right:8px;font-size:9px;font-weight:700;
+  .apptile .ust{position:absolute;top:calc(50% - 8px);right:10px;font-size:9px;font-weight:700;
                 letter-spacing:.04em;text-transform:uppercase;border-radius:999px;padding:2px 6px;
                 display:none;font-variant-numeric:tabular-nums}
   .apptile[data-ust] .ust{display:block}
   .apptile[data-ust] .sdot{display:none}
-  .apptile[data-ust] .upd,.apptile .upd ~ .sdot,.apptile:has(.upd) .sdot{display:none}
+  .apptile[data-ust]{padding-right:72px}      /* room for the 'Queued' / percent label */
   .apptile[data-ust="queued"] .ust,.apptile[data-ust="running"] .ust{
     color:var(--accent);background:color-mix(in srgb,var(--accent) 16%,transparent)}
   .apptile[data-ust="done"] .ust{color:var(--ok);background:color-mix(in srgb,var(--ok) 18%,transparent)}
@@ -2068,13 +2290,12 @@ PAGE = """<!doctype html>
   /* two to a row on a phone, as in the Overlook phone dashboard */
   @media(max-width:520px){
     .appgrid{grid-template-columns:1fr 1fr}
-    .apptile{padding:0 22px 0 9px;column-gap:9px}
+    .apptile{padding:0 38px 0 9px;column-gap:9px}
     .apptile .an{font-size:13.5px}
     .apptile .ap{font-size:11.5px}
     .apptile .vw{display:none}
-    .apptile .sdot{right:10px;width:7px;height:7px}
-    .apptile .upd{right:3px}
-    .apptile .pin{right:20px}
+    .apptile .sdot{right:23.5px;width:7px;height:7px}
+    .apptile .pin{right:35px}
   }
   /* live tiles: twice as wide and twice as tall, and the grid packs around them */
   .appgrid{grid-auto-flow:row dense}
@@ -2084,11 +2305,21 @@ PAGE = """<!doctype html>
   .apptile.wide .aico{grid-row:1;grid-column:1;align-self:start}
   .apptile.wide .an{grid-row:2;grid-column:1/3;align-self:end}
   .apptile.wide .ap{grid-row:3;grid-column:1/3}
-  .apptile.wide .sdot{top:14px}
-  .apptile.wide .upd{top:8px}
+  .apptile.wide .sdot{top:26px;right:26px}
   .apptile.wide .ust{top:9px}
   .apptile .live{grid-column:3;grid-row:1/4;display:flex;flex-direction:column;justify-content:flex-end;
                  gap:3px;min-width:0;padding-right:4px}
+  /* tall live tiles: one column, two rows. The header is the ordinary 56px tile,
+     so icon, name and dot line up with their neighbours; the live part sits below */
+  .apptile.tall{grid-row:span 2;grid-template-rows:28px 28px minmax(0,1fr);align-content:stretch;
+                padding-bottom:10px}
+  .apptile.tall .aico{grid-row:1/3;align-self:center}
+  .apptile.tall .sdot{top:24px}
+  .apptile.tall .live{grid-column:1/-1;grid-row:3;margin-right:-26px;padding-right:0;padding-left:2px}
+  .apptile.tall .live{justify-content:flex-end;gap:4px}
+  .apptile.tall .live .lt{-webkit-line-clamp:1}
+  .apptile.tall .lunload,.live .lacc{color:var(--accent);font-weight:650}
+  .apptile.tall .live .lbar{margin:2px 0 1px}
   .live .lk{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .live .lt{font-size:14px;font-weight:600;line-height:1.25;overflow:hidden;
             display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}
@@ -2099,7 +2330,7 @@ PAGE = """<!doctype html>
             font-variant-numeric:tabular-nums;white-space:nowrap}
   .live .lm span:first-child{overflow:hidden;text-overflow:ellipsis}
   /* the artwork sits behind, faded into the tile so the text reads in either theme */
-  .apptile.plexing{background:
+  .apptile.plexing,.apptile.maart{background:
       linear-gradient(90deg,var(--panel) 22%,color-mix(in srgb,var(--panel) 74%,transparent) 52%,
                       color-mix(in srgb,var(--panel) 50%,transparent)),
       var(--art,none) center/cover no-repeat,var(--panel)}
@@ -2111,6 +2342,13 @@ PAGE = """<!doctype html>
   .live .nums b{font-size:16px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.15}
   .live .nums u{text-decoration:none;font-size:10.5px;color:var(--muted)}
   .live .nums span:last-child b{color:var(--accent)}
+  /* Pi-hole's third figure is the rate; on Tally each player wears their colour instead */
+  .apptile.tally .live .nums span:last-child b{color:inherit}
+  .live .split{display:flex;gap:3px;height:8px;margin-top:4px}
+  .live .split i,.live .pdot{display:block;min-width:4px;border-radius:4px;background:var(--accent)}
+  .live .pdot{display:inline-block;width:7px;height:7px;min-width:0;margin-right:4px;vertical-align:1px}
+  .live .split i[data-i="1"],.live .pdot[data-i="1"]{background:color-mix(in srgb,var(--warn) 85%,var(--panel))}
+  .live .split i[data-i="2"],.live .pdot[data-i="2"]{background:var(--ok)}
   .live .hbars{display:flex;align-items:flex-end;gap:2px;height:34px}
   .live .hbars i{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:flex-end;
                  border-radius:2px;overflow:hidden;background:color-mix(in srgb,var(--ink) 16%,transparent)}
@@ -2147,7 +2385,7 @@ PAGE = """<!doctype html>
   /* a custom address is a deliberate choice, so its tile carries a small pin
      marker rather than looking identical to the auto-resolved ones. The edit
      itself lives in the app sheet now, not on the tile. */
-  .apptile .pin{position:absolute;top:calc(50% - 4px);right:31px;width:7px;height:7px;
+  .apptile .pin{position:absolute;top:calc(50% - 4px);right:38px;width:7px;height:7px;
                 border-radius:50% 50% 50% 0;transform:rotate(-45deg);
                 background:var(--accent);box-shadow:0 0 0 2px var(--surf)}
   .apptile{cursor:pointer}
@@ -2197,6 +2435,8 @@ PAGE = """<!doctype html>
            margin-top:8px;padding:12px 16px max(12px,env(safe-area-inset-bottom));
            background:var(--panel);border-top:1px solid var(--brd)}
   .appacts .ubtn{flex:1}
+  .appacts{flex-wrap:wrap}
+  .appacts .ubtn.upd{flex:1 0 100%}
   .appacts .launch{background:var(--accent);color:#fff;border-color:transparent;flex:2}
   .appacts .launch:disabled{opacity:.5}
   .optbox{margin:0 16px 4px;padding:0 0 6px}
@@ -3496,6 +3736,7 @@ function paintAppStatus(){
   const by={}; (data.services||[]).forEach(s=>by[s.id]=s);
   document.querySelectorAll('.apptile[data-uid]').forEach(t=>{
     const s=by[t.dataset.uid]; if(!s) return;
+    t.toggleAttribute('data-upd', !!s.update);
     const k=appSt(s);
     if(t.dataset.st===k) return;
     t.dataset.st=k;
@@ -3542,7 +3783,7 @@ function liveBox(t){
   return b;
 }
 function dropLive(t,cls){
-  t.classList.remove('wide',cls); const b=t.querySelector('.live'); if(b) b.remove();
+  t.classList.remove('wide','tall',cls); const b=t.querySelector('.live'); if(b) b.remove();
 }
 function paintLive(){
   const L=plexLive(), t=plexTile();
@@ -3592,6 +3833,108 @@ function paintLive(){
       }).join('')+'</span>';
     }
   }
+  // Ollama: only while a model is loaded, with the time until it unloads ticking down
+  const OL=data.live&&data.live.ollama;
+  const ot=OL&&document.querySelector('.apptile[data-app="'+CSS.escape(OL.app)+'"]');
+  if(ot){
+    const m=(OL.models||[])[0];
+    if(!m){ dropLive(ot,'ollama'); }
+    else{
+      ot.classList.add('tall','ollama');
+      // keep the running deadline unless the new one is really different (a fresh
+      // request resets Ollama's timer), so the countdown does not stutter per poll
+      const due = m.left!=null ? Date.now()+m.left*1000 : 0, was=+ot.dataset.unload||0;
+      if(!due || !was || Math.abs(due-was)>3000) ot.dataset.unload = due ? String(due) : '';
+      liveBox(ot).innerHTML=
+        '<span class="lt">'+esc(m.name)+((OL.models.length>1)?' +'+(OL.models.length-1):'')+'</span>'+
+        '<span class="lm"><span>'+(m.size/1073741824).toFixed(1)+' GB \u00b7 '+(m.gpu?m.gpu+'% GPU':'CPU')+'</span>'+
+        '<span class="lunload" title="Unloads in"></span></span>';
+    }
+  }
+  // Tally: always on, this month up front and the all-time split underneath
+  const TL=data.live&&data.live.tally;
+  const tt=TL&&document.querySelector('.apptile[data-app="'+CSS.escape(TL.app)+'"]');
+  if(tt){
+    const ps=TL.players||[];
+    if(!ps.length){ dropLive(tt,'tally'); }
+    else{
+      tt.classList.add('wide','tally');
+      const cap=k=>k.charAt(0).toUpperCase()+k.slice(1);
+      const mo=TL.month||{}, tot=TL.total||{};
+      const sum=ps.reduce((a,k)=>a+(tot[k]||0),0);
+      const pd=/^(\\d{4})-(\\d{2})$/.exec(TL.period||'');
+      const mname=pd?new Date(+pd[1],+pd[2]-1,1).toLocaleString(undefined,{month:'long'}):'This month';
+      liveBox(tt).innerHTML='<span class="lk">'+esc(mname)+'</span><span class="nums">'+
+        ps.map((k,i)=>'<span><b>'+(mo[k]||0)+'</b><u><i class="pdot" data-i="'+i+'"></i>'+esc(cap(k))+'</u></span>').join('')+
+        '<span><b>'+ps.map(k=>tot[k]||0).join('–')+'</b><u>All time</u></span></span>'+
+        '<span class="split">'+ps.map((k,i)=>'<i data-i="'+i+'" title="'+esc(cap(k))+' '+(tot[k]||0)+'" style="flex:'+
+          (sum?(tot[k]||0):1)+'"></i>').join('')+'</span>';
+    }
+  }
+  // Immich (tall): the library, or what it is still processing
+  const IM=data.live&&data.live.immich;
+  const it=IM&&document.querySelector('.apptile[data-app="'+CSS.escape(IM.app)+'"]');
+  if(it){
+    it.classList.add('tall','immich');
+    const JOB={thumbnailGeneration:'thumbnails',metadataExtraction:'metadata',videoConversion:'videos',
+               faceDetection:'faces',facialRecognition:'faces',smartSearch:'smart search',
+               duplicateDetection:'duplicates',library:'library scan',sidecar:'sidecars',ocr:'text'};
+    const b=(IM.busy||[])[0];
+    liveBox(it).innerHTML='<span class="lt">'+IM.photos.toLocaleString()+' photos</span>'+
+      '<span class="lm"><span>'+(b?'Processing '+esc(JOB[b[0]]||b[0])+'…':kNum(IM.videos)+' videos · '+disk(IM.bytes))+'</span>'+
+      (b?'<span class="lacc">'+kNum(b[1])+' left</span>':'')+'</span>';
+  }
+  // Audiobookshelf (tall): a live session, or the book left off most recently
+  const AB=data.live&&data.live.abs;
+  const at=AB&&document.querySelector('.apptile[data-app="'+CSS.escape(AB.app)+'"]');
+  if(at){
+    if(!AB.title){ dropLive(at,'abs'); }
+    else{
+      at.classList.add('tall','abs');
+      const pct=AB.dur?Math.min(100,100*AB.at/AB.dur):0, left=Math.max(0,AB.dur-AB.at);
+      const h=Math.floor(left/3600), m=Math.round((left%3600)/60);
+      liveBox(at).innerHTML='<span class="lt">'+esc(AB.title)+'</span>'+
+        '<span class="lbar"><i style="width:'+pct.toFixed(1)+'%"></i></span>'+
+        '<span class="lm"><span'+(AB.live?' class="lacc"':'')+'>'+(AB.live?'Listening now':Math.round(pct)+'%')+'</span>'+
+        '<span>'+(h?h+'h ':'')+m+'m left</span></span>';
+    }
+  }
+  // SparkyFitness (wide): only while a fast is running, with the clock ticking
+  const SP=data.live&&data.live.sparky;
+  const st2=SP&&document.querySelector('.apptile[data-app="'+CSS.escape(SP.app)+'"]');
+  if(st2){
+    const f=SP.fast;
+    if(!f||!f.start){ dropLive(st2,'fasting'); delete st2.dataset.fs; }
+    else{
+      st2.classList.add('wide','fasting');
+      st2.dataset.fs=String(f.start*1000); st2.dataset.fe=f.end?String(f.end*1000):'';
+      liveBox(st2).innerHTML='<span class="lk">Fasting'+(f.type?' · '+esc(f.type):'')+'</span>'+
+        '<span class="lt fel"></span><span class="lbar"><i></i></span>'+
+        '<span class="lm"><span class="fgoal"></span><span class="fleft"></span></span>';
+    }
+  }
+  // Music Assistant (wide): whatever is playing, on which speaker, with the album behind it
+  const MA=data.live&&data.live.ma;
+  const mt=MA&&document.querySelector('.apptile[data-app="'+CSS.escape(MA.app)+'"]');
+  if(mt){
+    const pl=MA.playing||[], x=pl[0];
+    if(!x){ dropLive(mt,'maart'); mt.style.removeProperty('--art'); delete mt.dataset.art; }
+    else{
+      mt.classList.add('wide','maart');
+      if(mt.dataset.art!==(x.art||'')){
+        mt.dataset.art=x.art||'';
+        mt.style.setProperty('--art', x.art ? 'url("/api/ma/art?p='+encodeURIComponent(x.art)+'")' : 'none');
+      }
+      // the clock runs on between polls, and only resets when the gap is real
+      const due=Date.now()-x.at*1000, was=+mt.dataset.mstart||0;
+      if(!was || Math.abs(due-was)>4000 || mt.dataset.mtitle!==x.title){ mt.dataset.mstart=String(due); mt.dataset.mtitle=x.title; }
+      mt.dataset.mdur=String(x.dur*1000);
+      liveBox(mt).innerHTML='<span class="lk">'+esc(x.player)+(pl.length>1?' · '+(pl.length-1)+' more':'')+'</span>'+
+        '<span class="lt">'+esc(x.title)+(x.artist?' · '+esc(x.artist):'')+'</span>'+
+        (x.dur?'<span class="lbar"><i></i></span>':'')+
+        '<span class="lm"><span>'+esc(x.album||'Playing')+'</span><span class="mtime"></span></span>';
+    }
+  }
   // Pi-hole: the last 24 hours, and an hourly chart with the blocked share filled in
   const PH=data.live&&data.live.pihole;
   const pt=PH&&document.querySelector('.apptile[data-app="'+CSS.escape(PH.app)+'"]');
@@ -3608,6 +3951,7 @@ function paintLive(){
         '</span>';
     }
   }
+  tickLive();      // fill the clocks now, not on the next one-second tick
 }
 function kNum(n){
   if(n<10000) return n.toLocaleString();
@@ -3615,6 +3959,26 @@ function kNum(n){
   return (n/1e6).toFixed(1)+'M';
 }
 function tickLive(){
+  const mt=document.querySelector('.apptile.maart');
+  if(mt){
+    const d=+mt.dataset.mdur||0, o=Math.min(d||Infinity, Date.now()-(+mt.dataset.mstart||Date.now()));
+    const tm=mt.querySelector('.mtime'); if(tm) tm.textContent = d ? fmtDur(o)+' / '+fmtDur(d) : '';
+    const b=mt.querySelector('.lbar i'); if(b && d) b.style.width=Math.min(100,100*o/d)+'%';
+  }
+  const ft=document.querySelector('.apptile.fasting');
+  if(ft){
+    const s0=+ft.dataset.fs, e0=+ft.dataset.fe||0, now=Date.now();
+    const q=c=>ft.querySelector(c);
+    if(q('.fel')) q('.fel').textContent=fmtDur(now-s0)+' fasted';
+    if(e0){
+      if(q('.lbar i')) q('.lbar i').style.width=Math.min(100,100*(now-s0)/(e0-s0))+'%';
+      if(q('.fgoal')) q('.fgoal').textContent='Goal '+Math.round((e0-s0)/3600000)+'h';
+      if(q('.fleft')) q('.fleft').textContent= now<e0 ? fmtDur(e0-now)+' to go' : 'Goal reached';
+    }
+  }
+  const ot=document.querySelector('.apptile.ollama');
+  if(ot){ const u=ot.querySelector('.lunload'), at=+ot.dataset.unload;
+          if(u) u.textContent = at ? fmtDur(Math.max(0, at-Date.now())) : '\u2014'; }
   const L=plexLive(), t=plexTile();
   if(!L||!t||!(L.sessions||[]).length) return;
   const x=L.sessions[0], o=liveNow(x);
@@ -4276,8 +4640,6 @@ function rowsApps(){
       ' href="'+esc(appURL(s)||'#')+'"'+
       ' role="button" aria-label="'+esc(s.name)+' details">'+
       '<span class="sdot"></span>'+
-      (s.update?'<button class="upd" data-app="'+esc(s.app)+'" data-name="'+esc(s.name)+'" '+
-                 'data-ver="'+esc(niceVer(s))+'" aria-label="Update '+esc(s.name)+'"></button>':'')+
       '<span class="ust"></span><span class="uprog"><i></i></span>'+
       (isPinned(s)?'<span class="pin" aria-hidden="true"></span>':'')+
       appIcon(s)+
@@ -4360,7 +4722,8 @@ function appSheet(id){
   if(!s) return null;
   const k=appSt(s), up=k==='up';
   const ver=String(s.version||'').trim();
-  const newer=String(s.update||'').trim();
+  // TrueNAS says whether there is an update, not what it is; only a version string is shown
+  const newer=typeof s.update==='string' ? s.update.trim() : '';
   const overrides=urlOverrides(id);
   const lanAuto=s.url_lan_auto||s.url_lan||'';
   const tsAuto=s.url_ts_auto||s.url_ts||'';
@@ -4370,7 +4733,7 @@ function appSheet(id){
 
   const pill={up:'up',noreply:'down',crashed:'down',stopped:'off'}[k]||'warn';
   const head='<span class="pill '+pill+'"><span class="dot"></span>'+esc(APP_ST[k]||k)+'</span>';
-  const codeTxt=up?('HTTP '+s.code):(s.code===0?'no reply':'');
+  const codeTxt=(up&&s.code)?('HTTP '+s.code):(s.code===0?'no reply':(s.lport?'':'no web page'));
   // Response latency is per-app. CPU, RAM, Network and Disk I/O are the live
   // host readings currently available to Dashy, so each is explicitly marked
   // NAS rather than being presented as container-level usage.
@@ -4414,6 +4777,8 @@ function appSheet(id){
 
   const acts=
     '<div class="appacts">'+
+      (s.update && !updState(s.app)
+        ? '<button class="ubtn yes upd" id="ap-upd" type="button">Update '+esc(s.name)+'</button>' : '')+
       '<button class="ubtn no" id="ap-opt" type="button">Options</button>'+
       '<button class="ubtn launch" id="ap-launch" type="button"'+
         (target?'':' disabled')+'>Launch</button>'+
@@ -4427,7 +4792,8 @@ function appSheet(id){
       (s.desc?'<div class="appdesc">'+esc(s.desc)+'</div>':'')+
       '<div class="appstat">'+head+
         '<span class="appver">'+(ver?esc(ver):'')+(newer?' \u2192 '+esc(newer):'')+'</span></div>'+
-      response+cards+plexRows(s)+urls+'<div id="ap-optbox"></div>'+acts+
+      // nothing to probe and nowhere to open: no latency, and Options can still pin an address
+      (s.lport?response:'')+cards+plexRows(s)+(s.lport||target?urls:'')+'<div id="ap-optbox"></div>'+acts+
     '</div>', sub];
 }
 
@@ -4771,14 +5137,16 @@ document.addEventListener('pointercancel', ()=>{ cancelHold(); endDrag(); });
 document.addEventListener('scroll', cancelHold, {passive:true});
 
 document.addEventListener('click',ev=>{
-  const u=ev.target.closest('.apptile .upd');
-  if(u){ ev.preventDefault(); ev.stopPropagation();
-         askUpdate(u.dataset.app,u.dataset.name,u.dataset.ver); return; }
   // the tile itself now opens the sheet; Launch inside it is what opens the app
   const tile=ev.target.closest('.apptile');
   if(tile){ ev.preventDefault();
             openPop('app-'+tile.dataset.uid); return; }
   if(ev.target.id==='ap-opt'){ appOptions(); return; }
+  if(ev.target.id==='ap-upd'){
+    const s=((data&&data.services)||[]).filter(x=>x.id===openKey.slice(4))[0];
+    if(s) askUpdate(s.app, s.name, niceVer(s));
+    return;
+  }
   if(ev.target.id==='ap-launch'){
     const id=openKey.slice(4);
     const s=((data&&data.services)||[]).filter(x=>x.id===id)[0]||{};
@@ -5096,9 +5464,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send_appicon(path[len("/appicon/"):])
         elif path in ICONS:
             self._send_icon(ICONS[path])
-        elif path == "/api/plex/art":
+        elif path in ("/api/plex/art", "/api/ma/art"):
             q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
-            blob = plex_art((q.get("p") or [""])[0])
+            blob = (plex_art if path == "/api/plex/art" else ma_art)((q.get("p") or [""])[0])
             if blob:
                 self._send(200, blob, "image/jpeg", cache="public, max-age=86400")
             else:
