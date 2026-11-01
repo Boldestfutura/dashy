@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.1"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -2578,6 +2578,14 @@ PAGE = """<!doctype html>
   .acell .mspark{height:20px;margin-top:4px}
   .acell .mspark svg{width:100%;height:20px;display:block}
   .anote{margin:-4px 20px 12px;font-size:11.5px;color:var(--muted)}
+  /* the tile's live view, reused: drop the tile's grid, frame and press states,
+     keep every class-scoped rule that draws its contents */
+  .abox.alivebox{padding:0;overflow:hidden}
+  .abox .apptile.alive{display:flex;flex-direction:column;min-height:0;padding:14px 16px;cursor:default;
+                       border:none;box-shadow:none;border-radius:16px;background-color:var(--panel);transform:none}
+  .abox .apptile.alive:hover{border-color:transparent}
+  .abox .apptile.alive .live{grid-column:auto;grid-row:auto;margin:0;padding:0;gap:4px;justify-content:flex-start}
+  .abox .apptile.alive .live .lt{-webkit-line-clamp:3}
   .acust{margin:0 16px 12px;padding:4px 14px;border-radius:16px;background:var(--surf)}
   .acust .crow{display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid var(--faint)}
   .acust .crow:last-child{border-bottom:none}
@@ -4990,8 +4998,28 @@ const abox=(title,inner,aside)=>'<div class="abox"><div class="ah">'+title+(asid
 function unit(v,u){ return v+'<small>'+u+'</small>'; }
 function partsHtml(p){ return p[1]?unit(p[0],p[1]):p[0]; }
 
-// What the app itself reports, for the apps Dashy can read
+// The tile's own live view, shown in the sheet exactly as the tile draws it
+// (Pi-hole's hourly bars, Scrutiny's temperatures, Plex with its artwork),
+// so the same information never looks two different ways. It is a copy of
+// the tile's markup with the tile's live classes, and it refreshes with the
+// sheet on every poll. Empty when the tile has nothing live to show.
+const TILE_ONLY=['apptile','wide','tall','dragging','jig','sel'];
+function tileLive(s){
+  const t=document.querySelector('.apptile[data-uid="'+CSS.escape(s.id)+'"]');
+  const L=t && t.querySelector('.live');
+  if(!L || !L.innerHTML.trim()) return '';
+  const cls=[...t.classList].filter(c=>TILE_ONLY.indexOf(c)<0).join(' ');
+  const art=t.style.getPropertyValue('--art');
+  return '<div class="abox alivebox"><div class="apptile alive '+cls+'"'+
+    (art?' style="--art:'+esc(art)+'"':'')+'><span class="live">'+L.innerHTML+'</span></div></div>';
+}
+
+// What the app itself reports, for the apps Dashy can read: the tile's view
+// when it has one up, otherwise a plain summary (a tile switched off, or
+// nothing playing right now)
 function appDetail(s){
+  const tl=tileLive(s);
+  if(tl) return tl;
   const L=data.live||{};
   const of=key=>{ const x=L[key]; return x && x.app===s.app ? x : null; };
   let x;
@@ -5486,7 +5514,7 @@ document.addEventListener('scroll', cancelHold, {passive:true});
 
 document.addEventListener('click',ev=>{
   // the tile itself now opens the sheet; Launch inside it is what opens the app
-  const tile=ev.target.closest('.apptile');
+  const tile=ev.target.closest('.apptile[data-uid]');
   if(tile){ ev.preventDefault();
             openPop('app-'+tile.dataset.uid); return; }
   const tb=ev.target.closest('[data-atab]');
