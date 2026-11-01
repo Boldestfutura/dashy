@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.4.5"
+APP_VERSION = "1.5.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -910,20 +910,57 @@ def abs_art(item):
 
 
 def sparky_live():
-    """The fast under way, if there is one."""
+    """Today in SparkyFitness (steps, calories, water, the weight trend) and the
+    fast under way, if there is one. /api/fasting/current answers a JSON null
+    when nobody is fasting, which looks the same as a failed call, so the
+    widget stats endpoint is what decides whether the key works at all."""
     svc, key = _svc_where(r"sparky"), _app_key("sparkyfitness")
     if not svc or not key:
         return None
-    cur = _app_json(svc, "/api/fasting/current", 30, {"x-api-key": key})
-    if not isinstance(cur, dict) or not cur.get("start_time"):
-        return {"app": svc["app"], "fast": None}
-    def ts(v):
+    h = {"x-api-key": key}
+    st = _app_json(svc, "/api/dashboard/stats", 60, h)
+    if not isinstance(st, dict) or "steps" not in st:
+        return {"app": svc["app"], "error": True}
+    # "today" is the user's day in SparkyFitness, not the container's (often UTC)
+    pref = _app_json(svc, "/api/user-preferences", 3600, h)
+    try:
+        import zoneinfo
+        tz = zoneinfo.ZoneInfo((pref or {}).get("timezone") or "")
+    except (ImportError, ValueError, KeyError, OSError):
+        tz = None
+    today = datetime.datetime.now(tz).date()
+    day = today.isoformat()
+
+    def num(v):
         try:
-            return datetime.datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
-        except ValueError:
-            return None
-    return {"app": svc["app"], "fast": {"start": ts(cur.get("start_time")), "end": ts(cur.get("target_end_time")),
-                                        "type": cur.get("fasting_type") or ""}}
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+    water = _app_json(svc, "/api/measurements/water-intake/" + day, 60, h)
+    goal = _app_json(svc, "/api/goals/for-date?date=" + day, 600, h)
+    rows = _app_json(svc, "/api/measurements/check-in-measurements-range/%s/%s" % (
+        (today - datetime.timedelta(days=13)).isoformat(), day), 300, h)
+    weight = sorted([str(r["entry_date"])[:10], round(num(r["weight"]), 2)]
+                    for r in (rows if isinstance(rows, list) else [])
+                    if isinstance(r, dict) and r.get("weight") is not None
+                    and re.match(r"^\d{4}-\d{2}-\d{2}", str(r.get("entry_date") or "")))
+
+    cur = _app_json(svc, "/api/fasting/current", 30, h)
+    fast = None
+    if isinstance(cur, dict) and cur.get("start_time"):
+        def ts(v):
+            try:
+                return datetime.datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                return None
+        fast = {"start": ts(cur.get("start_time")), "end": ts(cur.get("target_end_time")),
+                "type": cur.get("fasting_type") or ""}
+    return {"app": svc["app"], "fast": fast, "today": day,
+            "steps": int(num(st.get("steps"))), "burned": int(num(st.get("burned"))),
+            "eaten": int(num(st.get("eaten"))), "goal": int(num(st.get("goal"))),
+            "water": int(num((water or {}).get("water_ml") if isinstance(water, dict) else 0)),
+            "water_goal": int(num((goal or {}).get("water_goal_ml") if isinstance(goal, dict) else 0)),
+            "weight": weight}
 
 
 _ma_art = {}
@@ -2366,6 +2403,16 @@ PAGE = """<!doctype html>
   .live .nums b{font-size:16px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.15}
   .live .nums u{text-decoration:none;font-size:10.5px;color:var(--muted)}
   .live .nums span:last-child b{color:var(--accent)}
+  /* SparkyFitness day view: steps and calories, the weight line, then water */
+  .apptile.sparky .live{gap:2px}
+  .apptile.sparky .live .nums{margin:0 0 2px}
+  .apptile.sparky .live .nums span:last-child b{color:inherit}
+  .apptile.sparky .swt{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--muted);
+                       font-variant-numeric:tabular-nums;white-space:nowrap}
+  .apptile.sparky .swt b{font-size:13px;font-weight:650;color:var(--ink)}
+  .apptile.sparky .swt .mspark{flex:1;min-width:24px;height:18px}
+  .apptile.sparky .swt .mspark svg{width:100%;height:18px;display:block}
+  .apptile.sparky .live .lbar{margin:3px 0 1px}
   /* Pi-hole's third figure is the rate; on Tally each player wears their colour instead */
   .apptile.tally .live .nums span:last-child b{color:inherit}
   .live .split{display:flex;gap:3px;height:8px;margin-top:4px}
@@ -3938,7 +3985,41 @@ function paintLive(){
   const st2=SP&&document.querySelector('.apptile[data-app="'+CSS.escape(SP.app)+'"]');
   if(st2){
     const f=SP.fast;
-    if(!f||!f.start){ dropLive(st2,'fasting'); delete st2.dataset.fs; }
+    st2.classList.remove('fasting','sparky','sperr'); delete st2.dataset.fs;
+    if(SP.error){
+      // the key is missing its mark or SparkyFitness is not answering: say so
+      // rather than looking like an ordinary day with nothing logged
+      st2.classList.add('wide','sperr');
+      liveBox(st2).innerHTML='<span class="lk">SparkyFitness</span>'+
+        '<span class="lt">Can’t read today’s data</span>'+
+        '<span class="lm"><span>Check its key in keys.json</span></span>';
+    }
+    else if(!f||!f.start){
+      st2.classList.add('wide','sparky');
+      const n=v=>Number(v||0).toLocaleString();
+      const W=SP.weight||[], last=W[W.length-1];
+      // the change over a week: today's weigh-in against the last one on or
+      // before seven days ago, or the oldest in the fortnight if none is that old
+      let trend='';
+      if(last && W.length>1){
+        const cut=new Date(last[0]+'T00:00:00'); cut.setDate(cut.getDate()-7);
+        const iso=cut.toISOString().slice(0,10);
+        const base=W.filter(r=>r[0]<=iso).pop()||W[0];
+        const days=Math.round((new Date(last[0])-new Date(base[0]))/86400000);
+        const d=last[1]-base[1];
+        if(days>0) trend=(d>0?'+':d<0?'−':'±')+Math.abs(d).toFixed(1)+' kg · '+days+'d';
+      }
+      const wpct=SP.water_goal?Math.min(100,100*SP.water/SP.water_goal):0;
+      liveBox(st2).innerHTML=
+        '<span class="nums"><span><b>'+n(SP.steps)+'</b><u>Steps</u></span>'+
+          '<span><b>'+n(SP.burned)+'</b><u>kcal burned</u></span>'+
+          (SP.eaten>0?'<span><b>'+n(SP.eaten)+'</b><u>of '+n(SP.goal)+' eaten</u></span>':'')+'</span>'+
+        (last?'<span class="swt" title="Weigh-ins, last 14 days"><b>'+last[1].toFixed(1)+' kg</b>'+
+          wspark(W)+(trend?'<span>'+trend+'</span>':'')+'</span>':'')+
+        '<span class="lbar"><i style="width:'+wpct.toFixed(1)+'%"></i></span>'+
+        '<span class="lm"><span>Water '+n(SP.water)+' ml</span>'+
+          (SP.water_goal?'<span>of '+(SP.water_goal/1000).toFixed(1)+' L</span>':'')+'</span>';
+    }
     else{
       st2.classList.add('wide','fasting');
       st2.dataset.fs=String(f.start*1000); st2.dataset.fe=f.end?String(f.end*1000):'';
@@ -4724,6 +4805,24 @@ function monogramHTML(name){
 // A small filled line, for the metric cards. Same square-root idea as the big
 // chart: these figures spend most of their life near the floor, and a linear
 // axis would draw that as a dead flat line.
+// Weigh-ins over the fortnight. mspark keeps 12% of the value as headroom,
+// which flattens a 2-3 kg change on a 90 kg body to nothing; this scales to the
+// readings with a 1 kg floor, so a real trend shows and noise stays small.
+// Spaced by date, not by index: weigh-ins are not daily.
+function wspark(W){
+  if(!W || W.length<2) return '<div class="mspark"></div>';
+  const t=W.map(r=>Date.parse(r[0])), v=W.map(r=>r[1]);
+  const t0=t[0], ts=Math.max(t[t.length-1]-t0,1);
+  let lo=Math.min.apply(null,v), hi=Math.max.apply(null,v);
+  if(hi-lo<1){ const m=(hi+lo)/2; lo=m-.5; hi=m+.5; }
+  const W2=120, H=18, x=i=>((t[i]-t0)/ts)*W2, y=k=>H-2-((k-lo)/(hi-lo))*(H-4);
+  const line=v.map((k,i)=>(i?'L':'M')+x(i).toFixed(1)+' '+y(k).toFixed(1)).join(' ');
+  return '<div class="mspark"><svg viewBox="0 0 '+W2+' '+H+'" preserveAspectRatio="none">'+
+    '<path d="'+line+'" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linejoin="round" '+
+      'stroke-linecap="round" vector-effect="non-scaling-stroke"/>'+
+    '</svg></div>';
+}
+
 function mspark(rows, colour){
   const vals=(rows||[]).map(r=>r[1]).filter(v=>typeof v==='number');
   if(vals.length<2) return '<div class="mspark"></div>';
