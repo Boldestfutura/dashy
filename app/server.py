@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -2403,16 +2403,15 @@ PAGE = """<!doctype html>
   .live .nums b{font-size:16px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.15}
   .live .nums u{text-decoration:none;font-size:10.5px;color:var(--muted)}
   .live .nums span:last-child b{color:var(--accent)}
-  /* SparkyFitness day view: steps and calories, the weight line, then water */
-  .apptile.sparky .live{gap:2px}
-  .apptile.sparky .live .nums{margin:0 0 2px}
+  /* SparkyFitness (tall): steps and weight up top, water underneath */
+  .apptile.sparky .live .nums{margin:0;gap:6px;justify-content:space-between}
+  .apptile.sparky .live .nums span:last-child{text-align:right}
   .apptile.sparky .live .nums span:last-child b{color:inherit}
-  .apptile.sparky .swt{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--muted);
-                       font-variant-numeric:tabular-nums;white-space:nowrap}
-  .apptile.sparky .swt b{font-size:13px;font-weight:650;color:var(--ink)}
-  .apptile.sparky .swt .mspark{flex:1;min-width:24px;height:18px}
-  .apptile.sparky .swt .mspark svg{width:100%;height:18px;display:block}
-  .apptile.sparky .live .lbar{margin:3px 0 1px}
+  .apptile.sparky .live .nums b,.apptile.sparky .live .nums u{white-space:nowrap}
+  /* half width fits three rows, so the water figure sits on the bar's own line */
+  .apptile.sparky .wrow{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--muted);
+                        font-variant-numeric:tabular-nums;white-space:nowrap}
+  .apptile.sparky .wrow .lbar{flex:1;min-width:20px;margin:0}
   /* Pi-hole's third figure is the rate; on Tally each player wears their colour instead */
   .apptile.tally .live .nums span:last-child b{color:inherit}
   .live .split{display:flex;gap:3px;height:8px;margin-top:4px}
@@ -3985,17 +3984,16 @@ function paintLive(){
   const st2=SP&&document.querySelector('.apptile[data-app="'+CSS.escape(SP.app)+'"]');
   if(st2){
     const f=SP.fast;
-    st2.classList.remove('fasting','sparky','sperr'); delete st2.dataset.fs;
+    st2.classList.remove('fasting','sparky','sperr'); delete st2.dataset.fs; st2.removeAttribute('title');
     if(SP.error){
       // the key is missing its mark or SparkyFitness is not answering: say so
       // rather than looking like an ordinary day with nothing logged
-      st2.classList.add('wide','sperr');
-      liveBox(st2).innerHTML='<span class="lk">SparkyFitness</span>'+
-        '<span class="lt">Can’t read today’s data</span>'+
-        '<span class="lm"><span>Check its key in keys.json</span></span>';
+      st2.classList.add('tall','sperr');
+      liveBox(st2).innerHTML='<span class="lt">Can’t read data</span>'+
+        '<span class="lm"><span>Check keys.json</span></span>';
     }
     else if(!f||!f.start){
-      st2.classList.add('wide','sparky');
+      st2.classList.add('tall','sparky');
       const n=v=>Number(v||0).toLocaleString();
       const W=SP.weight||[], last=W[W.length-1];
       // the change over a week: today's weigh-in against the last one on or
@@ -4010,21 +4008,22 @@ function paintLive(){
         if(days>0) trend=(d>0?'+':d<0?'−':'±')+Math.abs(d).toFixed(1)+' kg · '+days+'d';
       }
       const wpct=SP.water_goal?Math.min(100,100*SP.water/SP.water_goal):0;
+      const L=v=>(v/1000).toFixed(1);
+      // half width: steps and weight are the numbers, calories ride on the water line
+      st2.title='Burned '+n(SP.burned)+' kcal'+(SP.eaten>0?', eaten '+n(SP.eaten)+' of '+n(SP.goal):'')+
+                (trend?'. Weight '+trend:'');
       liveBox(st2).innerHTML=
-        '<span class="nums"><span><b>'+n(SP.steps)+'</b><u>Steps</u></span>'+
-          '<span><b>'+n(SP.burned)+'</b><u>kcal burned</u></span>'+
-          (SP.eaten>0?'<span><b>'+n(SP.eaten)+'</b><u>of '+n(SP.goal)+' eaten</u></span>':'')+'</span>'+
-        (last?'<span class="swt" title="Weigh-ins, last 14 days"><b>'+last[1].toFixed(1)+' kg</b>'+
-          wspark(W)+(trend?'<span>'+trend+'</span>':'')+'</span>':'')+
-        '<span class="lbar"><i style="width:'+wpct.toFixed(1)+'%"></i></span>'+
-        '<span class="lm"><span>Water '+n(SP.water)+' ml</span>'+
-          (SP.water_goal?'<span>of '+(SP.water_goal/1000).toFixed(1)+' L</span>':'')+'</span>';
+        '<span class="nums"><span><b>'+n(SP.steps)+'</b><u>steps \u00b7 '+
+            (SP.eaten>0?n(SP.eaten)+' in':n(SP.burned)+' kcal')+'</u></span>'+
+          (last?'<span><b>'+last[1].toFixed(1)+'</b><u>'+(trend?trend.split(' \u00b7')[0]:'kg')+'</u></span>':'')+'</span>'+
+        '<span class="wrow" title="Water"><span class="lbar"><i style="width:'+wpct.toFixed(1)+'%"></i></span>'+
+          '<span>'+L(SP.water)+(SP.water_goal?'/'+L(SP.water_goal):'')+' L</span></span>';
     }
     else{
-      st2.classList.add('wide','fasting');
+      st2.classList.add('tall','fasting');
       st2.dataset.fs=String(f.start*1000); st2.dataset.fe=f.end?String(f.end*1000):'';
-      liveBox(st2).innerHTML='<span class="lk">Fasting'+(f.type?' · '+esc(f.type):'')+'</span>'+
-        '<span class="lt fel"></span><span class="lbar"><i></i></span>'+
+      st2.title='Fasting'+(f.type?' \u00b7 '+f.type:'');
+      liveBox(st2).innerHTML='<span class="lt fel"></span><span class="lbar"><i></i></span>'+
         '<span class="lm"><span class="fgoal"></span><span class="fleft"></span></span>';
     }
   }
@@ -4805,24 +4804,6 @@ function monogramHTML(name){
 // A small filled line, for the metric cards. Same square-root idea as the big
 // chart: these figures spend most of their life near the floor, and a linear
 // axis would draw that as a dead flat line.
-// Weigh-ins over the fortnight. mspark keeps 12% of the value as headroom,
-// which flattens a 2-3 kg change on a 90 kg body to nothing; this scales to the
-// readings with a 1 kg floor, so a real trend shows and noise stays small.
-// Spaced by date, not by index: weigh-ins are not daily.
-function wspark(W){
-  if(!W || W.length<2) return '<div class="mspark"></div>';
-  const t=W.map(r=>Date.parse(r[0])), v=W.map(r=>r[1]);
-  const t0=t[0], ts=Math.max(t[t.length-1]-t0,1);
-  let lo=Math.min.apply(null,v), hi=Math.max.apply(null,v);
-  if(hi-lo<1){ const m=(hi+lo)/2; lo=m-.5; hi=m+.5; }
-  const W2=120, H=18, x=i=>((t[i]-t0)/ts)*W2, y=k=>H-2-((k-lo)/(hi-lo))*(H-4);
-  const line=v.map((k,i)=>(i?'L':'M')+x(i).toFixed(1)+' '+y(k).toFixed(1)).join(' ');
-  return '<div class="mspark"><svg viewBox="0 0 '+W2+' '+H+'" preserveAspectRatio="none">'+
-    '<path d="'+line+'" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linejoin="round" '+
-      'stroke-linecap="round" vector-effect="non-scaling-stroke"/>'+
-    '</svg></div>';
-}
-
 function mspark(rows, colour){
   const vals=(rows||[]).map(r=>r[1]).filter(v=>typeof v==='number');
   if(vals.length<2) return '<div class="mspark"></div>';
