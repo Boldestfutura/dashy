@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.5.4"
+APP_VERSION = "1.5.5"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -909,7 +909,36 @@ def abs_art(item):
     return blob
 
 
+_sparky_good = {}
+_sparky_fail = {}
+SPARKY_GRACE = 600      # a blip after a good reading: keep showing that reading
+SPARKY_COLD = 60        # no good reading yet (Dashy just restarted): plain tile, retry
+
+
 def sparky_live():
+    """Steadier face for _sparky_read. A failed call is retried on the next
+    poll rather than cached for a minute; meanwhile the last good reading
+    stands for SPARKY_GRACE seconds, and with none yet the tile stays plain
+    for SPARKY_COLD seconds. Only a failure that outlasts those shows."""
+    now = time.time()
+    out = _sparky_read()
+    if out is None or not out.get("error"):
+        _sparky_fail.clear()
+        if out:
+            _sparky_good.update(at=now, val=out)
+        return out
+    _sparky_fail.setdefault("since", now)
+    with _lock:                                   # retry next poll, not in a minute
+        for k in [k for k in _app_live if k.startswith(out["app"] + "/api/dashboard/stats")]:
+            del _app_live[k]
+    if _sparky_good and now - _sparky_good["at"] < SPARKY_GRACE:
+        return _sparky_good["val"]
+    if now - _sparky_fail["since"] < SPARKY_COLD:
+        return None
+    return out
+
+
+def _sparky_read():
     """Today in SparkyFitness (steps, calories, water, the weight trend) and the
     fast under way, if there is one. /api/fasting/current answers a JSON null
     when nobody is fasting, which looks the same as a failed call, so the
