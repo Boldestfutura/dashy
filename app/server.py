@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.5.2"
+APP_VERSION = "1.5.3"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -2450,7 +2450,8 @@ PAGE = """<!doctype html>
   .upbanner{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 8px;margin:-12px 0 16px;
             padding:0 2px;font-size:13px}
   .upbanner[hidden]{display:none}
-  .upbanner b{font-weight:650}
+  /* the server name's colour and weight, so it informs without pulling focus */
+  .upbanner b{font-weight:600;color:var(--muted)}
   .upbanner>span{color:var(--muted);font-variant-numeric:tabular-nums}
   .upbanner>span:empty{display:none}
   .upbanner .udots{display:none;color:inherit;font-weight:700;letter-spacing:1px}
