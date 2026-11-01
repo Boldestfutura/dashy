@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.5.2"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -2444,16 +2444,24 @@ PAGE = """<!doctype html>
   /* queued has no percentage yet, so it moves without claiming one */
   [data-ust="queued"] .uprog i{width:35%;animation:indet 1.3s ease-in-out infinite}
   @keyframes indet{0%{transform:translateX(-100%)}100%{transform:translateX(290%)}}
-  .upbanner{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;margin:0 0 14px;
-            padding:11px 14px;border-radius:var(--r-sm);background:var(--panel);
-            border:1px solid color-mix(in srgb,var(--accent) 45%,var(--brd));box-shadow:var(--tile-shadow)}
+  /* Update status: a line of text tucked under the logo, not a card. While it
+     runs it reads "Updating Plex..." with the dots lighting one, two, three
+     in turn; done and failed say so in words, with the detail after a dot. */
+  .upbanner{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 8px;margin:-12px 0 16px;
+            padding:0 2px;font-size:13px}
   .upbanner[hidden]{display:none}
-  .upbanner b{font-size:13px;font-weight:650}
-  .upbanner span{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
-  .upbanner .uprog{display:block;flex:1 0 100%}
-  .upbanner[data-ust="done"]{border-color:color-mix(in srgb,var(--ok) 50%,var(--brd))}
-  .upbanner[data-ust="done"] .uprog,.upbanner[data-ust="failed"] .uprog{display:none}
-  .upbanner[data-ust="failed"]{border-color:color-mix(in srgb,var(--bad) 50%,var(--brd))}
+  .upbanner b{font-weight:650}
+  .upbanner>span{color:var(--muted);font-variant-numeric:tabular-nums}
+  .upbanner>span:empty{display:none}
+  .upbanner .udots{display:none;color:inherit;font-weight:700;letter-spacing:1px}
+  .upbanner[data-ust="queued"] .udots,.upbanner[data-ust="running"] .udots{display:inline}
+  .upbanner .udots i{font-style:normal;opacity:.2;animation:udot 1.2s step-end infinite}
+  .upbanner .udots i:nth-child(2){animation-delay:.4s}
+  .upbanner .udots i:nth-child(3){animation-delay:.8s}
+  @keyframes udot{0%{opacity:1}33.33%{opacity:.2}}
+  .upbanner[data-ust="done"] b::before{content:"\u2713\u00a0";color:var(--ok)}
+  .upbanner[data-ust="failed"] b::before{content:"\u00d7\u00a0";color:var(--bad)}
+  @media (prefers-reduced-motion:reduce){ .upbanner .udots i{animation:none;opacity:1} }
   @media (prefers-reduced-motion:reduce){ [data-ust="queued"] .uprog i{animation:none;width:100%;opacity:.5} }
   .apptile{cursor:pointer}
 
@@ -2695,7 +2703,7 @@ PAGE = """<!doctype html>
   </div>
 
   <div class="upbanner" id="upbanner" role="status" aria-live="polite" hidden>
-    <b id="ub-t"></b><span id="ub-s"></span><span class="uprog"><i id="ub-bar"></i></span>
+    <b><span id="ub-t"></span><span class="udots" aria-hidden="true"><i>.</i><i>.</i><i>.</i></span></b><span id="ub-s"></span>
   </div>
 
   <div id="vitals"></div>
@@ -4126,29 +4134,27 @@ try{
 }catch(e){}
 function paintBanner(){
   const el=$('upbanner'); if(!el) return;
-  const show=(state,title,sub,pct)=>{
+  // while it runs the line is only "Updating <app>" and the dots; the detail
+  // (why it failed, the new version) shows once there is an outcome
+  const show=(state,title,sub)=>{
     el.hidden=false; el.dataset.ust=state;
-    $('ub-t').textContent=title; $('ub-s').textContent=sub||'';
-    $('ub-bar').style.width = state==='running' ? Math.max(4,pct||0)+'%' : '';
+    $('ub-t').textContent=title;
+    $('ub-s').textContent=(state==='queued'||state==='running') ? '' : (sub||'');
   };
   const me=updState('_self');
   if(me && (me.k==='queued'||me.k==='running'))
-    return show(me.k, 'Updating Dashy',
-      me.k==='queued' ? 'starts within a minute' : me.pct+'% \u00b7 the page reloads by itself when it is done', me.pct);
+    return show(me.k, 'Updating Dashy');
   if(selfBusy() && document.body.classList.contains('stale'))
     return show('queued','Dashy is restarting','finishing the update');
   const busy=((data&&data.services)||[]).map(s=>[s,updState(s.app)])
     .filter(([s,u])=>u && (u.k==='queued'||u.k==='running'));
   if(busy.length===1){
     const [s,u]=busy[0];
-    return show(u.k, 'Updating '+s.name,
-      u.k==='queued' ? 'starts within a minute' : u.pct+'% \u00b7 a snapshot was taken first', u.pct);
+    return show(u.k, 'Updating '+s.name);
   }
   if(busy.length>1){
-    const run=busy.filter(([s,u])=>u.k==='running');
-    const pct=run.length ? Math.round(run.reduce((n,[s,u])=>n+u.pct,0)/run.length) : 0;
-    return show(run.length?'running':'queued', 'Updating '+busy.length+' apps',
-      busy.map(([s])=>s.name).join(', '), pct);
+    const run=busy.some(([s,u])=>u.k==='running');
+    return show(run?'running':'queued', 'Updating '+busy.map(([s])=>s.name).join(', '));
   }
   if(justUpdated && Date.now()-justUpdated.at<60000)
     return show('done','Dashy updated', 'now on '+((data&&data.version)||''));
