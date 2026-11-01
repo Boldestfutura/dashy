@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.4.3"
+APP_VERSION = "1.4.4"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -2315,7 +2315,6 @@ PAGE = """<!doctype html>
     .apptile .ap{font-size:11.5px}
     .apptile .vw{display:none}
     .apptile .sdot{right:23.5px;width:7px;height:7px}
-    .apptile .pin{right:35px}
   }
   /* live tiles: twice as wide and twice as tall, and the grid packs around them */
   .appgrid{grid-auto-flow:row dense}
@@ -2410,12 +2409,6 @@ PAGE = """<!doctype html>
   .upbanner[data-ust="done"] .uprog,.upbanner[data-ust="failed"] .uprog{display:none}
   .upbanner[data-ust="failed"]{border-color:color-mix(in srgb,var(--bad) 50%,var(--brd))}
   @media (prefers-reduced-motion:reduce){ [data-ust="queued"] .uprog i{animation:none;width:100%;opacity:.5} }
-  /* a custom address is a deliberate choice, so its tile carries a small pin
-     marker rather than looking identical to the auto-resolved ones. The edit
-     itself lives in the app sheet now, not on the tile. */
-  .apptile .pin{position:absolute;top:calc(50% - 4px);right:38px;width:7px;height:7px;
-                border-radius:50% 50% 50% 0;transform:rotate(-45deg);
-                background:var(--accent);box-shadow:0 0 0 2px var(--surf)}
   .apptile{cursor:pointer}
 
   /* ---- app detail sheet ------------------------------------------------
@@ -4168,11 +4161,6 @@ function appURL(s){
   const pin=urlOverrides(s.id)[mode];
   return pin || autoAppURL(s,mode);
 }
-// A marker means at least one of this app's addresses has been customized.
-function isPinned(s){
-  const fields=urlOverrides(s.id);
-  return !!(fields.lan || fields.ts);
-}
 
 function setLinks(mode){
   prefs.setup=Object.assign({}, prefs.setup, {links:mode});
@@ -4675,7 +4663,6 @@ function rowsApps(){
       ' role="button" aria-label="'+esc(s.name)+' details">'+
       '<span class="sdot"></span>'+
       '<span class="ust"></span><span class="uprog"><i></i></span>'+
-      (isPinned(s)?'<span class="pin" aria-hidden="true"></span>':'')+
       appIcon(s)+
       '<span class="an">'+esc(s.name)+'</span>'+
       '<span class="ap" title="'+esc(s.version||'')+'">'+
@@ -5195,7 +5182,7 @@ document.addEventListener('click',ev=>{
     savePrefs(); if(data) paint(data);
     build();
     if(data) paintLive();
-    // the sheet is still open - rebuild it so the pin marker and the listed
+    // the sheet is still open - rebuild it so the listed
     // address go back to auto straight away, not on the next poll
     const box=$('ap-optbox'); if(box){ box._open=false; box.innerHTML=''; }
     $('sh-b')._html=null; renderPop(false);
