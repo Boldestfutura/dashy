@@ -68,10 +68,15 @@ add and remove things.
   list; unclaimed published ports are ignored. The host-networked Dashy app
   uses its configured listener, while the TrueNAS admin interface stays a
   navigation link. Each app resolves its LAN and tailnet address separately,
-  and either can be corrected in its Options.
-- **App details before launch.** Tap a tile for its live status, response time,
-  version, and live NAS metrics. Choose **Options** to paste a LAN address, a
-  tailnet address, or both; **Launch** uses the mode selected above.
+  and either can be corrected in its Customize tab.
+- **App details before launch.** Tap a tile for its live view, response time,
+  version, and what its containers are using. **Customize** sets the tile's
+  live view, its size, an API key, and a LAN or tailnet address of its own;
+  **Launch** uses the mode selected above.
+- **Settings** has four tabs: General (updates and a diagnostics panel that says
+  whether the collector, updater and live tiles are healthy), Appearance, Apps
+  (every app's live tile at a glance, and a switch to hide apps you never open)
+  and Connections.
 
 | Phone, light | Phone, dark |
 |:--:|:--:|
@@ -83,7 +88,7 @@ add and remove things.
 | Hold a tile to arrange: **2×** resizes, **×** removes | Settings in dark mode |
 
 | ![App details](docs/08-app-popup.png) | ![App launch options](docs/09-app-options.png) |
-| App details and live metrics | Set an app's launch address in Options |
+| App details and live metrics | Set an app's launch address in Customize |
 
 ![An update waiting](docs/07-update.png)
 
@@ -118,7 +123,7 @@ configuration:
    addresses. Turn Tailscale off and Dashy switches the default back to LAN.
 
 There is no need to look up or paste the tailnet name or ports. If an app has an
-unusual address, its **Options** can still override the LAN and tailnet URLs
+unusual address, its **Customize** tab can still override the LAN and tailnet URLs
 separately. Selecting Tailnet also requests publication if any discovered app
 is not published yet.
 
@@ -294,26 +299,40 @@ Everything is optional — the app discovers or asks for all of it.
 | `UPDATE_REPO` / `UPDATE_BRANCH` | `Boldestfutura/dashy` / `main` |
 | `IMAGE_UPDATE_SWEEP` | `1` — nudge TrueNAS to re-check image registries |
 
-### API keys for live tiles
+### Live tiles
 
-Plex, Pi-hole, Scrutiny, Ollama and Tally need nothing. Four apps only answer
-with a key, which you create in the app and put in `keys.json`, next to the
-`data` folder (`<pool>/Applications/dashy/keys.json`), readable by you alone:
+Dashy recognises apps by their name, their catalogue title or, failing both,
+the title of their home page, so an app installed under any name still gets a
+live tile. Plex, Pi-hole, Scrutiny, Ollama and Tally need nothing. The rest
+need a key or a sign-in: open the app's tile, then **Customize**, and paste it
+in. The status under the field says whether it worked.
 
-```json
-{"immich": "...", "audiobookshelf": "...", "sparkyfitness": "...", "music-assistant": "..."}
-```
-
-| App | Key | Tile |
+| App | Credential | Tile |
 |---|---|---|
+| Jellyfin | Dashboard → API Keys | what is playing, art behind; else the library |
+| qBittorrent | web UI username and password | the busiest download; else speeds |
+| Transmission | only if its web UI asks for one | the busiest download; else speeds |
+| Deluge | web UI password | the busiest download; else speeds |
+| Sonarr / Radarr / Lidarr | Settings → General → API Key | the download in progress; else what is out this week |
+| SABnzbd | Config → General → API Key | the download in progress, speed, queue |
+| Nextcloud | admin username and an app password | files, active users, free space |
+| Invoice Ninja | Settings → Account Management → API Tokens | outstanding, unpaid, overdue |
+| Jellyseerr / Overseerr | Settings → General → API Key | pending, processing, available requests |
+| Paperless-ngx | profile → API Auth Token | documents, inbox |
+| Syncthing | Actions → Settings → General → API Key | in sync, devices, folders |
+| Navidrome | username and password | what is playing; else song count |
 | Immich | Account Settings → API Keys (`server.statistics`, `job.read`) | photos, videos, size; jobs still running |
-| Audiobookshelf | Settings → API Keys | the book being listened to, or the one left off |
-| SparkyFitness | Settings → API Keys | the fast under way |
+| Audiobookshelf | Settings → API Keys | the book being listened to |
+| SparkyFitness | Settings → API Keys | today, or the fast under way |
 | Music Assistant | a long-lived token from its settings | what each speaker is playing, album art behind |
 
-The container cannot see that folder. The collector copies the file into
-`data/` as root, readable only by the app, and the keys are used server-side;
-the browser never receives them. Leave an app out and its tile stays plain.
+Keys are saved in `config/keys.json` (mode 600) and used server-side only. The
+page is told which fields are saved, never what they hold. A `keys.json` next
+to the `data` folder, the way keys were added before 2.0, is still read;
+anything saved from Customize takes precedence.
+
+Each live tile can be **1x** (one column) or **2x** (two columns, like Plex),
+also under Customize. Apps are only asked for data while a dashboard is open.
 
 ## Uninstall
 

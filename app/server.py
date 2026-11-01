@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Dashy dashboard: host vitals plus every tailnet-published app, no dependencies."""
+import base64
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -14,7 +16,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.6.1"
+APP_VERSION = "2.0.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -798,12 +800,6 @@ def _svc_where(pattern):
     return None
 
 
-def _app_key(name):
-    """An owner-supplied API key from keys.json, or None."""
-    k = (_read_json("keys.json", {}) or {}).get(name)
-    return k.strip() if isinstance(k, str) and k.strip() else None
-
-
 def _app_json(svc, path, ttl, headers=None):
     """GET one of an app's JSON endpoints, cached for ttl seconds."""
     now = time.time()
@@ -853,7 +849,8 @@ def ollama_live():
 
 def immich_live():
     """Library size, and whatever Immich is still chewing through after an upload."""
-    svc, key = _svc_where(r"immich"), _app_key("immich")
+    svc = _svc_where(r"immich")
+    key = _app_key(svc, "immich")
     if not svc or not key:
         return None
     h = {"x-api-key": key}
@@ -877,7 +874,8 @@ ABS_ITEM = re.compile(r"^[0-9A-Za-z_-]{8,64}$")
 
 def abs_live():
     """What is being listened to right now. Like Plex, nothing when nobody is."""
-    svc, key = _svc_where(r"audiobookshelf"), _app_key("audiobookshelf")
+    svc = _svc_where(r"audiobookshelf")
+    key = _app_key(svc, "audiobookshelf")
     if not svc or not key:
         return None
     h = {"Authorization": "Bearer " + key}
@@ -904,7 +902,8 @@ def abs_art(item):
         return None
     if item in _abs_art:
         return _abs_art[item]
-    svc, key = _svc_where(r"audiobookshelf"), _app_key("audiobookshelf")
+    svc = _svc_where(r"audiobookshelf")
+    key = _app_key(svc, "audiobookshelf")
     if not svc or not key:
         return None
     req = urllib.request.Request("http://%s:%d/api/items/%s/cover?width=512&format=jpeg" % (
@@ -954,7 +953,8 @@ def _sparky_read():
     fast under way, if there is one. /api/fasting/current answers a JSON null
     when nobody is fasting, which looks the same as a failed call, so the
     widget stats endpoint is what decides whether the key works at all."""
-    svc, key = _svc_where(r"sparky"), _app_key("sparkyfitness")
+    svc = _svc_where(r"sparky")
+    key = _app_key(svc, "sparkyfitness")
     if not svc or not key:
         return None
     h = {"x-api-key": key}
@@ -1009,7 +1009,8 @@ MA_ART = re.compile(r"^/imageproxy/[0-9a-f]{16,128}$")
 
 def ma_live():
     """Every Music Assistant player that is playing right now, with what is on."""
-    svc, key = _svc_where(r"music-?assistant"), _app_key("music-assistant")
+    svc = _svc_where(r"music-?assistant")
+    key = _app_key(svc, "music-assistant")
     if not svc or not key:
         return None
     now = time.time()
@@ -1086,6 +1087,625 @@ def tally_live():
             "month": {k: int(month.get(k) or 0) for k in players},
             "months": [{"period": str(m.get("period") or ""),
                         **{k: int(m.get(k) or 0) for k in players}} for m in hist]}
+
+
+# ---------------------------------------------------------------- glance tiles
+# Live tiles for apps Dashy recognises by what they are, not by being told.
+# Each provider says how to spot the app (its name on the NAS or its catalogue
+# title, and failing both the <title> of its home page), which credentials it
+# needs, and how to read a small summary of it. Credentials are typed into the
+# app sheet's Customize tab and kept in config/keys.json; the page is only ever
+# told which fields are saved, never what they hold.
+
+KEYS_CFG = os.path.join(CONFIG, "keys.json")
+KEY = ("key", "API key", True, False)
+USER = ("user", "Username", False, False)
+PASS = ("pass", "Password", True, False)
+
+
+class GlanceAuth(Exception):
+    """The app answered, and refused the credentials (or there were none)."""
+
+
+def _keys():
+    """Every saved credential. keys.json in the read-only data folder is how keys
+    were placed by hand before 2.0; the config copy is written by the page and
+    wins, and an empty string there removes a key the data copy still holds."""
+    out = _read_json("keys.json", {}) or {}
+    out = dict(out) if isinstance(out, dict) else {}
+    try:
+        with open(KEYS_CFG) as fh:
+            mine = json.load(fh)
+        if isinstance(mine, dict):
+            out.update(mine)
+    except (OSError, ValueError):
+        pass
+    return out
+
+
+def _cred(svc, pid):
+    """One app's credentials as {field: value}: by its name on the NAS, then by
+    the provider's id, which is what hand-written keys.json files used."""
+    k = _keys()
+    v = k[svc["app"]] if svc["app"] in k else k.get(pid)
+    if isinstance(v, str):
+        v = {"key": v}
+    if not isinstance(v, dict):
+        return {}
+    return {f: s.strip() for f, s in v.items() if isinstance(s, str) and s.strip()}
+
+
+def _app_key(svc, pid):
+    return _cred(svc, pid).get("key") if svc else None
+
+
+def _rate(bps):
+    bps = float(bps or 0)
+    for u in ("B/s", "KB/s", "MB/s", "GB/s"):
+        if bps < 1000 or u == "GB/s":
+            return ("%.0f %s" if bps >= 100 or u == "B/s" else "%.1f %s") % (bps, u)
+        bps /= 1000.0
+
+
+def _count(n):
+    n = int(n or 0)
+    if n < 10000:
+        return "{:,}".format(n)
+    return ("%.1fk" % (n / 1000.0)) if n < 100000 else ("%.0fk" % (n / 1000.0)) if n < 1e6 else "%.1fM" % (n / 1e6)
+
+
+def _left(secs):
+    """"2h 5m left", or None when the app does not know."""
+    try:
+        s = int(secs)
+    except (TypeError, ValueError):
+        return None
+    if s < 0 or s >= 8640000:
+        return None
+    h, m = s // 3600, (s % 3600 + 59) // 60
+    if h >= 48:
+        return "%dd left" % (h // 24)
+    return ("%dh %dm left" % (h, m)) if h else ("%dm left" % max(1, m))
+
+
+class _AppHttp:
+    """Requests to one app, with its cookies kept between refreshes (qBittorrent
+    and Deluge hand out a session; logging in on every poll would pile them up)."""
+    jars = {}
+
+    def __init__(self, svc):
+        self.base = "http://%s:%d" % (svc.get("bind") or HOST_IP, int(svc["lport"]))
+        self.jar = _AppHttp.jars.setdefault(svc["app"], {})
+        self.headers = {}
+
+    def req(self, path, data=None, headers=None, form=False, raw=False, timeout=5):
+        h = dict(headers or {})
+        if data is not None and not isinstance(data, bytes):
+            if form:
+                data = urllib.parse.urlencode(data).encode()
+                h.setdefault("Content-Type", "application/x-www-form-urlencoded")
+            else:
+                data = json.dumps(data).encode()
+                h.setdefault("Content-Type", "application/json")
+        if self.jar:
+            h["Cookie"] = "; ".join("%s=%s" % kv for kv in self.jar.items())
+        h.setdefault("Accept", "application/json")
+        r = urllib.request.Request(self.base + path, data=data, headers=h)
+        try:
+            with urllib.request.urlopen(r, timeout=timeout) as resp:
+                self.headers = resp.headers
+                for c in resp.headers.get_all("Set-Cookie") or []:
+                    name, _, val = c.split(";", 1)[0].partition("=")
+                    if name.strip():
+                        self.jar[name.strip()] = val.strip()
+                body = resp.read(4_000_000)
+        except urllib.error.HTTPError as e:
+            self.headers = e.headers
+            if e.code in (401, 403):
+                raise GlanceAuth()
+            raise
+        return body if raw else json.loads(body or b"null")
+
+
+def g_jellyfin(h, c):
+    """What is playing, like the Plex tile; with nothing playing, the library."""
+    hd = {"Authorization": 'MediaBrowser Client="Dashy", Device="Dashy", DeviceId="dashy", '
+                           'Version="%s", Token="%s"' % (APP_VERSION, c["key"])}
+    ss = [s for s in h.req("/Sessions?activeWithinSeconds=960", headers=hd) or []
+          if isinstance(s, dict) and s.get("NowPlayingItem")]
+    if ss:
+        ss.sort(key=lambda s: bool((s.get("PlayState") or {}).get("IsPaused")))
+        s, more = ss[0], len(ss) - 1
+        it, ps = s["NowPlayingItem"], s.get("PlayState") or {}
+        dur = float(it.get("RunTimeTicks") or 0) / 1e7
+        at = float(ps.get("PositionTicks") or 0) / 1e7
+        title, sub = it.get("Name") or "", ""
+        if it.get("SeriesName"):
+            title = it["SeriesName"]
+            sub = "S%dE%d · %s" % (int(it.get("ParentIndexNumber") or 0),
+                                        int(it.get("IndexNumber") or 0), it.get("Name") or "")
+        elif it.get("Artists"):
+            sub = ", ".join(it["Artists"][:2])
+        pic = it.get("SeriesId") or it.get("AlbumId") or it.get("Id") or ""
+        return {"head": ("Paused" if ps.get("IsPaused") else "Now playing") + (" · %d more" % more if more else ""),
+                "title": title, "sub": sub or " \u00b7 ".join(v for v in (s.get("UserName"), s.get("DeviceName")) if v),
+                "right": _left(dur - at) if dur else None,
+                "bar": round(100 * at / dur, 1) if dur else None,
+                "art": "/Items/%s/Images/Primary" % pic if re.match(r"^[0-9a-f]{32}$", pic) else None}
+    n = h.req("/Items/Counts", headers=hd) or {}
+    st = [[_count(n.get(k)), lbl] for k, lbl in (("MovieCount", "Movies"), ("SeriesCount", "Shows"),
+          ("EpisodeCount", "Episodes"), ("AlbumCount", "Albums"), ("SongCount", "Songs"),
+          ("BookCount", "Books")) if n.get(k)]
+    return {"head": "Library", "stats": st[:3] or [["0", "Items"]], "line": "Nothing playing"}
+
+
+def _jellyfin_art_headers(c):
+    return {"Authorization": 'MediaBrowser Token="%s"' % c.get("key", "")}
+
+
+def _torrent_shape(down, up, active, total, top):
+    """One look for every torrent client: the busiest download, else the speeds."""
+    st = [[_rate(down), "Down"], [_rate(up), "Up"], [_count(total), "Torrents"]]
+    if top:
+        return {"head": "Downloading" + (" · %d" % active if active > 1 else ""),
+                "title": top["name"], "bar": round(100 * float(top["pct"]), 1),
+                "sub": "↓ " + _rate(down), "right": _left(top.get("eta")), "stats": st}
+    return {"head": "Transfers", "stats": st, "line": "Nothing downloading"}
+
+
+def g_qbittorrent(h, c):
+    try:
+        info = h.req("/api/v2/transfer/info")
+    except GlanceAuth:
+        h.jar.clear()
+        # 4.x answers "Ok." and 5.x an empty 204; both set the session cookie,
+        # and a refused login does not
+        h.req("/api/v2/auth/login", data={"username": c.get("user", ""), "password": c.get("pass", "")},
+              form=True, raw=True)
+        if not any("SID" in k for k in h.jar):
+            raise GlanceAuth()
+        info = h.req("/api/v2/transfer/info")
+    tor = h.req("/api/v2/torrents/info") or []
+    dl = sorted((t for t in tor if t.get("state") in ("downloading", "forcedDL", "metaDL")),
+                key=lambda t: -int(t.get("dlspeed") or 0))
+    top = {"name": dl[0].get("name") or "", "pct": dl[0].get("progress") or 0, "eta": dl[0].get("eta")} if dl else None
+    return _torrent_shape(info.get("dl_info_speed"), info.get("up_info_speed"), len(dl), len(tor), top)
+
+
+def g_transmission(h, c):
+    hd = {}
+    if c.get("user"):
+        hd["Authorization"] = "Basic " + base64.b64encode(
+            ("%s:%s" % (c["user"], c.get("pass", ""))).encode()).decode()
+
+    def rpc(method, args=None):
+        for attempt in (0, 1):
+            if h.jar.get("_sid"):
+                hd["X-Transmission-Session-Id"] = h.jar["_sid"]
+            try:
+                r = h.req("/transmission/rpc", data={"method": method, "arguments": args or {}}, headers=hd)
+                return r.get("arguments") or {}
+            except urllib.error.HTTPError as e:
+                if e.code != 409 or attempt:
+                    raise
+                h.jar["_sid"] = e.headers.get("X-Transmission-Session-Id") or ""
+    stats = rpc("session-stats")
+    tor = rpc("torrent-get", {"fields": ["name", "percentDone", "eta", "rateDownload", "status"]}).get("torrents") or []
+    dl = sorted((t for t in tor if t.get("status") == 4), key=lambda t: -int(t.get("rateDownload") or 0))
+    top = {"name": dl[0].get("name") or "", "pct": dl[0].get("percentDone") or 0, "eta": dl[0].get("eta")} if dl else None
+    return _torrent_shape(stats.get("downloadSpeed"), stats.get("uploadSpeed"), len(dl), len(tor), top)
+
+
+def g_deluge(h, c):
+    def call(method, params):
+        r = h.req("/json", data={"method": method, "params": params, "id": 1})
+        if (r or {}).get("error"):
+            if "Not authenticated" in str(r["error"]):
+                raise GlanceAuth()
+            raise ValueError(str(r["error"]))
+        return r.get("result")
+    try:
+        conn = call("web.connected", [])
+    except GlanceAuth:
+        conn = None
+    if conn is None:
+        h.jar.clear()
+        if not call("auth.login", [c.get("pass", "")]):
+            raise GlanceAuth()
+        conn = call("web.connected", [])
+    if not conn:
+        hosts = call("web.get_hosts", []) or []
+        if not hosts:
+            raise ValueError("deluge has no daemon")
+        call("web.connect", [hosts[0][0]])
+    ui = call("web.update_ui", [["name", "progress", "eta", "download_payload_rate", "state"], {}]) or {}
+    tor = list((ui.get("torrents") or {}).values())
+    stats = ui.get("stats") or {}
+    dl = sorted((t for t in tor if t.get("state") == "Downloading"), key=lambda t: -int(t.get("download_payload_rate") or 0))
+    top = {"name": dl[0].get("name") or "", "pct": float(dl[0].get("progress") or 0) / 100,
+           "eta": dl[0].get("eta")} if dl else None
+    return _torrent_shape(stats.get("download_rate"), stats.get("upload_rate"), len(dl), len(tor), top)
+
+
+def _arr(ver, kind):
+    """Sonarr, Radarr and Lidarr share one API: the queue, what is missing, and
+    what comes out in the next week."""
+    def fetch(h, c):
+        hd = {"X-Api-Key": c["key"]}
+        base = "/api/%s/" % ver
+        q = h.req(base + "queue?pageSize=50", headers=hd) or {}
+        miss = (h.req(base + "wanted/missing?pageSize=1", headers=hd) or {}).get("totalRecords") or 0
+        now = datetime.datetime.now(datetime.timezone.utc)
+        extra = {"tv": "&includeSeries=true", "movie": "", "music": "&includeArtist=true"}[kind]
+        cal = h.req(base + "calendar?start=%s&end=%s%s" % (now.date().isoformat(),
+                    (now + datetime.timedelta(days=7)).date().isoformat(), extra), headers=hd) or []
+
+        def name(x):
+            if kind == "tv":
+                return "%s S%dE%d" % ((x.get("series") or {}).get("title") or "", int(x.get("seasonNumber") or 0),
+                                      int(x.get("episodeNumber") or 0))
+            if kind == "music":
+                return "%s · %s" % ((x.get("artist") or {}).get("artistName") or "", x.get("title") or "")
+            return x.get("title") or ""
+
+        def when(x):
+            for k in ("airDateUtc", "digitalRelease", "physicalRelease", "inCinemas", "releaseDate"):
+                if x.get(k):
+                    return str(x[k])
+            return ""
+        cal = sorted((x for x in cal if isinstance(x, dict) and when(x) >= now.isoformat()[:10]), key=when)
+        recs = [r for r in q.get("records") or [] if isinstance(r, dict)]
+        st = [[_count(len(cal)), "This week"], [_count(miss), "Missing"],
+              [_count(q.get("totalRecords") or len(recs)), "Queued"]]
+        dl = [r for r in recs if (r.get("status") or "").lower() == "downloading"]
+        if dl:
+            r = dl[0]
+            size, left = float(r.get("size") or 0), float(r.get("sizeleft") or 0)
+            tl = str(r.get("timeleft") or "")
+            m = re.match(r"^(?:(\d+)\.)?(\d+):(\d+):(\d+)", tl)
+            secs = (int(m.group(1) or 0) * 86400 + int(m.group(2)) * 3600 + int(m.group(3)) * 60 + int(m.group(4))) if m else None
+            return {"head": "Downloading" + (" · %d" % len(dl) if len(dl) > 1 else ""),
+                    "title": r.get("title") or "", "bar": round(100 * (1 - left / size), 1) if size else None,
+                    "sub": "%d queued" % len(recs), "right": _left(secs), "stats": st}
+        nxt = cal[0] if cal else None
+        line = None
+        if nxt:
+            try:
+                d = datetime.datetime.fromisoformat(when(nxt).replace("Z", "+00:00")[:25])
+                line = "Next: %s · %s" % (name(nxt), d.strftime("%a"))
+            except ValueError:
+                line = "Next: " + name(nxt)
+        return {"head": "Coming up", "stats": st, "line": line or "Nothing out this week"}
+    return fetch
+
+
+def g_sabnzbd(h, c):
+    q = (h.req("/api?mode=queue&output=json&apikey=" + urllib.parse.quote(c["key"])) or {})
+    if "error" in q:
+        raise GlanceAuth()
+    q = q.get("queue") or {}
+    slots = q.get("slots") or []
+    speed = float(q.get("kbpersec") or 0) * 1000
+    st = [[_rate(speed), "Speed"], [_count(q.get("noofslots") or len(slots)), "Queued"],
+          ["%.1f GB" % (float(q.get("mbleft") or 0) / 1024), "Left"]]
+    if slots and str(q.get("status")) == "Downloading":
+        s = slots[0]
+        m = re.match(r"^(\d+):(\d+):(\d+)$", str(s.get("timeleft") or ""))
+        return {"head": "Downloading", "title": s.get("filename") or "", "bar": float(s.get("percentage") or 0),
+                "sub": "↓ " + _rate(speed),
+                "right": _left(int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))) if m else None,
+                "stats": st}
+    return {"head": "Queue", "stats": st, "line": str(q.get("status") or "Idle")}
+
+
+def g_nextcloud(h, c):
+    hd = {"OCS-APIRequest": "true", "Authorization": "Basic " + base64.b64encode(
+        ("%s:%s" % (c.get("user", ""), c.get("pass", ""))).encode()).decode()}
+    d = ((h.req("/ocs/v2.php/apps/serverinfo/api/v1/info?format=json&skipApps=true&skipUpdate=true",
+                headers=hd) or {}).get("ocs") or {}).get("data") or {}
+    nc = d.get("nextcloud") or {}
+    sto, sysi = nc.get("storage") or {}, nc.get("system") or {}
+    au = d.get("activeUsers") or {}
+    free = sysi.get("freespace")
+    return {"head": "Nextcloud", "stats": [[_count(sto.get("num_files")), "Files"],
+                                           [_count(au.get("last24hours")), "Active today"],
+                                           [("%.0f GB" % (float(free) / 1e9)) if free else "—", "Free"]],
+            "line": "%s user%s · %s online" % (_count(sto.get("num_users")), "" if int(sto.get("num_users") or 0) == 1 else "s", _count(au.get("last5minutes")))}
+
+
+def g_invoiceninja(h, c):
+    hd = {"X-API-TOKEN": c["key"], "X-Requested-With": "XMLHttpRequest"}
+    rows, page, total = [], 1, 0
+    while page <= 5:          # outstanding invoices, at most 500
+        r = h.req("/api/v1/invoices?client_status=unpaid&per_page=100&page=%d" % page, headers=hd) or {}
+        rows += [x for x in r.get("data") or [] if isinstance(x, dict)]
+        pg = (r.get("meta") or {}).get("pagination") or {}
+        total = int(pg.get("total") or len(rows))
+        if page >= int(pg.get("total_pages") or 1):
+            break
+        page += 1
+    today = datetime.date.today().isoformat()
+    owed = sum(float(x.get("balance") or 0) for x in rows)
+    late = [x for x in rows if x.get("due_date") and str(x["due_date"]) < today]
+    nxt = sorted((x for x in rows if x.get("due_date") and str(x["due_date"]) >= today), key=lambda x: x["due_date"])
+    return {"head": "Unpaid invoices", "stats": [["{:,.2f}".format(owed), "Outstanding"], [_count(total), "Unpaid"],
+                                                  [_count(len(late)), "Overdue"]],
+            "line": ("Next due %s · #%s" % (nxt[0]["due_date"], nxt[0].get("number") or "")) if nxt else
+                    ("%d overdue" % len(late) if late else "All paid up")}
+
+
+def g_seerr(h, c):
+    n = h.req("/api/v1/request/count", headers={"X-Api-Key": c["key"]}) or {}
+    return {"head": "Requests", "stats": [[_count(n.get("pending")), "Pending"], [_count(n.get("processing")), "Processing"],
+                                          [_count(n.get("available")), "Available"]],
+            "line": "%s requests in all" % _count(n.get("total"))}
+
+
+def g_paperless(h, c):
+    n = h.req("/api/statistics/", headers={"Authorization": "Token " + c["key"]}) or {}
+    return {"head": "Documents", "stats": [[_count(n.get("documents_total")), "Documents"],
+                                           [_count(n.get("documents_inbox")), "In inbox"]],
+            "line": "%s in the inbox" % _count(n.get("documents_inbox"))}
+
+
+def g_syncthing(h, c):
+    hd = {"X-API-Key": c["key"]}
+    comp = h.req("/rest/db/completion", headers=hd) or {}
+    conns = (h.req("/rest/system/connections", headers=hd) or {}).get("connections") or {}
+    folders = h.req("/rest/config/folders", headers=hd) or []
+    pct = float(comp.get("completion") or 0)
+    need = float(comp.get("needBytes") or 0)
+    on = sum(1 for v in conns.values() if (v or {}).get("connected"))
+    if not folders:
+        pct = 100.0
+    return {"head": "Sync", "stats": [["%d%%" % pct if pct < 99.95 else "100%", "In sync"],
+                                      ["%d/%d" % (on, len(conns)), "Devices"], [_count(len(folders)), "Folders"]],
+            "line": ("%.1f GB to fetch" % (need / 1e9)) if need else "Up to date"}
+
+
+def g_navidrome(h, c):
+    salt = os.urandom(6).hex()
+    q = urllib.parse.urlencode({"u": c.get("user", ""), "s": salt, "v": "1.16.1", "c": "dashy", "f": "json",
+                                "t": hashlib.md5((c.get("pass", "") + salt).encode()).hexdigest()})
+
+    def sub(method):
+        r = (h.req("/rest/%s?%s" % (method, q)) or {}).get("subsonic-response") or {}
+        if r.get("status") != "ok":
+            if (r.get("error") or {}).get("code") in (40, 41, 50):
+                raise GlanceAuth()
+            raise ValueError(str(r.get("error")))
+        return r
+    now = ((sub("getNowPlaying").get("nowPlaying") or {}).get("entry") or [])
+    if now:
+        x = now[0]
+        return {"head": "Now playing" + (" · %d more" % (len(now) - 1) if len(now) > 1 else ""),
+                "title": x.get("title") or "", "sub": " · ".join(v for v in (x.get("artist"), x.get("username")) if v)}
+    n = (sub("getScanStatus").get("scanStatus") or {})
+    return {"head": "Library", "stats": [[_count(n.get("count")), "Songs"]],
+            "line": "Scanning…" if n.get("scanning") else "Nothing playing"}
+
+
+# Order matters only where one name contains another. "bespoke" providers keep
+# their own collector and tile above; they are listed for their key field.
+GLANCE = [
+    {"id": "jellyseerr", "what": "Pending and available requests", "name": "Jellyseerr", "match": r"jellyseerr|overseerr", "fields": [KEY], "fetch": g_seerr,
+     "hint": "In Jellyseerr or Overseerr: Settings, General, API Key."},
+    {"id": "jellyfin", "what": "What's playing, or the library", "name": "Jellyfin", "match": r"jellyfin", "fields": [KEY], "fetch": g_jellyfin, "size": 2,
+     "art": r"^/Items/[0-9a-f]{32}/Images/Primary$", "arthead": _jellyfin_art_headers,
+     "hint": "In Jellyfin: Dashboard, API Keys, then +."},
+    {"id": "qbittorrent", "what": "The busiest download, or speeds", "name": "qBittorrent", "match": r"qbittorrent", "fields": [USER, PASS],
+     "fetch": g_qbittorrent, "hint": "The username and password you sign in to the qBittorrent web UI with."},
+    {"id": "transmission", "what": "The busiest download, or speeds", "name": "Transmission", "match": r"transmission",
+     "fields": [USER[:3] + (True,), PASS[:3] + (True,)], "fetch": g_transmission,
+     "hint": "Only if Transmission's web UI asks you to sign in. Otherwise leave both blank."},
+    {"id": "deluge", "what": "The busiest download, or speeds", "name": "Deluge", "match": r"deluge", "fields": [PASS], "fetch": g_deluge,
+     "hint": "The Deluge web UI password (it starts as deluge)."},
+    {"id": "sonarr", "what": "Downloads, and what's out this week", "name": "Sonarr", "match": r"sonarr", "fields": [KEY], "fetch": _arr("v3", "tv"),
+     "hint": "In Sonarr: Settings, General, API Key."},
+    {"id": "radarr", "what": "Downloads, and what's out this week", "name": "Radarr", "match": r"radarr", "fields": [KEY], "fetch": _arr("v3", "movie"),
+     "hint": "In Radarr: Settings, General, API Key."},
+    {"id": "lidarr", "what": "Downloads, and what's out this week", "name": "Lidarr", "match": r"lidarr", "fields": [KEY], "fetch": _arr("v1", "music"),
+     "hint": "In Lidarr: Settings, General, API Key."},
+    {"id": "sabnzbd", "what": "The download in progress and the queue", "name": "SABnzbd", "match": r"sabnzbd", "fields": [KEY], "fetch": g_sabnzbd,
+     "hint": "In SABnzbd: Config, General, API Key."},
+    {"id": "nextcloud", "what": "Files, active users, free space", "name": "Nextcloud", "match": r"nextcloud", "fields": [USER, PASS], "fetch": g_nextcloud,
+     "hint": "An admin's username and an app password from Personal settings, Security."},
+    {"id": "invoiceninja", "what": "Outstanding, unpaid and overdue invoices", "name": "Invoice Ninja", "match": r"invoice.?ninja", "fields": [KEY],
+     "fetch": g_invoiceninja, "hint": "In Invoice Ninja: Settings, Account Management, API Tokens."},
+    {"id": "paperless", "what": "Documents and the inbox", "name": "Paperless-ngx", "match": r"paperless", "fields": [KEY], "fetch": g_paperless,
+     "hint": "In Paperless: your profile (top right), then API Auth Token."},
+    {"id": "syncthing", "what": "Sync state, devices and folders", "name": "Syncthing", "match": r"syncthing", "fields": [KEY], "fetch": g_syncthing,
+     "hint": "In Syncthing: Actions, Settings, General, API Key."},
+    {"id": "navidrome", "what": "What's playing, or the library", "name": "Navidrome", "match": r"navidrome", "fields": [USER, PASS], "fetch": g_navidrome,
+     "hint": "The username and password you sign in to Navidrome with."},
+    {"id": "immich", "what": "Photos, videos and jobs still running", "name": "Immich", "match": r"immich", "fields": [KEY], "bespoke": True,
+     "hint": "In Immich: Account Settings, API Keys, New API Key."},
+    {"id": "audiobookshelf", "what": "The book being listened to", "name": "Audiobookshelf", "match": r"audiobookshelf", "fields": [KEY], "bespoke": True,
+     "hint": "In Audiobookshelf: Settings, API Keys (or your user's API token)."},
+    {"id": "sparkyfitness", "what": "Today's steps, weight and water, or a fast", "name": "SparkyFitness", "match": r"sparky", "fields": [KEY], "bespoke": True,
+     "hint": "In SparkyFitness: Settings, API Keys."},
+    {"id": "music-assistant", "what": "What each speaker is playing", "name": "Music Assistant", "match": r"music-?assistant", "fields": [KEY],
+     "bespoke": True, "hint": "A long-lived token from your Music Assistant user profile."},
+]
+GLANCE_BY_ID = {p["id"]: p for p in GLANCE}
+_glance = {}             # app -> {"at", "v"}
+_glance_fp = {}          # app -> {"at", "id"}: what an oddly named app's home page says it is
+_glance_evt = threading.Event()
+
+
+def _glance_provider(svc):
+    hay = "%s %s" % (svc.get("app") or "", svc.get("name") or "")
+    for p in GLANCE:
+        if re.search(p["match"], hay, re.I):
+            return p
+    fp = _glance_fp.get(svc.get("app"))
+    return GLANCE_BY_ID.get(fp["id"]) if fp and fp.get("id") else None
+
+
+def _glance_sniff(svc):
+    """Read the <title> of an unrecognised app's home page, in case it is one
+    of the providers under a name of its owner's choosing."""
+    got = None
+    try:
+        with urllib.request.urlopen("http://%s:%d/" % (svc.get("bind") or HOST_IP, int(svc["lport"])),
+                                    timeout=4) as r:
+            m = re.search(rb"<title[^>]*>([^<]{1,120})", r.read(65536), re.I)
+        t = m.group(1).decode("utf-8", "replace") if m else ""
+        got = next((p["id"] for p in GLANCE if re.search(p["match"], t, re.I)), None)
+    except (OSError, ValueError, urllib.error.URLError):
+        pass
+    _glance_fp[svc["app"]] = {"at": time.time(), "id": got}
+
+
+def _glance_one(svc, p):
+    c = _cred(svc, p["id"])
+    if any(not f[3] and f[0] not in c for f in p["fields"]):
+        v = {"need": True}
+    else:
+        try:
+            v = p["fetch"](_AppHttp(svc), c)
+        except GlanceAuth:
+            v = {"error": "key"}
+        except urllib.error.HTTPError as e:
+            v = {"error": "key" if e.code in (401, 403) else "down"}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, urllib.error.URLError):
+            v = {"error": "down"}
+    with _lock:
+        _glance[svc["app"]] = {"at": time.time(), "v": v}
+
+
+def _glance_loop():
+    """Woken by the page's poll, so apps are only asked while someone is looking."""
+    import concurrent.futures
+    pool = concurrent.futures.ThreadPoolExecutor(4)
+    while True:
+        _glance_evt.wait()
+        _glance_evt.clear()
+        now = time.time()
+        with _lock:
+            svcs = [dict(x) for x in _state["services"]]
+        jobs = []
+        for svc in svcs:
+            if not svc.get("lport") or svc.get("status") != "up":
+                continue
+            p = _glance_provider(svc)
+            if p is None:
+                fp = _glance_fp.get(svc["app"])
+                if not fp or now - fp["at"] > 21600:
+                    jobs.append(pool.submit(_glance_sniff, svc))
+                continue
+            if p.get("bespoke"):
+                continue
+            hit = _glance.get(svc["app"])
+            err = hit and hit["v"].get("error")
+            # a refused login waits ten minutes: qBittorrent bans an address after five
+            ttl = 600 if err == "key" else 60 if err else 15
+            if not hit or now - hit["at"] >= ttl:
+                jobs.append(pool.submit(_glance_one, svc, p))
+        concurrent.futures.wait(jobs, timeout=20)
+        time.sleep(2)
+
+
+def glance_now():
+    """Every recognised app: which fields it needs and which are saved, and its
+    latest summary. Never a credential."""
+    _glance_evt.set()
+    with _lock:
+        svcs = list(_state["services"])
+    out = {}
+    for svc in svcs:
+        p = _glance_provider(svc)
+        if not p:
+            continue
+        c = _cred(svc, p["id"])
+        e = {"p": p["id"], "label": p["name"], "hint": p.get("hint", ""), "size": p.get("size", 1),
+             "what": p.get("what", ""),
+             "fields": [list(f) for f in p["fields"]], "set": sorted(f[0] for f in p["fields"] if f[0] in c)}
+        if p.get("bespoke"):
+            e["bespoke"] = True
+        else:
+            hit = _glance.get(svc["app"])
+            if hit:
+                e["v"] = hit["v"]
+        out[svc["app"]] = e
+    return out
+
+
+def glance_art(app, path):
+    """A provider's artwork through Dashy, with its credentials added here."""
+    with _lock:
+        svc = next((x for x in _state["services"] if x.get("app") == app and x.get("lport")), None)
+    p = svc and _glance_provider(svc)
+    if not p or not p.get("art") or not re.match(p["art"], path or ""):
+        return None
+    key = app + path
+    if key in _glance_artc:
+        return _glance_artc[key]
+    try:
+        blob = _AppHttp(svc).req(path + "?maxWidth=640&quality=80", raw=True,
+                                 headers=dict(p["arthead"](_cred(svc, p["id"])), Accept="image/*"))
+    except (GlanceAuth, OSError, urllib.error.URLError):
+        return None
+    if len(_glance_artc) > 24:
+        _glance_artc.clear()
+    _glance_artc[key] = blob
+    return blob
+
+
+_glance_artc = {}
+
+
+def save_keys(body):
+    """Save or remove one app's credentials. A blank field keeps what is saved,
+    so a password never has to be typed again to change the username."""
+    app = str(body.get("app") or "")
+    with _lock:
+        svc = next((dict(x) for x in _state["services"] if x.get("app") == app), None)
+    p = svc and _glance_provider(svc)
+    if not p or not p["fields"]:
+        return False, "this app takes no key"
+    fields = body.get("fields")
+    if fields is None:
+        entry = ""
+    elif isinstance(fields, dict):
+        entry = _cred(svc, p["id"])
+        for f in p["fields"]:
+            v = fields.get(f[0])
+            if v is None or v == "":
+                continue
+            if not isinstance(v, str) or len(v) > 512 or re.search(r"[\x00-\x1f\x7f]", v):
+                return False, "that %s can't be right" % f[1].lower()
+            entry[f[0]] = v.strip()
+        if not entry:
+            return False, "nothing to save"
+    else:
+        return False, "bad request"
+    try:
+        with open(KEYS_CFG) as fh:
+            mine = json.load(fh)
+        mine = mine if isinstance(mine, dict) else {}
+    except (OSError, ValueError):
+        mine = {}
+    mine[app] = entry
+    try:
+        os.makedirs(CONFIG, exist_ok=True)
+        tmp = KEYS_CFG + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump(mine, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, KEYS_CFG)
+    except OSError as e:
+        return False, "not writable: %s" % e.__class__.__name__
+    with _lock:                       # ask again on the next poll, not in ten minutes
+        _glance.pop(app, None)
+        _AppHttp.jars.pop(app, None)
+        for k in [k for k in _app_live if k.startswith(app)]:
+            del _app_live[k]
+    _sparky_good.clear()
+    _glance_evt.set()
+    return True, "saved" if entry else "removed"
 
 
 def pool_status():
@@ -1377,6 +1997,19 @@ def _clean_prefs(d):
             if entry:
                 clean[k] = entry
         out["urls"] = clean
+
+    # live tile size per app, chosen in the Customize tab: 1 is one column, 2 is two
+    ls = d.get("livesize")
+    if isinstance(ls, dict):
+        out["livesize"] = {k: int(v) for k, v in list(ls.items())[:128]
+                           if isinstance(k, str) and re.match(r"^[a-z0-9][a-z0-9_-]{0,47}$", k)
+                           and v in (1, 2)}
+
+    # apps hidden from the dashboard (Settings, Apps); still judged for health
+    ha = d.get("hiddenapps")
+    if isinstance(ha, list):
+        out["hiddenapps"] = sorted({x for x in ha[:128] if isinstance(x, str)
+                                    and re.match(r"^[a-z0-9][a-z0-9_-]{0,47}$", x)})
 
     # apps whose live tile the owner switched off (the app sheet's Customize tab)
     nl = d.get("nolive")
@@ -1743,6 +2376,8 @@ def snapshot():
     out["live"] = {"plex": plex_live(), "pihole": pihole_live(),
                    "ollama": ollama_live(), "tally": tally_live(), "immich": immich_live(),
                    "abs": abs_live(), "sparky": sparky_live(), "ma": ma_live()}
+    out["glance"] = glance_now()
+    out["diag"] = {"config": os.access(CONFIG, os.W_OK)}
     out["links"] = header_links(svc, (out["prefs"] or {}).get("setup"))
     return out
 
@@ -1842,62 +2477,93 @@ PAGE = """<!doctype html>
   .ibtn svg{width:17px;height:17px;display:block}
 
 
-  /* ---- full-page settings --------------------------------------------- */
+  /* ---- full-page settings ---------------------------------------------
+     Same language as the app sheet: grouped panels of rows, title and a muted
+     line on the left, the control on the right; section labels like the
+     dashboard's own; pill buttons. One section shows at a time. */
   .settings-page{padding:5px 0 32px;animation:settingsin .22s ease both}
   @keyframes settingsin{from{opacity:.35;transform:translateY(5px)}to{opacity:1;transform:none}}
-  .settings-head{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;
-                 padding:4px 0 22px;border-bottom:1px solid var(--brd)}
-  .settings-kicker{margin:0 0 5px;color:var(--accent);font-size:10px;font-weight:750;
-                   letter-spacing:.13em;text-transform:uppercase}
-  .settings-head h2{margin:0;font-size:clamp(23px,4vw,30px);letter-spacing:-.025em}
-  .settings-head p:last-child{margin:4px 0 0;color:var(--muted);font-size:13px}
-  .settings-back{appearance:none;border:1px solid var(--brd);border-radius:var(--r-full);
-                 background:var(--surf);color:var(--ink);padding:9px 14px;font:inherit;
-                 font-size:12.5px;font-weight:650;cursor:pointer;white-space:nowrap}
-  .settings-back:hover{border-color:var(--accent);color:var(--accent)}
-  .settings-layout{display:grid;grid-template-columns:174px minmax(0,1fr);gap:24px;
-                   align-items:start;padding-top:20px}
+  .settings-head{display:flex;align-items:center;gap:12px;padding:2px 0 18px}
+  .settings-head h2{margin:0;font-size:26px;font-weight:700;letter-spacing:-.02em}
+  /* in settings the header gear becomes a "Dashboard" pill that takes you back */
+  .ibtn .ibtn-txt{display:none}
+  body.in-settings #settings{width:auto;padding:0 14px 0 10px;gap:5px;color:var(--ink);font-size:14px;font-weight:600}
+  body.in-settings #settings .gear{display:none}
+  body.in-settings #settings .ibtn-txt{display:inline-flex;align-items:center;gap:4px}
+  body.in-settings #settings .ibtn-txt svg{width:15px;height:15px}
+  .settings-layout{display:grid;grid-template-columns:184px minmax(0,1fr);gap:28px;align-items:start}
   .settings-nav{position:sticky;top:14px;display:flex;flex-direction:column;gap:4px}
-  .settings-nav button{appearance:none;border:0;border-radius:10px;background:transparent;
+  .settings-nav button{appearance:none;border:0;border-radius:12px;background:transparent;display:flex;
+                       align-items:center;justify-content:space-between;gap:8px;
                        color:var(--muted);text-align:left;padding:10px 12px;font:inherit;
-                       font-size:13px;font-weight:650;cursor:pointer}
+                       font-size:14px;font-weight:600;cursor:pointer}
   .settings-nav button:hover{background:var(--faint);color:var(--ink)}
-  .settings-nav button.active{background:color-mix(in srgb,var(--accent) 14%,var(--panel));
-                              color:var(--accent)}
-  .settings-content{min-width:0}
-  .settings-section{scroll-margin-top:18px;margin:0 0 28px}
-  .settings-section>h3{margin:0 0 12px;font-size:17px;letter-spacing:-.01em}
-  .settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr));
-                 gap:12px}
-  .settings-card{min-width:0;padding:17px;border:1px solid var(--brd);border-radius:var(--r-lg);
-                  background:var(--panel);box-shadow:var(--tile-shadow)}
-  .settings-glyph{width:32px;height:32px;display:grid;place-items:center;border-radius:50%;
-                  margin-bottom:12px;background:color-mix(in srgb,var(--accent) 18%,var(--panel));
-                  color:var(--accent);font-size:18px;font-weight:750}
-  .settings-card h4{margin:0;font-size:14px;font-weight:700}
-  .settings-card>p{min-height:34px;margin:4px 0 12px;color:var(--muted);font-size:12px;line-height:1.4}
-  .settings-card .mi{margin-top:7px;padding:9px 10px;border:1px solid var(--brd);
-                     border-radius:10px;background:var(--faint);justify-content:space-between}
-  .settings-card .mi:hover{background:color-mix(in srgb,var(--accent) 8%,var(--faint))}
-  .settings-card .seg{margin:5px 0 0}
-  .settings-card .sw{padding:8px 0 0;grid-template-columns:repeat(4,minmax(46px,1fr))}
-  .settings-card .mrow{margin-top:12px;padding:9px 0 0;border-top:1px solid var(--faint)}
-  .settings-card .pubmsg{margin-top:6px}
-  .settings-card .fld.sm{margin-top:4px}
-  .settings-version{display:flex;align-items:center;justify-content:space-between;gap:8px;
-                    margin-top:10px;color:var(--muted);font-size:11px}
-  .settings-links{display:flex;gap:8px;margin-top:8px}
-  .settings-links .mi{flex:1;justify-content:center}
-  .settings-note{margin-top:12px;padding:12px 14px;border-radius:11px;background:var(--faint);
-                 color:var(--muted);font-size:12px}
+  .settings-nav button.active{background:var(--panel);color:var(--ink);box-shadow:var(--tile-shadow)}
+  .snb{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--warn);color:#2a1c00;
+       font-size:11px;font-weight:700;display:inline-grid;place-items:center}
+  .settings-content{min-width:0;max-width:720px}
+  .settings-section>h3{margin:22px 4px 8px;font-size:12px;font-weight:700;letter-spacing:.08em;
+                       text-transform:uppercase;color:var(--muted)}
+  .settings-section>h3:first-child{margin-top:4px}
+  .snote{margin:0 4px 10px;color:var(--muted);font-size:13px;line-height:1.45}
+  .sgroup+.snote{margin-top:10px}
+  .sgroup{background:var(--panel);border:1px solid var(--brd);border-radius:var(--r-lg);
+          box-shadow:var(--tile-shadow);padding:0 16px;overflow:hidden}
+  .setrow{display:flex;align-items:center;gap:14px;padding:13px 0;border-bottom:1px solid var(--faint);min-height:30px}
+  .setrow:last-child{border-bottom:0}
+  .setrow.col{flex-direction:column;align-items:stretch;gap:10px}
+  .st{flex:1;min-width:0}
+  .st b{display:block;font-size:14.5px;font-weight:600}
+  .st>span{display:block;font-size:12.5px;color:var(--muted);margin-top:2px;line-height:1.4}
+  .st .pubmsg:empty{display:none}
+  .setrow .seg{margin:0}
+  .setrow .sw{padding:2px 0 0;grid-template-columns:repeat(4,minmax(46px,1fr))}
+  .sbtn{appearance:none;flex:none;display:inline-flex;align-items:center;justify-content:center;gap:8px;
+        min-height:36px;padding:0 16px;border:1px solid var(--brd);border-radius:var(--r-full);
+        background:var(--faint);color:var(--ink);font:inherit;font-size:13.5px;font-weight:600;
+        text-decoration:none;cursor:pointer;white-space:nowrap}
+  .sbtn:hover{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,var(--brd))}
+  .sbtn.armed{background:var(--bad);color:#fff;border-color:transparent}
+  .sbtn .rt{color:var(--muted);font-weight:500;font-size:12.5px}
+  .sbtn .rt:empty{display:none}
+  @media(max-width:520px){ .sbtn .rt{display:none} }
+  .settings-links{display:flex;gap:8px}
+  .settings-links .sbtn{flex:1}
+  .setrow .fld2{width:100%;padding:10px 12px;border-radius:12px;border:1px solid var(--brd);
+              background:var(--faint);color:var(--ink);font:inherit;font-size:14px}
+  /* diagnostics: a glyph and a word with every status colour, never colour alone */
+  .dval{flex:none;font-size:13px;font-weight:600;text-align:right;max-width:50%}
+  .dval[data-level="ok"]{color:var(--ok)}
+  .dval[data-level="warn"]{color:var(--warn)}
+  .dval[data-level="bad"]{color:var(--bad)}
+  .dval[data-level="ok"]::before{content:"\\2713  "}
+  .dval[data-level="warn"]::before{content:"!  "}
+  .dval[data-level="bad"]::before{content:"\\2715  "}
+  /* the app list */
+  .sapp{cursor:pointer}
+  .sapp .aico{width:34px;height:34px;flex:none;padding:7px;box-sizing:border-box;border-radius:50%;
+              background:var(--faint);object-fit:contain}
+  .sapp .aico.mono{display:flex;align-items:center;justify-content:center;color:#fff;padding:0;
+                   font-size:13px;font-weight:700}
+  .sapp .st b{display:flex;align-items:center;gap:6px}
+  .sapp .tag{font-size:11px;font-weight:600;padding:2px 7px;border-radius:8px;background:var(--faint);color:var(--muted)}
+  .sapp .stat[data-level="ok"]{color:var(--ok)}
+  .sapp .stat[data-level="warn"]{color:var(--warn)}
+  .sapp .stat[data-level="bad"]{color:var(--bad)}
+  .sapp.hid .aico,.sapp.hid .st b{opacity:.5}
+  .sapp .sw2{flex:none}
+  .apphid{display:flex;justify-content:center;margin-top:10px}
+  .apphid button{appearance:none;border:0;background:none;color:var(--muted);font:inherit;font-size:13px;
+                 font-weight:600;padding:8px 12px;border-radius:var(--r-full);cursor:pointer}
+  .apphid button:hover{color:var(--accent);background:var(--faint)}
   @media(max-width:680px){
-    .settings-head{align-items:flex-start;padding-bottom:16px}
-    .settings-back{padding:8px 10px;font-size:11px}
-    .settings-layout{grid-template-columns:minmax(0,1fr);gap:14px;padding-top:14px}
-    .settings-nav{position:sticky;top:0;z-index:5;flex-direction:row;overflow-x:auto;
-                  padding:5px 0;background:var(--bg);scrollbar-width:none}
-    .settings-nav::-webkit-scrollbar{display:none}
-    .settings-nav button{flex:0 0 auto;padding:8px 11px;font-size:12px}
+    .settings-head{padding-bottom:12px}
+    .settings-layout{grid-template-columns:minmax(0,1fr);gap:14px}
+    .settings-nav{position:sticky;top:0;z-index:5;flex-direction:row;padding:6px 0;background:var(--bg);
+                  display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px}
+    .settings-nav button{justify-content:center;padding:9px 4px;font-size:13px}
+    .snb{min-width:16px;height:16px;font-size:10px}
+    .setrow .sw{grid-template-columns:repeat(4,1fr)}
   }
   /* Opened from the iOS home screen, the system blurs a band just below the status bar, so
      the header and the sticky settings tabs sit clear of it. The browser is unaffected. */
@@ -2003,7 +2669,8 @@ PAGE = """<!doctype html>
   }
   .card.ghost{opacity:.45}
   body.editing .cardwrap{cursor:grab}
-  .cardwrap.dragging{pointer-events:none;z-index:5;cursor:grabbing}
+  .cardwrap.dragging{pointer-events:none;z-index:20;cursor:grabbing;will-change:transform;transition:none !important}
+  body.carddrag{-webkit-user-select:none;user-select:none}
   .cardwrap.dragging > .jig{animation:none;transform:scale(1.04);
                             filter:drop-shadow(0 10px 22px rgba(0,0,0,.28))}
   body.editing .card{cursor:default}
@@ -2016,21 +2683,18 @@ PAGE = """<!doctype html>
             -webkit-user-select:none;user-select:none;
             -webkit-touch-callout:none}
   .cardwrap .card{width:100%}
-  /* the overlay covers the card, so it carries the card's name: without it a
-     page of identical size buttons left you guessing which tile was which */
-  .cardtools{position:absolute;inset:0;display:none;flex-direction:column;
-             align-items:center;justify-content:center;
-             gap:8px;background:color-mix(in srgb,var(--panel) 97%,transparent);
-             border-radius:var(--r-md);z-index:3}
-  body.editing .cardtools{display:flex}
-  .cardtools button{width:30px;height:30px;border-radius:9px;border:1px solid var(--brd);
-                    background:var(--bg);color:var(--ink);font-size:14px;line-height:1;
-                    cursor:pointer;display:flex;align-items:center;justify-content:center;
-                    padding:0}
-  .cardtools button:disabled{opacity:.3;cursor:default}
-  .cardtools .wbtn{font-size:11px;font-weight:700;letter-spacing:-.02em}
-  .ctname{font-size:13px;font-weight:650;color:var(--ink);max-width:88%;text-align:center;
-          overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* Arrange mode leaves the card as it is. The size button is a second corner
+     badge, top right, in the same white disc as the remove badge top left. It
+     shows the size a tap switches to. It hangs off the top edge only: out past
+     the side as well, it touched the next card's remove badge across the gap. */
+  .cardtools{display:none}
+  .cardtools .wbtn{position:absolute;top:-7px;right:8px;min-width:23px;height:23px;padding:0 5px;
+        border-radius:var(--r-full);border:none;display:flex;align-items:center;justify-content:center;
+        background:#fff;color:#1c1f24;font-family:inherit;font-size:11px;font-weight:700;line-height:1;letter-spacing:-.02em;
+        cursor:pointer;z-index:6;box-shadow:0 1px 3px rgba(0,0,0,.34),0 0 0 .5px rgba(0,0,0,.12)}
+  .cardtools .wbtn::before{content:"";position:absolute;inset:-9px}
+  body.editing .cardtools{display:contents}
+  .cardtools .wbtn:disabled{display:none}
   /* The corner badge you get on a phone home screen: a white disc with a dark
      glyph, hanging off the top-left corner. x removes a tile, + puts a removed
      one back. It sits above the tools overlay, which covers the whole card. */
@@ -2042,7 +2706,7 @@ PAGE = """<!doctype html>
   body.editing .xbtn{display:flex}
   .cardwrap[data-off="1"] .xbtn{color:var(--ok);font-weight:700}
   .cardwrap[data-off="1"] .card,
-  .cardwrap[data-off="1"] .cardtools{opacity:.34}
+  .cardwrap[data-off="1"] .wbtn{opacity:.34}
   body:not(.editing) .cardwrap[data-off="1"]{display:none}
   .editbar{display:none;align-items:center;gap:10px;margin:0 0 12px;padding:11px 14px;
            background:var(--panel);border:1px solid var(--brd);border-radius:14px;
@@ -2058,7 +2722,7 @@ PAGE = """<!doctype html>
      One rule for every touch target. transform only, so it composites and
      cannot trigger layout; .09s in, a slower ease back out.              */
   .card,.apptile,.ibtn,.mi,.x,.seg button,.sw button,
-  .cardtools button,.editbar button,.ubtn{
+  .editbar button,.ubtn{
     transition:transform .16s cubic-bezier(.22,1,.36,1),
                background .13s ease, border-color .15s ease, color .15s ease, opacity .15s ease}
   .card:active,.apptile:active,.mi:active,.x:active,.seg button:active,
@@ -2116,6 +2780,21 @@ PAGE = """<!doctype html>
          transition:transform .18s cubic-bezier(.22,1,.36,1)}
   .sw2[aria-checked="true"]{background:var(--brand);border-color:var(--brand)}
   .sw2[aria-checked="true"] i{transform:translateX(18px);background:#fff}
+  .acust .lsz{margin:0;flex:none;width:112px}
+  .apptile.needkey .ap{color:var(--accent);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .wn{padding:4px 0 8px}
+  .wn p{margin:0 16px 12px;color:var(--muted);font-size:14px;line-height:1.5}
+  .wn .ah{margin:18px 16px 6px;font-size:12px;font-weight:650;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  .wn .wnok{margin:16px 16px 0}
+  .wn .row .val .ubtn{padding:7px 12px;font-size:13px;min-height:0;flex:none}
+  .wn .wnok{display:flex}
+  .wn .wnok .ubtn{flex:1}
+  .kstat{font-size:12.5px;color:var(--muted)}
+  .kstat:empty{display:none}
+  .kstat[data-level="ok"]::before{content:"\\2713  ";color:var(--ok);font-weight:700}
+  .kstat[data-level="warn"]::before{content:"!  ";color:var(--warn);font-weight:700}
+  .kstat[data-level="bad"]{color:var(--bad)}
+  .kstat[data-level="bad"]::before{content:"\\2715  ";font-weight:700}
   /* per-app launch URL editor, opened from a tile's detail sheet */
   .urlrow{margin-top:4px;display:flex;flex-direction:column;gap:6px}
   .urlrow .fld2{width:100%;padding:9px 11px;border-radius:10px;border:1px solid var(--brd);
@@ -2460,12 +3139,12 @@ PAGE = """<!doctype html>
             font-variant-numeric:tabular-nums;white-space:nowrap}
   .live .lm span:first-child{overflow:hidden;text-overflow:ellipsis}
   /* the artwork sits behind, faded into the tile so the text reads in either theme */
-  .apptile.plexing,.apptile.maart{background:
+  .apptile.plexing,.apptile.maart,.apptile.gart{background:
       linear-gradient(90deg,var(--panel) 22%,color-mix(in srgb,var(--panel) 74%,transparent) 52%,
                       color-mix(in srgb,var(--panel) 50%,transparent)),
       var(--art,none) center/cover no-repeat,var(--panel)}
   /* tall Music Assistant and Audiobookshelf: the cover shows through the top and fades out under the text */
-  .apptile.maart.tall,.apptile.abs.tall{background:
+  .apptile.maart.tall,.apptile.abs.tall,.apptile.plexing.tall,.apptile.gart.tall{background:
       linear-gradient(180deg,color-mix(in srgb,var(--panel) 62%,transparent),
                       color-mix(in srgb,var(--panel) 82%,transparent) 48%,var(--panel) 78%),
       var(--art,none) center/cover no-repeat,var(--panel)}
@@ -2501,6 +3180,14 @@ PAGE = """<!doctype html>
                  border-radius:2px;overflow:hidden;background:color-mix(in srgb,var(--ink) 16%,transparent)}
   .live .hbars s{display:block;background:var(--accent)}
   .live .bars{display:flex;align-items:flex-end;gap:6px;height:76px;margin-top:2px}
+  .apptile.tall .live .bars{height:44px;gap:4px}
+  .apptile.tall .live .b u{display:none}
+  .apptile.tall.dns .live .nums,.apptile.glance.tall .live .nums{margin:0 0 4px;gap:6px;justify-content:space-between}
+  .apptile.tall.dns .live .nums span:last-child,.apptile.glance.tall .live .nums span:last-child{text-align:right}
+  .apptile.tall.dns .live .hbars{height:18px}
+  .apptile.glance .live .nums span:last-child b{color:inherit}
+  .apptile.glance .live .nums b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .apptile.gerr .live .lt{color:var(--bad)}
   .live .b{flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;justify-content:flex-end}
   .live .b em{font-style:normal;font-size:10px;color:var(--muted);font-variant-numeric:tabular-nums}
   .live .b i{display:block;width:100%;max-width:20px;border-radius:5px;margin-top:2px;
@@ -2717,103 +3404,99 @@ PAGE = """<!doctype html>
     <div class="hdr-r">
 
       <button class="ibtn" id="settings" type="button" aria-controls="settings-page" aria-expanded="false"
-                title="Settings" aria-label="Settings"><svg viewBox="0 0 24 24" fill="none"
+                title="Settings" aria-label="Settings"><svg class="gear" viewBox="0 0 24 24" fill="none"
          stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
-         stroke-linejoin="round"><circle cx="12" cy="12" r="3.1"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+         stroke-linejoin="round"><circle cx="12" cy="12" r="3.1"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="ibtn-txt"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Dashboard</span></button>
 
     </div>
   </header>
 
   <main class="settings-page" id="settings-page" hidden aria-label="Settings">
     <div class="settings-head">
-      <div><p class="settings-kicker">DASHY / SETTINGS</p><h2>Settings</h2>
-        <p>Appearance, layout, integrations and app links.</p></div>
-      <button class="settings-back" id="settings-back" type="button">Back to dashboard</button>
+      <h2>Settings</h2>
     </div>
     <div class="settings-layout">
-      <nav class="settings-nav" aria-label="Settings sections">
-        <button class="active" type="button" data-settings-target="settings-system">System</button>
-        <button type="button" data-settings-target="settings-appearance">Appearance</button>
-        <button type="button" data-settings-target="settings-dashboard">Cards</button>
-        <button type="button" data-settings-target="settings-integrations">Integrations</button>
-        <button type="button" data-settings-target="settings-links">App links</button>
+      <nav class="settings-nav" role="tablist" aria-label="Settings sections">
+        <button class="active" type="button" role="tab" data-settings-target="settings-general">General</button>
+        <button type="button" role="tab" data-settings-target="settings-appearance">Appearance</button>
+        <button type="button" role="tab" data-settings-target="settings-apps">Apps<span class="snb" id="s-appbadge" hidden></span></button>
+        <button type="button" role="tab" data-settings-target="settings-links">Connections</button>
       </nav>
       <div class="settings-content">
-        <section class="settings-section" id="settings-system">
-          <h3>System</h3><div class="settings-grid">
-            <article class="settings-card"><div class="settings-glyph">↻</div><h4>App updates</h4>
-              <p>Check for a new version of Dashy, then install it. A snapshot is taken first.</p>
-              <button class="mi" id="mi-self" type="button">
+
+        <section class="settings-section" id="settings-general">
+          <h3>Dashy</h3>
+          <div class="sgroup">
+            <div class="setrow"><span class="st"><b>Version</b><span id="settings-version"></span></span></div>
+            <div class="setrow"><span class="st"><b>Updates</b><span>Checks for a new Dashy and installs it. A snapshot is taken first.</span></span>
+              <button class="sbtn" id="mi-self" type="button">
                 <span class="dots" id="mi-selfdots" hidden><i></i><i></i><i></i></span>
-                <span id="mi-selftxt">Check for updates</span><span class="rt" id="mi-selfver"></span></button>
-            </article>
-            <article class="settings-card"><div class="settings-glyph">i</div><h4>About</h4>
-              <p>Dashboard version and setup.</p>
-              <button class="mi" id="mi-setup" type="button">Show the welcome screen</button>
-               <div class="settings-version" id="settings-version"></div>
-            </article>
+                <span id="mi-selftxt">Check for updates</span><span class="rt" id="mi-selfver"></span></button></div>
+            <div class="setrow"><span class="st"><b>What’s new</b><span>The 2.0 tour of live tiles, and which apps still need a key.</span></span>
+              <button class="sbtn" id="mi-wn" type="button">Show</button></div>
+            <div class="setrow"><span class="st"><b>Welcome screen</b><span>The first-run setup: Tailscale, HexOS and theme.</span></span>
+              <button class="sbtn" id="mi-setup" type="button">Show</button></div>
           </div>
+          <h3>Diagnostics</h3>
+          <p class="snote">Whether Dashy itself is healthy. If something on the dashboard looks wrong, start here.</p>
+          <div class="sgroup" id="s-diag"></div>
         </section>
-        <section class="settings-section" id="settings-appearance">
-          <h3>Appearance</h3><div class="settings-grid">
-            <article class="settings-card"><div class="settings-glyph">◐</div><h4>Theme</h4>
-              <p>Choose a theme or follow your device preference.</p>
+
+        <section class="settings-section" id="settings-appearance" hidden>
+          <h3>Theme</h3>
+          <div class="sgroup">
+            <div class="setrow col"><span class="st"><b>Mode</b><span>Follow this device, or always light or dark.</span></span>
               <div class="seg" id="seg-theme" role="group" aria-label="Theme">
                 <button type="button" data-theme="system" aria-pressed="true">System</button>
                 <button type="button" data-theme="light" aria-pressed="false">Light</button>
                 <button type="button" data-theme="dark" aria-pressed="false">Dark</button>
-              </div>
-            </article>
-            <article class="settings-card"><div class="settings-glyph">●</div><h4>Accent colour</h4>
-              <p>Choose the colour used for highlights and charts.</p>
-              <div class="sw" id="sw-accent" role="group" aria-label="Accent colour"></div>
-            </article>
+              </div></div>
+            <div class="setrow col"><span class="st"><b>Accent colour</b><span>Used for highlights, charts and buttons.</span></span>
+              <div class="sw" id="sw-accent" role="group" aria-label="Accent colour"></div></div>
+          </div>
+          <h3>Layout</h3>
+          <div class="sgroup">
+            <div class="setrow"><span class="st"><b>Arrange cards</b><span>Move, resize or remove the cards at the top. Holding a card does the same.</span></span>
+              <button class="sbtn" id="mi-edit" type="button">Arrange</button></div>
+            <div class="setrow"><span class="st"><b>Reset cards</b><span>Put every card back where it started, at its normal size.</span></span>
+              <button class="sbtn" id="mi-reset" type="button">Reset</button></div>
+            <div class="setrow"><span class="st"><b>Reset app tiles</b><span>Unhide every app, turn every live tile back on at its own size. Keys and addresses are kept.</span></span>
+              <button class="sbtn" id="mi-resetapps" type="button">Reset</button></div>
           </div>
         </section>
-        <section class="settings-section" id="settings-dashboard">
-          <h3>Dashboard</h3><div class="settings-grid">
-            <article class="settings-card"><div class="settings-glyph">▦</div><h4>Card layout</h4>
-              <p>Resize cards, hide the ones you do not need, or restore the default layout.</p>
-              <button class="mi" id="mi-edit" type="button">Resize or remove cards</button>
-              <button class="mi" id="mi-reset" type="button">Reset dashboard layout</button>
-            </article>
-          </div>
+
+        <section class="settings-section" id="settings-apps" hidden>
+          <h3>Apps</h3>
+          <p class="snote" id="s-appsum"></p>
+          <div class="sgroup" id="s-apps"></div>
+          <p class="snote">Tap an app for its live tile, size, key and launch address. Hidden apps leave the dashboard
+            but still count for health and updates.</p>
         </section>
-        <section class="settings-section" id="settings-integrations">
-          <h3>Integrations</h3><div class="settings-grid">
-            <article class="settings-card"><div class="settings-glyph">↗</div><h4>Tailscale</h4>
-              <p>Automatically publish discovered apps and find their tailnet addresses.</p>
-              <div class="mrow"><span class="ml">Enable Tailscale</span>
-                <button class="sw2 sm" id="m-ts" role="switch" aria-checked="false"><i></i></button></div>
-              <span class="pubmsg" id="m-tsmsg"></span>
-            </article>
-            <article class="settings-card"><div class="settings-glyph">⬡</div><h4>HexOS</h4>
-              <p>Show the HexOS link in the dashboard header.</p>
-              <div class="mrow"><span class="ml">Enable HexOS</span>
-                <button class="sw2 sm" id="m-hx" role="switch" aria-checked="false"><i></i></button></div>
-            </article>
+
+        <section class="settings-section" id="settings-links" hidden>
+          <h3>Integrations</h3>
+          <div class="sgroup">
+            <div class="setrow"><span class="st"><b>Tailscale</b><span>Publish discovered apps on your tailnet and find their addresses.</span>
+                <span class="pubmsg" id="m-tsmsg"></span></span>
+              <button class="sw2" id="m-ts" role="switch" aria-checked="false" aria-label="Tailscale"><i></i></button></div>
+            <div class="setrow"><span class="st"><b>HexOS</b><span>Show a HexOS link in the header.</span></span>
+              <button class="sw2" id="m-hx" role="switch" aria-checked="false" aria-label="HexOS"><i></i></button></div>
           </div>
-        </section>
-        <section class="settings-section" id="settings-links">
-          <h3>App links</h3><div class="settings-grid">
-            <article class="settings-card"><div class="settings-glyph">⌁</div><h4>Default address</h4>
-              <p>Choose which discovered address app tiles use when launched.</p>
+          <h3>Addresses</h3>
+          <div class="sgroup">
+            <div class="setrow col"><span class="st"><b>Open apps on</b><span>Which address an app opens on when it has both. Each app can override this in its Customize tab.</span></span>
               <div class="seg" id="m-links" role="group" aria-label="Default app address">
                 <button type="button" data-links="ts" aria-pressed="true">Tailnet</button>
                 <button type="button" data-links="lan" aria-pressed="false">LAN</button>
-              </div>
-            </article>
-            <article class="settings-card"><div class="settings-glyph">⌂</div><h4>TrueNAS address</h4>
-              <p>Address used by the TrueNAS header link.</p>
-              <input class="fld sm" id="m-nas" type="url" inputmode="url"
+              </div></div>
+            <div class="setrow col"><span class="st"><b>TrueNAS address</b><span>Where the TrueNAS link in the header goes.</span></span>
+              <input class="fld2" id="m-nas" type="url" inputmode="url" autocomplete="off" spellcheck="false"
                      placeholder="https://nas.example.ts.net/">
               <div class="settings-links">
-                <a class="mi" id="mi-truenas" target="_blank" rel="noopener">Open TrueNAS</a>
-                <a class="mi" id="mi-hexos" target="_blank" rel="noopener">Open HexOS</a>
-              </div>
-            </article>
+                <a class="sbtn" id="mi-truenas" target="_blank" rel="noopener">Open TrueNAS</a>
+                <a class="sbtn" id="mi-hexos" target="_blank" rel="noopener">Open HexOS</a>
+              </div></div>
           </div>
-          <div class="settings-note">Each app can also have separate LAN and tailnet addresses in its Options.</div>
         </section>
       </div>
     </div>
@@ -3017,7 +3700,12 @@ const ACCENT_WAS={teal:'harbour', blue:'dusk', violet:'heather',
                   amber:'granite', yellow:'granite', rose:'heather', green:'harbour'};
 function migrateAccent(a){ return ACCENTS[a] ? a : (ACCENT_WAS[a] || 'dusk'); }
 const DEFAULTS={theme:'system', accent:'dusk', order:CARDK.slice(), hidden:[], wide:[], size:{},
-                setup:{}, urls:{}, nolive:[]};
+                setup:{}, urls:{}, nolive:[], livesize:{}, hiddenapps:[]};
+function cleanLiveSize(o){
+  const out={};
+  Object.keys(o||{}).forEach(k=>{ if(/^[a-z0-9][a-z0-9_-]{0,47}$/.test(k) && (o[k]===1||o[k]===2)) out[k]=o[k]; });
+  return out;
+}
 let prefs=Object.assign({}, DEFAULTS);
 let lastTick=0;
 let bootVersion=null;
@@ -3039,6 +3727,8 @@ function loadPrefs(){
       if(d.setup && typeof d.setup==='object') prefs.setup=d.setup;
       if(d.urls && typeof d.urls==='object') prefs.urls=cleanUrls(d.urls);
       if(Array.isArray(d.nolive)) prefs.nolive=cleanNolive(d.nolive);
+      if(d.livesize && typeof d.livesize==='object') prefs.livesize=cleanLiveSize(d.livesize);
+      if(Array.isArray(d.hiddenapps)) prefs.hiddenapps=cleanNolive(d.hiddenapps);
       if(Array.isArray(d.order)){
         // keep only known cards, then append any card added since this was saved
         const keep=d.order.filter(knownKey);
@@ -3052,7 +3742,7 @@ function savePrefs(){
   pushPrefs();
 }
 
-let setupShown=false;
+let setupShown=false, wnTimer=null;
 let prefsRev=-1;          // last revision this device has seen or written
 let pushTimer=null, pushing=false;
 
@@ -3067,7 +3757,8 @@ function pushPrefs(){
         body:JSON.stringify({order:prefs.order, hidden:prefs.hidden, wide:prefs.wide,
                              size:prefs.size,
                              theme:prefs.theme, accent:prefs.accent,
-                             setup:prefs.setup, urls:prefs.urls, nolive:prefs.nolive||[]})});
+                             setup:prefs.setup, urls:prefs.urls, nolive:prefs.nolive||[],
+                             livesize:prefs.livesize||{}, hiddenapps:prefs.hiddenapps||[]})});
       const j=await r.json();
       if(j && typeof j.rev==='number') prefsRev=j.rev;   // do not re-apply our own echo
     }catch(e){}                 // offline or no writable mount: the local copy still holds
@@ -3113,6 +3804,14 @@ function adoptPrefs(P){
   if(Array.isArray(P.nolive)){
     const next=cleanNolive(P.nolive);
     if(!same(next, prefs.nolive||[])){ prefs.nolive=next; layoutChanged=true; }
+  }
+  if(Array.isArray(P.hiddenapps)){
+    const next=cleanNolive(P.hiddenapps);
+    if(!same(next, prefs.hiddenapps||[])){ prefs.hiddenapps=next; layoutChanged=true; }
+  }
+  if(P.livesize && typeof P.livesize==='object'){
+    const next=cleanLiveSize(P.livesize);
+    if(JSON.stringify(next)!==JSON.stringify(prefs.livesize||{})){ prefs.livesize=next; layoutChanged=true; }
   }
   if(P.theme && P.theme!==prefs.theme){ prefs.theme=P.theme; applyTheme(); }
   const inc=P.accent && migrateAccent(P.accent);
@@ -3379,21 +4078,108 @@ function finishSetup(skipped){
 
 /* ---------- settings page ---------------------------------------------- */
 function settingsOpen(){ return !$('settings-page').hidden; }
-function openSettings(){
+// What one app's live tile is doing, in words, for Settings → Apps
+function appLive(s){
+  const g=(data.glance||{})[s.app], L=data.live||{};
+  const mine=Object.keys(L).map(k=>L[k]).filter(x=>x && x.app===s.app);
+  if(!g && !mine.length && !/scrutiny/.test(s.app)) return ['No live tile',''];
+  if(!liveOn(s.app)) return ['Live tile off',''];
+  if(g && needsKey(g)) return [g.fields.length>1?'Needs a sign-in':'Needs an API key','warn'];
+  if(g && !g.bespoke && g.v && g.v.error==='key') return ['Key refused','bad'];
+  if(g && !g.bespoke && g.v && g.v.error==='down') return ['Not answering','warn'];
+  if(mine.some(x=>x.error)) return ['Can’t read its data','bad'];
+  return ['Live','ok'];
+}
+function ageText(sec){
+  if(sec<90) return Math.max(1,Math.round(sec))+' s ago';
+  if(sec<5400) return Math.round(sec/60)+' min ago';
+  if(sec<172800) return Math.round(sec/3600)+' h ago';
+  return Math.round(sec/86400)+' days ago';
+}
+function diagRows(){
+  const d=data, rows=[];
+  const row=(t,sub,val,lvl)=>'<div class="setrow"><span class="st"><b>'+t+'</b><span>'+sub+'</span></span>'+
+    '<span class="dval" data-level="'+lvl+'">'+val+'</span></div>';
+  const pa=d.pools_age;
+  rows.push(row('Collector','Reads pools, drives, VMs and apps from TrueNAS every minute.',
+    pa==null?'No reading yet':'Ran '+ageText(pa), pa==null?'warn':pa<180?'ok':'bad'));
+  const su=d.selfupdate||{}, me=(d.updates||{})._self||{}, ck=su.checked?Date.now()/1000-su.checked:null;
+  rows.push(row('Updater','Installs updates and checks for new versions of Dashy.',
+    me.state==='failed'?'Last update failed':ck==null?'Not checked yet':'Checked '+ageText(ck),
+    me.state==='failed'?'bad':ck==null||ck>21600?'warn':'ok'));
+  const cfg=(d.diag||{}).config;
+  rows.push(row('Settings','Layout, live tiles and keys are saved on the NAS and shared by every device.',
+    cfg===false?'Can’t save':'Saved on the NAS', cfg===false?'bad':'ok'));
+  let live=0, need=0, bad=0;
+  (d.services||[]).forEach(s=>{ const a=appLive(s); if(a[1]==='ok') live++; else if(a[1]==='warn') need++; else if(a[1]==='bad') bad++; });
+  rows.push(row('Live tiles','Apps that show what they are doing on their tile.',
+    [live+' live', need?need+' need attention':'', bad?bad+' failing':''].filter(Boolean).join(' \u00b7 '),
+    bad?'bad':need?'warn':'ok'));
+  const sv=(d.updates||{})._serve;
+  if(sv && sv.state==='failed') rows.push(row('Tailscale Serve','Publishes apps on your tailnet.', esc(sv.msg||'Failed'),'bad'));
+  return rows.join('');
+}
+function appRows(){
+  return (data.services||[]).map(s=>{
+    const a=appLive(s), hid=appHidden(s.app);
+    const tags=(a[1]==='ok'?'<span class="tag">'+(liveWide(s.app,natSize(s))?'2x':'1x')+'</span>':'')+
+               ((prefs.urls||{})[s.id]?'<span class="tag">Own address</span>':'');
+    return '<div class="setrow sapp'+(hid?' hid':'')+'" data-app="'+esc(s.app)+'" role="button" tabindex="0">'+appIcon(s)+
+      '<span class="st"><b>'+esc(s.name)+tags+'</b><span class="stat" data-level="'+a[1]+'">'+(hid?'Hidden \u00b7 ':'')+a[0]+'</span></span>'+
+      '<button class="sw2" type="button" role="switch" aria-checked="'+(!hid)+'" aria-label="Show '+esc(s.name)+' on the dashboard"><i></i></button></div>';
+  }).join('');
+}
+// Redrawn on every poll while Settings is open, but only where the markup changed
+function paintSettings(){
+  let attn=0;
+  (data.services||[]).forEach(s=>{ const l=appLive(s)[1]; if(l==='warn'||l==='bad') attn++; });
+  const bd=$('s-appbadge'); if(bd){ bd.hidden=!attn; bd.textContent=attn; }
+  if(!settingsOpen()) return;
+  const put=(id,html)=>{ const el=$(id); if(el && el._html!==html){ el._html=html; el.innerHTML=html; wireIcons(el); } };
+  if(!$('settings-general').hidden) put('s-diag', diagRows());
+  if(!$('settings-apps').hidden){
+    put('s-apps', appRows());
+    const n=(data.services||[]).length, h=(prefs.hiddenapps||[]).length;
+    const sum=n+' apps'+(h?' \u00b7 '+h+' hidden':'')+(attn?' \u00b7 '+attn+' need attention':'');
+    if($('s-appsum').textContent!==sum) $('s-appsum').textContent=sum;
+  }
+}
+function showSettingsTab(id){
+  document.querySelectorAll('.settings-nav button').forEach(b=>{
+    const on=b.dataset.settingsTarget===id;
+    b.classList.toggle('active',on); b.setAttribute('aria-selected',String(on));
+  });
+  document.querySelectorAll('.settings-section').forEach(x=>{ x.hidden=x.id!==id; });
+  try{ sessionStorage.setItem('dashy.stab', id); }catch(e){}
+  window.scrollTo(0,0);
+  if(data) paintSettings();
+}
+function openSettings(tab){
   const m=$('settings-page');
+  let t=typeof tab==='string'?tab:null;
+  if(!t){ try{ t=sessionStorage.getItem('dashy.stab'); }catch(e){} }
+  showSettingsTab($(t||'')&&$(t).classList.contains('settings-section')?t:'settings-general');
   window._settingsScroll=window.scrollY;
   m.hidden=false;
   $('vitals').hidden=true;
   $('editbar').hidden=true;
   window.scrollTo(0,0);
-  $('settings').setAttribute('aria-expanded','true');
+  setSettingsBtn(true);
+  if(data) paintSettings();
+}
+function setSettingsBtn(on){
+  const b=$('settings');
+  document.body.classList.toggle('in-settings',on);
+  b.setAttribute('aria-expanded',on?'true':'false');
+  b.title=on?'Back to the dashboard':'Settings';
+  b.setAttribute('aria-label',on?'Back to the dashboard':'Settings');
 }
 function closeSettings(){
   const m=$('settings-page');
   m.hidden=true;
   $('vitals').hidden=false;
   $('editbar').hidden=false;
-  $('settings').setAttribute('aria-expanded','false');
+  setSettingsBtn(false);
   if(window._settingsScroll!==undefined) window.scrollTo(0,window._settingsScroll);
 }
 
@@ -3426,6 +4212,19 @@ function cleanNolive(a){
 }
 // whether an app's live tile is wanted on the dashboard (Customize tab)
 function liveOn(app){ return (prefs.nolive||[]).indexOf(app)<0; }
+// Live tiles come in two sizes: 1x is one column by two rows, 2x is two
+// columns by two rows (Plex's shape). Each app has its own default until the
+// owner picks one in Customize (prefs.livesize).
+function liveWide(app,nat){
+  const z=(prefs.livesize||{})[app];
+  return z ? z===2 : nat===2;
+}
+function sizeLive(t,nat,cls){
+  const w=liveWide(t.dataset.app,nat);
+  t.classList.toggle('wide',w); t.classList.toggle('tall',!w);
+  if(cls) t.classList.add(cls);
+  return w;
+}
 function cleanUrls(o){
   const out={};
   for(const k in o){
@@ -3476,8 +4275,7 @@ function resetLayout(){
 
 function cardTools(k, label){
   return '<div class="cardtools">'+
-      '<span class="ctname">'+(label||'')+'</span>'+
-      '<button type="button" class="wbtn" data-wide="'+k+'" aria-label="Change size"></button>'+
+      '<button type="button" class="wbtn" data-wide="'+k+'" aria-label="Change the size of '+esc(label||'this card')+'"></button>'+
     '</div>'+
     '<button type="button" class="xbtn" data-eye="'+k+'" aria-label="Remove"></button>';
 }
@@ -3555,7 +4353,7 @@ function layoutSig(){
   const vms=((data&&data.vms)||[]).map(v=>v.id+':'+v.state).join(',');
   const pools=((data&&data.pools)||[]).map(p=>p.name).join(',');
   const apps=((data&&data.services)||[]).map(s=>s.name).join(',');
-  return pools+'|'+apps+'|'+vms;
+  return pools+'|'+apps+'|'+vms+'|'+(prefs.hiddenapps||[]).join(',');
 }
 
 function build(){
@@ -3793,6 +4591,7 @@ function paint(d){
   // settings may have been changed on another device; adopt before drawing
   const relayout=adoptPrefs(d.prefs);
   if(!setupShown && setupNeeded()){ setupShown=true; openSetup(false); }
+  if(!wnTimer) wnTimer=setTimeout(maybeWhatsNew, 1500);
   // Adopt the new payload BEFORE asking whether the layout changed:
   // layoutSig() reads `data`, so testing it first compared the signature of
   // the previous poll and every new section arrived one tick late.
@@ -3908,9 +4707,10 @@ function paint(d){
   paintLinks(d.links||{});
   // uptime lives in the settings pane now; the home screen stays clean
   const mv=$('settings-version');
-  mv.innerHTML='<span>'+(d.app||'Dashy')+' v'+d.version+'</span>'+
+  mv.innerHTML=esc(d.app||'Dashy')+' '+esc(d.version)+' \u00b7 '+
     '<span'+(footIssue?' style="color:var(--warn)"':'')+'>up '+footUp[0]+' '+footUp[1]+'</span>';
   mv.title = footIssue && footNote ? footNote : '';
+  paintSettings();
   lastTick=Date.now();
 }
 
@@ -4017,16 +4817,17 @@ function paintLive(){
   }
   if(t){
     const ss=L.sessions||[], x=ss[0];
-    if(!x){ dropLive(t,'plexing'); t.style.removeProperty('--art'); delete t.dataset.art; }
+    if(!x){ dropLive(t,'plexing'); t.style.removeProperty('--art'); delete t.dataset.art; t.removeAttribute('title'); }
     else{
-      t.classList.add('wide','plexing');
+      const w=sizeLive(t,2,'plexing');
+      t.title=w?'':(x.state==='paused'?'Paused':'Now playing');
       if(t.dataset.art!==x.art){
         t.dataset.art=x.art;
         t.style.setProperty('--art', x.art ? 'url("/api/plex/art?p='+encodeURIComponent(x.art)+'")' : 'none');
       }
-      liveBox(t).innerHTML=
+      liveBox(t).innerHTML=(w?
         '<span class="lk">'+(x.state==='paused'?'Paused':'Now playing')+
-          (ss.length>1?' · '+(ss.length-1)+' more':'')+'</span>'+
+          (ss.length>1?' · '+(ss.length-1)+' more':'')+'</span>':'')+
         '<span class="lt">'+esc(x.title)+(x.sub?' · '+esc(x.sub):'')+'</span>'+
         '<span class="lbar"><i></i></span>'+
         '<span class="lm"><span>'+esc(x.how)+(x.mbps?' · '+x.mbps+' Mbps':'')+'</span>'+
@@ -4040,10 +4841,10 @@ function paintLive(){
     const dr=(data.drives||[]).filter(x=>typeof x.temp==='number');
     if(!dr.length){ dropLive(st,'temps'); }
     else{
-      st.classList.add('wide','temps');
+      const w=sizeLive(st,2,'temps');
       const lo=25, top=Math.max(55,...dr.map(x=>x.temp));
-      liveBox(st).innerHTML='<span class="lk">Temperatures</span><span class="bars">'+dr.map(x=>{
-        const h=Math.round(8+38*Math.max(0,x.temp-lo)/(top-lo));
+      liveBox(st).innerHTML=(w?'<span class="lk">Temperatures</span>':'')+'<span class="bars">'+dr.map(x=>{
+        const h=Math.round((w?8:4)+(w?38:20)*Math.max(0,x.temp-lo)/(top-lo));
         const nm=String(x.dev||'').replace(/^nvme(\\d+)n\\d+$/,'nv$1');
         return '<span class="b" title="'+esc(x.dev)+' · '+x.temp+'°C"><em>'+x.temp+'</em>'+
                '<i data-level="'+esc(x.level||'ok')+'" style="height:'+h+'px"></i><u>'+esc(nm)+'</u></span>';
@@ -4057,12 +4858,12 @@ function paintLive(){
     const m=(OL.models||[])[0];
     if(!m){ dropLive(ot,'ollama'); }
     else{
-      ot.classList.add('tall','ollama');
+      const w=sizeLive(ot,1,'ollama');
       // keep the running deadline unless the new one is really different (a fresh
       // request resets Ollama's timer), so the countdown does not stutter per poll
       const due = m.left!=null ? Date.now()+m.left*1000 : 0, was=+ot.dataset.unload||0;
       if(!due || !was || Math.abs(due-was)>3000) ot.dataset.unload = due ? String(due) : '';
-      liveBox(ot).innerHTML=
+      liveBox(ot).innerHTML=(w?'<span class="lk">Loaded</span>':'')+
         '<span class="lt">'+esc(m.name)+((OL.models.length>1)?' +'+(OL.models.length-1):'')+'</span>'+
         '<span class="lm"><span>'+(m.size/1073741824).toFixed(1)+' GB \u00b7 '+(m.gpu?m.gpu+'% GPU':'CPU')+'</span>'+
         '<span class="lunload" title="Unloads in"></span></span>';
@@ -4075,15 +4876,15 @@ function paintLive(){
     const ps=TL.players||[];
     if(!ps.length){ dropLive(tt,'tally'); }
     else{
-      tt.classList.add('tall','tally');
+      const w=sizeLive(tt,1,'tally');
       const cap=k=>k.charAt(0).toUpperCase()+k.slice(1);
       const mo=TL.month||{}, tot=TL.total||{};
       const sum=ps.reduce((a,k)=>a+(tot[k]||0),0);
       const pd=/^(\\d{4})-(\\d{2})$/.exec(TL.period||'');
       const mname=pd?new Date(+pd[1],+pd[2]-1,1).toLocaleString(undefined,{month:'long'}):'This month';
       // half width leaves no room for the month's name, so it moves to the tooltip
-      tt.title=mname+' and all time';
-      liveBox(tt).innerHTML='<span class="nums">'+
+      tt.title=w?'':mname+' and all time';
+      liveBox(tt).innerHTML=(w?'<span class="lk">'+esc(mname)+'</span>':'')+'<span class="nums">'+
         ps.map((k,i)=>'<span><b>'+(mo[k]||0)+'</b><u><i class="pdot" data-i="'+i+'"></i>'+esc(cap(k))+'</u></span>').join('')+
         '<span><b>'+ps.map(k=>tot[k]||0).join('–')+'</b><u>All time</u></span></span>'+
         '<span class="split">'+ps.map((k,i)=>'<i data-i="'+i+'" title="'+esc(cap(k))+' '+(tot[k]||0)+'" style="flex:'+
@@ -4094,12 +4895,12 @@ function paintLive(){
   const IM=data.live&&data.live.immich;
   const it=IM&&liveTile(IM.app);
   if(it){
-    it.classList.add('tall','immich');
+    const w=sizeLive(it,1,'immich');
     const JOB={thumbnailGeneration:'thumbnails',metadataExtraction:'metadata',videoConversion:'videos',
                faceDetection:'faces',facialRecognition:'faces',smartSearch:'smart search',
                duplicateDetection:'duplicates',library:'library scan',sidecar:'sidecars',ocr:'text'};
     const b=(IM.busy||[])[0];
-    liveBox(it).innerHTML='<span class="lt">'+IM.photos.toLocaleString()+' photos</span>'+
+    liveBox(it).innerHTML=(w?'<span class="lk">Library</span>':'')+'<span class="lt">'+IM.photos.toLocaleString()+' photos</span>'+
       '<span class="lm"><span>'+(b?'Processing '+esc(JOB[b[0]]||b[0])+'…':kNum(IM.videos)+' videos · '+disk(IM.bytes))+'</span>'+
       (b?'<span class="lacc">'+kNum(b[1])+' left</span>':'')+'</span>';
   }
@@ -4109,14 +4910,14 @@ function paintLive(){
   if(at){
     if(!AB.live||!AB.title){ dropLive(at,'abs'); at.style.removeProperty('--art'); delete at.dataset.art; }
     else{
-      at.classList.add('tall','abs');
+      const w=sizeLive(at,1,'abs');
       if(at.dataset.art!==(AB.art||'')){
         at.dataset.art=AB.art||'';
         at.style.setProperty('--art', AB.art ? 'url("/api/abs/art?p='+encodeURIComponent(AB.art)+'")' : 'none');
       }
       const pct=AB.dur?Math.min(100,100*AB.at/AB.dur):0, left=Math.max(0,AB.dur-AB.at);
       const h=Math.floor(left/3600), m=Math.round((left%3600)/60);
-      liveBox(at).innerHTML='<span class="lt">'+esc(AB.title)+'</span>'+
+      liveBox(at).innerHTML=(w?'<span class="lk">Listening'+(AB.listeners>1?' · '+(AB.listeners-1)+' more':'')+'</span>':'')+'<span class="lt">'+esc(AB.title)+'</span>'+
         '<span class="lbar"><i style="width:'+pct.toFixed(1)+'%"></i></span>'+
         '<span class="lm"><span>'+(AB.author?esc(AB.author):'Listening')+'</span>'+
         '<span>'+(h?h+'h ':'')+m+'m left</span></span>';
@@ -4131,12 +4932,12 @@ function paintLive(){
     if(SP.error){
       // the key is missing its mark or SparkyFitness is not answering: say so
       // rather than looking like an ordinary day with nothing logged
-      st2.classList.add('tall','sperr');
+      sizeLive(st2,1,'sperr');
       liveBox(st2).innerHTML='<span class="lt">Can’t read data</span>'+
-        '<span class="lm"><span>Check keys.json</span></span>';
+        '<span class="lm"><span>Check its key in Customize</span></span>';
     }
     else if(!f||!f.start){
-      st2.classList.add('tall','sparky');
+      const w=sizeLive(st2,1,'sparky');
       const n=v=>Number(v||0).toLocaleString();
       const W=SP.weight||[], last=W[W.length-1];
       // the change over a week: today's weigh-in against the last one on or
@@ -4155,7 +4956,7 @@ function paintLive(){
       // half width: steps and weight are the numbers, calories ride on the water line
       st2.title='Burned '+n(SP.burned)+' kcal'+(SP.eaten>0?', eaten '+n(SP.eaten)+' of '+n(SP.goal):'')+
                 (trend?'. Weight '+trend:'');
-      liveBox(st2).innerHTML=
+      liveBox(st2).innerHTML=(w?'<span class="lk">Today</span>':'')+
         '<span class="nums"><span><b>'+n(SP.steps)+'</b><u>steps \u00b7 '+
             (SP.eaten>0?n(SP.eaten)+' in':n(SP.burned)+' kcal')+'</u></span>'+
           (last?'<span><b>'+last[1].toFixed(1)+'</b><u>'+(trend?trend.split(' \u00b7')[0]:'kg')+'</u></span>':'')+'</span>'+
@@ -4163,10 +4964,10 @@ function paintLive(){
           '<span>'+L(SP.water)+(SP.water_goal?'/'+L(SP.water_goal):'')+' L</span></span>';
     }
     else{
-      st2.classList.add('tall','fasting');
+      const w=sizeLive(st2,1,'fasting');
       st2.dataset.fs=String(f.start*1000); st2.dataset.fe=f.end?String(f.end*1000):'';
       st2.title='Fasting'+(f.type?' \u00b7 '+f.type:'');
-      liveBox(st2).innerHTML='<span class="lt fel"></span><span class="lbar"><i></i></span>'+
+      liveBox(st2).innerHTML=(w?'<span class="lk">Fasting</span>':'')+'<span class="lt fel"></span><span class="lbar"><i></i></span>'+
         '<span class="lm"><span class="fgoal"></span><span class="fleft"></span></span>';
     }
   }
@@ -4177,7 +4978,7 @@ function paintLive(){
     const pl=MA.playing||[], x=pl[0];
     if(!x){ dropLive(mt,'maart'); mt.style.removeProperty('--art'); delete mt.dataset.art; }
     else{
-      mt.classList.add('tall','maart');
+      const w=sizeLive(mt,1,'maart');
       if(mt.dataset.art!==(x.art||'')){
         mt.dataset.art=x.art||'';
         mt.style.setProperty('--art', x.art ? 'url("/api/ma/art?p='+encodeURIComponent(x.art)+'")' : 'none');
@@ -4187,7 +4988,7 @@ function paintLive(){
       if(!was || Math.abs(due-was)>4000 || mt.dataset.mtitle!==x.title){ mt.dataset.mstart=String(due); mt.dataset.mtitle=x.title; }
       mt.dataset.mdur=String(x.dur*1000);
       const where=esc(x.player)+(pl.length>1?' +'+(pl.length-1):'');
-      liveBox(mt).innerHTML='<span class="lt">'+esc(x.title)+'</span>'+
+      liveBox(mt).innerHTML=(w?'<span class="lk">Now playing</span>':'')+'<span class="lt">'+esc(x.title)+'</span>'+
         (x.dur?'<span class="lbar"><i></i></span>':'')+
         '<span class="lm"><span>'+(x.artist?esc(x.artist)+' · ':'')+where+'</span><span class="mtime"></span></span>';
     }
@@ -4198,17 +4999,77 @@ function paintLive(){
   if(pt){
     if(PH.error||!PH.hist){ dropLive(pt,'dns'); }
     else{
-      pt.classList.add('wide','dns');
+      const w=sizeLive(pt,2,'dns'), HB=w?34:18;
       const big=Math.max(1,...PH.hist.map(h=>h[0]));
-      liveBox(pt).innerHTML='<span class="lk">Last 24 hours</span><span class="nums">'+
-        [[kNum(PH.total),'Queries'],[kNum(PH.blocked),'Blocked'],[PH.pct.toFixed(1)+'%','Block rate']].map(
+      pt.title=w?'':'Last 24 hours';
+      liveBox(pt).innerHTML=(w?'<span class="lk">Last 24 hours</span>':'')+'<span class="nums">'+
+        (w?[[kNum(PH.total),'Queries'],[kNum(PH.blocked),'Blocked'],[PH.pct.toFixed(1)+'%','Block rate']]
+          :[[kNum(PH.total),'Queries'],[PH.pct.toFixed(1)+'%','Blocked']]).map(
           v=>'<span><b>'+v[0]+'</b><u>'+v[1]+'</u></span>').join('')+'</span><span class="hbars">'+
         PH.hist.map(h=>'<i title="'+h[0].toLocaleString()+' queries · '+h[1].toLocaleString()+' blocked" style="height:'+
-          Math.max(2,Math.round(34*h[0]/big))+'px"><s style="height:'+(h[0]?Math.round(100*h[1]/h[0]):0)+'%"></s></i>').join('')+
+          Math.max(2,Math.round(HB*h[0]/big))+'px"><s style="height:'+(h[0]?Math.round(100*h[1]/h[0]):0)+'%"></s></i>').join('')+
         '</span>';
     }
   }
+  paintGlance();
   tickLive();      // fill the clocks now, not on the next one-second tick
+}
+// Apps Dashy recognised on its own (the server's GLANCE list). They all share
+// one look: with something under way (playing, downloading) its title, a
+// progress bar and the time left, like Plex; otherwise a few numbers. 2x adds
+// a heading and a third number.
+function glanceArt(t,url){
+  t.classList.toggle('gart',!!url);
+  if(t.dataset.art===url) return;
+  t.dataset.art=url;
+  if(url) t.style.setProperty('--art','url("'+url+'")'); else t.style.removeProperty('--art');
+}
+// Needs a key nobody has entered: the tile's version line asks for one, and a
+// tap opens Customize. Switching the live tile off stops the asking.
+function needsKey(g){ return !(g.set||[]).length && (g.fields||[]).some(f=>!f[3]); }
+function askKey(t,g){
+  const ap=t.querySelector('.ap'); if(!ap) return;
+  const on=!!g && needsKey(g);
+  if(on===t.classList.contains('needkey')) return;
+  if(on){
+    t.dataset.ap0=ap.innerHTML;
+    ap.textContent=g.fields.length>1?'Needs a sign-in':'Needs an API key';
+    t.title='Tap to '+(g.fields.length>1?'sign in':'add a key')+' and this tile shows what '+t.dataset.name+' is doing';
+  }else if(t.dataset.ap0!==undefined){ ap.innerHTML=t.dataset.ap0; delete t.dataset.ap0; t.removeAttribute('title'); }
+  t.classList.toggle('needkey',on);
+}
+function paintGlance(){
+  const G=data.glance||{};
+  document.querySelectorAll('.apptile.needkey').forEach(t=>{ if(!G[t.dataset.app] || !liveOn(t.dataset.app)) askKey(t,null); });
+  for(const app in G){
+    const g=G[app], v=g.v;
+    const t=liveTile(app);
+    if(!t) continue;
+    askKey(t,g);
+    if(g.bespoke) continue;
+    if(!v || v.need || v.error==='down'){
+      dropLive(t,'glance'); t.classList.remove('gart','gerr'); glanceArt(t,''); t.removeAttribute('title');
+      continue;
+    }
+    const w=sizeLive(t,g.size||1,'glance');
+    t.classList.toggle('gerr', v.error==='key');
+    if(v.error==='key'){
+      glanceArt(t,'');
+      liveBox(t).innerHTML='<span class="lt">Key refused</span><span class="lm"><span>Check it in Customize</span></span>';
+      continue;
+    }
+    glanceArt(t, v.art ? '/api/glance/art?app='+encodeURIComponent(app)+'&p='+encodeURIComponent(v.art) : '');
+    t.title=w?'':(v.head||'');
+    const head=w&&v.head?'<span class="lk">'+esc(v.head)+'</span>':'';
+    const meta=(l,r)=>'<span class="lm"><span>'+esc(l||'')+'</span>'+(r?'<span>'+esc(r)+'</span>':'')+'</span>';
+    liveBox(t).innerHTML = v.title
+      ? head+'<span class="lt">'+esc(v.title)+'</span>'+
+        (typeof v.bar==='number'?'<span class="lbar"><i style="width:'+Math.max(0,Math.min(100,v.bar)).toFixed(1)+'%"></i></span>':'')+
+        meta(v.sub,v.right)
+      : head+'<span class="nums">'+(v.stats||[]).slice(0,w?3:2).map(x=>
+          '<span><b>'+esc(x[0])+'</b><u>'+esc(x[1])+'</u></span>').join('')+'</span>'+
+        (v.line?meta(v.line):'');
+  }
 }
 function kNum(n){
   if(n<10000) return n.toLocaleString();
@@ -4872,9 +5733,11 @@ function srow(level, title, sub, pop){
     '</' + (pop ? 'button' : 'div') + '>';
 }
 
+function appHidden(app){ return (prefs.hiddenapps||[]).indexOf(app)>=0; }
 function rowsApps(){
-  const list=data.services||[];
-  if(!list.length) return '<div class="row"><span class="t2">Nothing published yet.</span></div>';
+  const all=data.services||[], list=all.filter(s=>!appHidden(s.app)), nh=all.length-list.length;
+  if(!all.length) return '<div class="row"><span class="t2">Nothing published yet.</span></div>';
+  const more=nh?'<div class="apphid"><button type="button" id="s-showhid">'+nh+' hidden '+(nh===1?'app':'apps')+'</button></div>':'';
   return '<div class="appgrid">'+list.map(s=>
     '<a class="apptile"'+
       ' data-uid="'+esc(s.id)+'" data-name="'+esc(s.name)+'" data-app="'+esc(s.app)+'"'+
@@ -4885,7 +5748,7 @@ function rowsApps(){
       appIcon(s)+
       '<span class="an">'+esc(s.name)+'</span>'+
       '<span class="ap" title="'+esc(s.version||'')+'">'+
-        esc(niceVer(s)).replace(/^Version /,'<span class="vw">Version </span>')+'</span></a>').join('')+'</div>';
+        esc(niceVer(s)).replace(/^Version /,'<span class="vw">Version </span>')+'</span></a>').join('')+'</div>'+more;
 }
 
 // TrueNAS reports '1.43.5.11079-b3b13e506_1.3.21': the app's own version, a
@@ -5131,7 +5994,73 @@ function ago(t){
 // whether this app has a live view on its tile that the owner could switch off
 function hasLive(s){
   const L=data.live||{};
-  return Object.keys(L).some(k=>L[k] && L[k].app===s.app) || /scrutiny/.test(s.app);
+  return Object.keys(L).some(k=>L[k] && L[k].app===s.app) || /scrutiny/.test(s.app) ||
+         !!(data.glance||{})[s.app];
+}
+// the size an app's live tile takes until the owner picks one
+function natSize(s){
+  const g=(data.glance||{})[s.app], L=data.live||{};
+  if(g && !g.bespoke) return g.size||1;
+  return (L.plex&&L.plex.app===s.app) || (L.pihole&&L.pihole.app===s.app) || /scrutiny/.test(s.app) ? 2 : 1;
+}
+// Whether the saved key works, from what the last poll brought back
+function keyStat(s){
+  const g=(data.glance||{})[s.app];
+  if(!g) return ['',''];
+  const many=g.fields.length>1;
+  if(!(g.set||[]).length && g.fields.some(f=>!f[3]))
+    return ['Add '+(many?'these':'a key')+' and '+esc(s.name)+'’s tile shows what it is doing.',''];
+  if(g.bespoke){
+    const L=data.live||{}, v=Object.keys(L).map(k=>L[k]).find(x=>x && x.app===s.app);
+    if(!v) return ['No answer from '+esc(s.name)+' with '+(many?'these':'this key')+' yet.','warn'];
+    return v.error ? [esc(s.name)+' refused '+(many?'these':'this key')+'.','bad'] : ['Working.','ok'];
+  }
+  const v=g.v;
+  if(!v) return ['Checking…',''];
+  if(v.error==='key') return [esc(s.name)+' refused '+(many?'these':'this key')+'.','bad'];
+  if(v.error==='down') return ['Can’t reach '+esc(s.name)+' right now.','warn'];
+  return ['Working.','ok'];
+}
+function paintKeyStat(){
+  const el=$('ak-stat');
+  if(!el || !openKey || openKey.indexOf('app-')) return;
+  const s=((data&&data.services)||[]).find(x=>x.id===openKey.slice(4));
+  if(!s) return;
+  const k=keyStat(s);
+  if(el.innerHTML!==k[0]) el.innerHTML=k[0];
+  if(el.dataset.level!==k[1]) el.dataset.level=k[1];
+}
+// Credentials for the app's live tile. The page is told only which fields are
+// saved, never their contents, so a saved field shows as a placeholder.
+function keyBox(s){
+  const g=(data.glance||{})[s.app];
+  if(!g || !g.fields.length) return '';
+  const set=new Set(g.set||[]), k=keyStat(s);
+  return '<div class="ah">'+(g.fields.length===1?esc(g.fields[0][1]):'Sign-in')+'</div>'+
+    '<div class="urlrow" id="akeys">'+g.fields.map(f=>
+      '<label class="urlfield"><span>'+esc(f[1])+(set.has(f[0])?' · saved':(f[3]?' · optional':''))+'</span>'+
+        '<input class="fld2" data-kf="'+esc(f[0])+'" type="'+(f[2]?'password':'text')+'" '+
+        'autocomplete="'+(f[2]?'new-password':'off')+'" autocapitalize="off" spellcheck="false" '+
+        'placeholder="'+(set.has(f[0])?'Saved. Type to replace it':'')+'"></label>').join('')+
+      '<span class="uhint">'+esc(g.hint)+' It is kept on the NAS and never shown again.</span>'+
+      '<span class="kstat" id="ak-stat" data-level="'+k[1]+'">'+k[0]+'</span>'+
+      '<div class="ubtns">'+
+        (set.size?'<button class="ubtn no clr" id="ak-del" type="button">Remove</button>':'')+
+        '<button class="ubtn yes" id="ak-save" type="button">Save</button>'+
+      '</div></div>';
+}
+async function saveKeys(app, fields){
+  const r=await fetch('/api/keys',{method:'POST',headers:{'Content-Type':'application/json'},
+                                   body:JSON.stringify({app, fields})});
+  const j=await r.json().catch(()=>({}));
+  if(!j.ok){ const el=$('ak-stat'); if(el){ el.textContent=j.msg||'Not saved'; el.dataset.level='bad'; } return; }
+  // the next poll brings the truth; until then show what was just done
+  const g=(data.glance||{})[app];
+  if(g){
+    g.set = fields===null ? [] : [...new Set((g.set||[]).concat(Object.keys(fields)))];
+    delete g.v;
+  }
+  $('sh-b')._html=null; renderPop(false);
 }
 function appCustom(s){
   const fields=urlOverrides(s.id);
@@ -5143,7 +6072,14 @@ function appCustom(s){
         '<span>Show what '+esc(s.name)+' is doing on its tile. Off, the tile is a plain launcher.</span></span>'+
         '<button class="sw2" id="ap-live" type="button" role="switch" aria-checked="'+liveOn(s.app)+'"><i></i></button></div>'
     : '';
-  return '<div class="acust">'+live+
+  const z=liveWide(s.app,natSize(s))?2:1;
+  const size=hasLive(s) && liveOn(s.app)
+    ? '<div class="crow"><span class="ct"><b>Live tile size</b>'+
+        '<span>1x is one column. 2x is two columns wide, like Plex.</span></span>'+
+        '<div class="seg sm lsz" role="group">'+[1,2].map(n=>
+          '<button type="button" data-lsz="'+n+'" aria-pressed="'+(z===n)+'">'+n+'x</button>').join('')+'</div></div>'
+    : '';
+  return '<div class="acust">'+live+size+keyBox(s)+
     '<div class="ah">Launch address</div>'+
     '<div class="urlrow">'+
       '<label class="urlfield"><span>LAN address'+(fields.lan?' · set by hand':'')+'</span>'+
@@ -5249,7 +6185,54 @@ function uptimeChart(){
     rows;
 }
 
+// Shown once per device after the move to 2.0: what live tiles are, which apps
+// on this NAS have one, and which still need a key (each with a button that
+// opens that app's Customize tab).
+const WN_KEY='dashy.seen', WN_VER='2';
+const BESPOKE_WHAT={plex:'What is playing, with the artwork', pihole:'Queries and blocks over 24 hours',
+  scrutiny:'Drive temperatures', ollama:'The model loaded and when it unloads', tally:'This month and all time'};
+function whatsNew(){
+  const G=data.glance||{}, L=data.live||{}, rows=[], need=[];
+  (data.services||[]).forEach(s=>{
+    const g=G[s.app];
+    let what=g?g.what:'';
+    if(!g){
+      const k=Object.keys(BESPOKE_WHAT).find(k=>(L[k]&&L[k].app===s.app) || (k==='scrutiny'&&/scrutiny/.test(s.app)));
+      if(!k) return;
+      what=BESPOKE_WHAT[k];
+    }
+    const row='<div class="row"><span class="l"><span class="t1">'+esc(s.name)+'</span>'+
+      '<span class="t2">'+esc(what)+'</span></span><span class="val">';
+    const bad = g && !needsKey(g) && (g.bespoke
+      ? Object.keys(L).some(k=>L[k] && L[k].app===s.app && L[k].error)
+      : !!(g.v && g.v.error==='key'));
+    if(g && (needsKey(g) || bad))
+      need.push(row+'<button class="ubtn yes" type="button" data-wnapp="'+esc(s.app)+'">'+
+                (bad?'Fix key':g.fields.length>1?'Sign in':'Add key')+'</button></span></div>');
+    else rows.push(row+'\u2713</span></div>');
+  });
+  return ['Live tiles', '<div class="wn">'+
+    '<p>App tiles can now show what each app is doing: what’s playing, downloads in progress, '+
+    'library sizes. Dashy recognises the apps it knows by itself, whatever they’re called.</p>'+
+    (need.length?'<div class="ah">Needs a key</div>'+
+      '<p>These apps only share their data with a key or sign-in. Tap one to open its Customize '+
+      'tab; the hint there says where to find it in the app. It is kept on the NAS and never shown again.</p>'+
+      need.join(''):'')+
+    (rows.length?'<div class="ah">Already live</div>'+rows.join(''):'')+
+    '<div class="ah">Sizes</div>'+
+    '<p>Open any live tile and choose Customize to make it 1x (one column) or 2x (two columns, like Plex), '+
+    'or to switch it back to a plain launcher.</p>'+
+    '<div class="wnok"><button class="ubtn yes" id="wn-ok" type="button">Got it</button></div></div>', 'New in Dashy 2.0'];
+}
+function maybeWhatsNew(){
+  let seen=null;
+  try{ seen=localStorage.getItem(WN_KEY); }catch(e){ return; }    // no storage: never nag on every load
+  if(seen===WN_VER || openKey || !data || setupNeeded()) return;
+  try{ localStorage.setItem(WN_KEY, WN_VER); }catch(e){}
+  openPop('whatsnew');
+}
 const POPS={
+  whatsnew:whatsNew,
   system:()=>['System', rowsSystem()],
   cpu:   ()=>['CPU', cpuModelRow()+loadRow()+powerChart()+
             (data.power!==null&&data.power!==undefined
@@ -5300,7 +6283,7 @@ function renderPop(opening){
   // Customize holds live input: a 3s poll must never rebuild it under someone
   // typing. It is redrawn only when opened, or by its own buttons (_html=null).
   if(!opening && b._html!==null && openKey.indexOf('app-')===0 && appTab==='custom' &&
-     b.querySelector('#au-lan')) return;
+     b.querySelector('#au-lan')){ paintKeyStat(); return; }
   const keep=b.scrollTop;
   b._html=r[1];
   b.innerHTML=r[1];
@@ -5320,11 +6303,11 @@ function renderPop(opening){
   renderPop._t=setTimeout(()=>b.classList.add('shown'), 90 + i*38 + 320);
 }
 
-function openPop(k){
+function openPop(k,tab){
   if(!data) return;
   if(k.indexOf('vm-')!==0 && k.indexOf('app-')!==0 && !POPS[k]) return;
   openKey=k;
-  appTab='live';
+  appTab=tab||'live';
   $('sh-b')._html=null;      // force a rebuild so the entrance plays
   renderPop(true);
   $('scrim').hidden=false;
@@ -5455,25 +6438,73 @@ function saveAppURL(id){
    to stop being what the section heading says it is.                     */
 const HOLD_MS=450, HOLD_SLOP=10;
 let hold=null, drag=null;
+const calm=()=>matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-function startDrag(ev, wrap){
-  drag={wrap, grid:wrap.parentElement, id:ev.pointerId};
-  wrap.classList.add('dragging');
-  try{ wrap.setPointerCapture(ev.pointerId); }catch(e){}
+/* The dragged card rides under the finger (a transform on its wrapper) while
+   the others slide to their new places (FLIP through the Web Animations API).
+   Hit-testing uses each card's layout box (offsetLeft/Top), never what is on
+   screen: a card mid-slide would otherwise be "under" the finger for a frame
+   and swap straight back, which on a phone read as the cards flickering.   */
+function boxOf(el){
+  const op=el.offsetParent||document.body, o=op.getBoundingClientRect();
+  const x=o.left+el.offsetLeft-op.scrollLeft, y=o.top+el.offsetTop-op.scrollTop;
+  return {x, y, w:el.offsetWidth, h:el.offsetHeight};
 }
-function onDragMove(ev){
-  if(!drag || ev.pointerId!==drag.id) return;
-  // the dragged card ignores the pointer (CSS), so this finds what is beneath it
-  const el=document.elementFromPoint(ev.clientX, ev.clientY);
-  const over=el && el.closest('.cardwrap');
-  if(!over || over===drag.wrap || over.parentElement!==drag.grid) return;
-  const kids=[...drag.grid.children];
-  drag.grid.insertBefore(drag.wrap, kids.indexOf(drag.wrap) < kids.indexOf(over) ? over.nextSibling : over);
+function inBox(b,x,y,inset){ const ix=b.w*inset, iy=b.h*inset;
+  return x>b.x+ix && x<b.x+b.w-ix && y>b.y+iy && y<b.y+b.h-iy; }
+
+function startDrag(id, x, y, wrap){
+  const b=boxOf(wrap);
+  drag={wrap, grid:wrap.parentElement, id, x, y, gx:x-b.x, gy:y-b.y, last:null, raf:0};
+  wrap.classList.add('dragging');
+  document.body.classList.add('carddrag');
+  if(navigator.vibrate) navigator.vibrate(8);
+  drag.raf=requestAnimationFrame(dragFrame);
+}
+function dragFrame(){
+  const d=drag; if(!d) return;
+  if(!d.wrap.isConnected){ drag=null; document.body.classList.remove('carddrag'); return; }
+  // near the top or bottom edge the page scrolls, faster the closer you get
+  const E=80, vh=window.innerHeight;
+  if(d.y<E) window.scrollBy(0, -Math.ceil((E-d.y)/6));
+  else if(d.y>vh-E) window.scrollBy(0, Math.ceil((d.y-(vh-E))/6));
+  // swap with the card under the finger, once per entry into it
+  if(d.last && !inBox(boxOf(d.last), d.x, d.y, 0)) d.last=null;
+  for(const el of d.grid.children){
+    if(el===d.wrap || el===d.last || el.dataset.off==='1' && !document.body.classList.contains('editing')) continue;
+    if(!inBox(boxOf(el), d.x, d.y, .12)) continue;
+    reorder(el); break;
+  }
+  const b=boxOf(d.wrap);
+  d.wrap.style.transform='translate('+(d.x-d.gx-b.x)+'px,'+(d.y-d.gy-b.y)+'px)';
+  d.raf=requestAnimationFrame(dragFrame);
+}
+function reorder(over){
+  const d=drag, kids=[...d.grid.children].filter(el=>el!==d.wrap);
+  const first=new Map(kids.map(el=>[el, el.getBoundingClientRect()]));
+  const all=[...d.grid.children];
+  d.grid.insertBefore(d.wrap, all.indexOf(d.wrap) < all.indexOf(over) ? over.nextSibling : over);
+  d.last=over;
+  if(calm()) return;
+  for(const el of kids){
+    const f=first.get(el), l=boxOf(el), dx=f.left-l.x, dy=f.top-l.y;
+    if(el._flip) el._flip.cancel();
+    if(Math.abs(dx)<1 && Math.abs(dy)<1) continue;
+    el._flip=el.animate([{transform:'translate('+dx+'px,'+dy+'px)'},{transform:'none'}],
+                        {duration:220, easing:'cubic-bezier(.22,1,.36,1)'});
+  }
 }
 function endDrag(){
   if(!drag) return;
-  drag.wrap.classList.remove('dragging');
-  drag=null;
+  const d=drag; drag=null;
+  cancelAnimationFrame(d.raf);
+  document.body.classList.remove('carddrag');
+  // settle into the slot rather than snapping to it
+  const t=d.wrap.style.transform;
+  d.wrap.style.transform='';
+  d.wrap.classList.remove('dragging');
+  if(t && !calm()) d.wrap.animate([{transform:t},{transform:'none'}],
+                                  {duration:200, easing:'cubic-bezier(.22,1,.36,1)'});
   const now=[...document.querySelectorAll('#vitals .cardwrap[data-k]')].map(w=>w.dataset.k).filter(knownKey);
   prefs.order=now.concat(CARDK.filter(k=>now.indexOf(k)<0));
   savePrefs();
@@ -5482,44 +6513,82 @@ function endDrag(){
 function onDown(ev){
   if(ev.button!==undefined && ev.button!==0) return;
   const wrap=ev.target.closest('#vitals .cardwrap');
-  if(!wrap) return;
+  if(!wrap || drag) return;
   if(ev.target.closest('.cardtools button, .xbtn')) return;   // controls are not handles
   if(document.body.classList.contains('editing')){
-    if(knownKey(wrap.dataset.k)) startDrag(ev, wrap);     // VM cards keep TrueNAS's order
+    if(knownKey(wrap.dataset.k)) startDrag(ev.pointerId, ev.clientX, ev.clientY, wrap);  // VM cards keep TrueNAS's order
     return;
   }
-  hold={wrap, start:{x:ev.clientX, y:ev.clientY}, id:ev.pointerId, t:setTimeout(()=>{
-    hold=null;
+  // a hold enters arrange mode and, if the finger stays down, carries straight
+  // on into dragging that card, the way a phone home screen does
+  hold={wrap, start:{x:ev.clientX, y:ev.clientY}, x:ev.clientX, y:ev.clientY, id:ev.pointerId, t:setTimeout(()=>{
+    const h=hold; hold=null;
     setEditing(true);
-    if(navigator.vibrate) navigator.vibrate(12);
+    if(knownKey(h.wrap.dataset.k) && h.wrap.isConnected) startDrag(h.id, h.x, h.y, h.wrap);
+    else if(navigator.vibrate) navigator.vibrate(12);
   }, HOLD_MS)};
 }
 
 function cancelHold(){ if(hold){ clearTimeout(hold.t); hold=null; } }
 
 function onMove(ev){
+  if(drag && ev.pointerId===drag.id){ drag.x=ev.clientX; drag.y=ev.clientY; return; }
   if(!hold) return;
+  hold.x=ev.clientX; hold.y=ev.clientY;
   const dx=Math.abs(ev.clientX-hold.start.x), dy=Math.abs(ev.clientY-hold.start.y);
   if(dx>HOLD_SLOP || dy>HOLD_SLOP) cancelHold();      // a scroll, not a press
 }
 
-
 document.addEventListener('pointerdown', onDown);
 document.addEventListener('pointermove', onMove, {passive:true});
-document.addEventListener('pointermove', onDragMove, {passive:true});
-document.addEventListener('pointerup', ()=>{ cancelHold(); endDrag(); });
-document.addEventListener('pointercancel', ()=>{ cancelHold(); endDrag(); });
+document.addEventListener('pointerup', ev=>{ cancelHold(); if(drag && ev.pointerId===drag.id) endDrag(); });
+document.addEventListener('pointercancel', ev=>{ cancelHold(); if(drag && ev.pointerId===drag.id) endDrag(); });
+// iOS decides to scroll from touch events, and touch-action set mid-gesture
+// (the hold turning into a drag) is ignored, so a drag in progress has to
+// refuse the touchmove itself or Safari scrolls the page and cancels the pointer
+document.addEventListener('touchmove', ev=>{ if(drag) ev.preventDefault(); }, {passive:false});
 // a press that turns into a scroll must not arm the hold
-document.addEventListener('scroll', cancelHold, {passive:true});
+document.addEventListener('scroll', ()=>{ if(!drag) cancelHold(); }, {passive:true});
 
 document.addEventListener('click',ev=>{
   // the tile itself now opens the sheet; Launch inside it is what opens the app
   const tile=ev.target.closest('.apptile[data-uid]');
   if(tile){ ev.preventDefault();
-            openPop('app-'+tile.dataset.uid); return; }
+            const need=tile.classList.contains('needkey');
+            openPop('app-'+tile.dataset.uid, need?'custom':'live');
+            if(need) setTimeout(()=>{ const k=$('akeys'); if(k) k.scrollIntoView({block:'center',behavior:'smooth'}); },300);
+            return; }
+  const wn=ev.target.closest('[data-wnapp]');
+  if(wn){ const s=((data&&data.services)||[]).find(x=>x.app===wn.dataset.wnapp);
+          if(s){ openPop('app-'+s.id,'custom');
+                 setTimeout(()=>{ const k=$('akeys'); if(k) k.scrollIntoView({block:'center',behavior:'smooth'}); },300); }
+          return; }
+  if(ev.target.id==='wn-ok'){ closePop(); return; }
   const tb=ev.target.closest('[data-atab]');
   if(tb){ if(appTab!==tb.dataset.atab){ appTab=tb.dataset.atab; $('sh-b')._html=null; renderPop(false);
                                          $('sh-b').scrollTop=0; } return; }
+  const lz=ev.target.closest('[data-lsz]');
+  if(lz){
+    const s=((data&&data.services)||[]).find(x=>x.id===openKey.slice(4));
+    if(!s) return;
+    prefs.livesize=Object.assign({}, prefs.livesize);
+    prefs.livesize[s.app]=+lz.dataset.lsz;
+    savePrefs();
+    build();
+    if(data) paintLive();
+    $('sh-b')._html=null; renderPop(false);
+    return;
+  }
+  if(ev.target.id==='ak-save' || ev.target.id==='ak-del'){
+    const s=((data&&data.services)||[]).find(x=>x.id===openKey.slice(4));
+    if(!s) return;
+    if(ev.target.id==='ak-del'){ saveKeys(s.app, null); return; }
+    const f={};
+    document.querySelectorAll('#akeys [data-kf]').forEach(i=>{ if(i.value.trim()) f[i.dataset.kf]=i.value.trim(); });
+    if(!Object.keys(f).length){ const i=document.querySelector('#akeys [data-kf]'); if(i) i.focus(); return; }
+    saveKeys(s.app, f);
+    return;
+  }
   if(ev.target.closest('#ap-live')){
     const s=((data&&data.services)||[]).find(x=>x.id===openKey.slice(4));
     if(!s) return;
@@ -5529,7 +6598,7 @@ document.addEventListener('click',ev=>{
     savePrefs();
     build();                          // tiles back to plain, then repaint the ones still on
     if(data) paintLive();
-    $('ap-live').setAttribute('aria-checked', String(liveOn(s.app)));
+    $('sh-b')._html=null; renderPop(false);
     return;
   }
   if(ev.target.id==='ap-upd'){
@@ -5606,13 +6675,9 @@ document.addEventListener('click',ev=>{
   if(ev.target.closest('#settings')){
     ev.preventDefault(); settingsOpen()?closeSettings():openSettings(); return;
   }
-  if(ev.target.closest('#settings-back')){ closeSettings(); return; }
   const settingsTarget=ev.target.closest('[data-settings-target]');
   if(settingsTarget){
-    document.querySelectorAll('.settings-nav button').forEach(b=>b.classList.remove('active'));
-    settingsTarget.classList.add('active');
-    const section=$(settingsTarget.dataset.settingsTarget);
-    if(section) section.scrollIntoView({behavior:'smooth',block:'start'});
+    showSettingsTab(settingsTarget.dataset.settingsTarget);
     return;
   }
   const seg=ev.target.closest('#seg-theme button');
@@ -5620,8 +6685,34 @@ document.addEventListener('click',ev=>{
   const sw=ev.target.closest('#sw-accent button');
   if(sw){ prefs.accent=sw.dataset.accent; savePrefs(); applyAccent(); return; }
   if(ev.target.closest('#mi-edit')){ closeSettings(); setEditing(true); return; }
+  // the resets have no undo, so each wants a second tap within three seconds
+  const rb=ev.target.closest('#mi-reset, #mi-resetapps');
+  if(rb && !rb.classList.contains('armed')){
+    rb.classList.add('armed'); rb.textContent='Tap again';
+    setTimeout(()=>{ rb.classList.remove('armed'); rb.textContent='Reset'; }, 3000);
+    return;
+  }
+  if(rb){ rb.classList.remove('armed'); rb.textContent='Done'; setTimeout(()=>{ rb.textContent='Reset'; }, 1500); }
   if(ev.target.closest('#mi-reset')){ resetLayout(); return; }
   if(ev.target.closest('#mi-setup')){ closeSettings(); openSetup(true); return; }
+  if(ev.target.closest('#mi-wn')){ openPop('whatsnew'); return; }
+  if(ev.target.closest('#mi-resetapps')){
+    prefs.hiddenapps=[]; prefs.nolive=[]; prefs.livesize={};
+    savePrefs(); build(); if(data){ paintLive(); paintSettings(); }
+    return;
+  }
+  if(ev.target.closest('#s-showhid')){ openSettings('settings-apps'); return; }
+  const hs=ev.target.closest('.sapp .sw2');
+  if(hs){
+    const app=hs.closest('.sapp').dataset.app, hid=new Set(prefs.hiddenapps||[]);
+    if(hid.has(app)) hid.delete(app); else hid.add(app);
+    prefs.hiddenapps=[...hid].sort();
+    savePrefs(); build(); if(data){ paintLive(); paintSettings(); }
+    return;
+  }
+  const sa=ev.target.closest('.sapp');
+  if(sa){ const s=((data&&data.services)||[]).find(x=>x.app===sa.dataset.app);
+          if(s) openPop('app-'+s.id,'custom'); return; }
   const lk=ev.target.closest('#su-links button, #m-links button');
   if(lk){ setLinks(lk.dataset.links); return; }
   const selfRow=ev.target.closest('#mi-self');
@@ -5667,7 +6758,7 @@ document.addEventListener('click',ev=>{
   const wb=ev.target.closest('.cardtools button[data-wide]');
   if(wb){ ev.preventDefault(); ev.stopPropagation();
           toggleWide(wb.dataset.wide); return; }
-  const eye=ev.target.closest('.cardtools button[data-eye]');
+  const eye=ev.target.closest('button[data-eye]');
   if(eye){ ev.preventDefault(); ev.stopPropagation();
            toggleCard(eye.dataset.eye); return; }
   if(document.body.classList.contains('editing')) return;   // cards are inert while editing
@@ -5860,6 +6951,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, blob, "image/jpeg", cache="public, max-age=86400")
             else:
                 self._send(404, b"", "image/jpeg")
+        elif path == "/api/glance/art":
+            q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            blob = glance_art((q.get("app") or [""])[0], (q.get("p") or [""])[0])
+            if blob:
+                self._send(200, blob, "image/jpeg", cache="public, max-age=86400")
+            else:
+                self._send(404, b"", "image/jpeg")
         elif path == "/figtree.woff2":
             self._send_icon("figtree.woff2", "font/woff2")
         elif path == "/manifest.webmanifest":
@@ -5925,7 +7023,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?", 1)[0]
         limits = {"/api/layout": 65536, "/api/check": 1024, "/api/vm": 4096,
-                  "/api/serve": 8192, "/api/update": 4096}
+                  "/api/serve": 8192, "/api/update": 4096, "/api/keys": 4096}
         if path not in limits:
             return self._fail(404, "not found")
         body = self._json_body(limits[path])
@@ -5942,6 +7040,8 @@ class Handler(BaseHTTPRequestHandler):
             ok, msg = request_vm(body.get("id"), str(body.get("action", "")))
         elif path == "/api/serve":
             ok, msg = request_serve(str(body.get("host") or ""))
+        elif path == "/api/keys":
+            ok, msg = save_keys(body)
         else:
             ok, msg = request_upgrade(str(body.get("app", "")))
         # /api/check reports a failed lookup in its message, not its status
@@ -5953,6 +7053,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     threading.Thread(target=vitals_loop, daemon=True).start()
     threading.Thread(target=services_loop, daemon=True).start()
+    threading.Thread(target=_glance_loop, daemon=True).start()
     time.sleep(2.2)                      # let the first CPU sample land before serving
     print("%s on :%s for %s (tailnet %s), data %s"
           % (APP_NAME, PORT, _state["host"], tailnet_host() or "not published", DATA), flush=True)

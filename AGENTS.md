@@ -102,3 +102,43 @@ CDP and click things; a screenshot alone has missed real bugs here.
   Simple Icons paths, inline). No match keeps the generic monitor icon.
 - Settings, System, App updates is one button. It checks; if a version is waiting it
   becomes "Update to x" and opens the install sheet.
+
+## Live tiles (2.0.0)
+
+- Apps with a bespoke tile (Plex, Pi-hole, Scrutiny, Ollama, Tally, Immich, Audiobookshelf,
+  SparkyFitness, Music Assistant) have their own collector and paint block. Everything else
+  goes through the `GLANCE` provider list in `server.py`: a match regex, credential fields,
+  a hint and a `fetch(http, cred)` returning one shared shape (`head`, `stats`, `line`, or
+  `title`/`sub`/`right`/`bar`/`art`). `paintGlance` draws it. Add an app there, not as a
+  new bespoke block, and test it against a real copy of the app (podman works on a dev box).
+- Unrecognised apps are identified by their home page `<title>` (`_glance_sniff`, 6 h cache).
+- The glance thread only runs when `/api/stats` kicks it, so nothing is polled with no viewer.
+- Credentials: `config/keys.json` (written by `/api/keys`, mode 600) over the legacy
+  `data/keys.json`; an empty string in config removes a legacy key. Never send a value to
+  the page, only which fields are set.
+- Tile size per app is `prefs.livesize` (1 or 2), defaulting per app (`natSize`). Every
+  paint block calls `sizeLive(tile, natural, cls)` and must lay out at both sizes.
+- A recognised app with no key shows "Needs an API key" / "Needs a sign-in" on its version
+  line (`askKey`); a tap opens Customize. Switching its live tile off stops the asking.
+- `POPS.whatsnew` opens once per device (localStorage `dashy.seen` = `WN_VER`). Bump `WN_VER`
+  only for a change worth interrupting people for.
+
+## Settings (2.0.0)
+
+- Four tabs, one shown at a time (`showSettingsTab`, remembered per tab session): General
+  (version, updates, what's new, diagnostics), Appearance (theme, accent, layout resets),
+  Apps (every app: live-tile state, size, hide switch; a row opens its Customize) and
+  Connections (Tailscale, HexOS, default address, TrueNAS address).
+- Built from `.sgroup` panels of `.setrow` rows (title + muted line left, control right) and
+  `.sbtn` pills, the same language as the app sheet. `.srow` is an older, unrelated class.
+- `paintSettings` runs every poll, but only rewrites a block whose markup changed.
+- `prefs.hiddenapps` leaves apps off the grid (a "N hidden apps" link stays under it); they
+  still count for health and updates. Resets want a second tap.
+- Diagnostics are judged in `diagRows` from data the page already has (`pools_age`,
+  `selfupdate.checked`, `updates._self/_serve`, `diag.config`, `appLive`).
+
+## Card drag (2.0.0)
+
+- The dragged card follows the pointer via a transform on its `.cardwrap`; the others FLIP into place with `el.animate()`. `.jig` carries the wobble animation, so never put the drag transform on it.
+- Hit-test against layout boxes (`offsetLeft/Top`), not `getBoundingClientRect` or `elementFromPoint`: a card mid-slide is not where it will land, and testing what is on screen made the cards swap back and forth on phones.
+- A hold carries straight on into a drag. iOS ignores `touch-action` changed mid-gesture, so a non-passive `touchmove` listener calls `preventDefault` while `drag` is set. Without it Safari scrolls the page and cancels the pointer.
