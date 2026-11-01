@@ -137,10 +137,21 @@ mv "$D/drives.jsonl.tmp" "$D/drives.jsonl"
 
 # --- installed apps and the host ports they publish, so the dashboard can
 # --- name a tailnet mapping without anything being hard-coded
+# --- and what TrueNAS is doing to each one right now, so a tile can say
+# --- 'Removing' or 'Stopping' instead of calling a deliberate act an outage
+timeout 30 midclt call core.get_jobs '[["state","=","RUNNING"],["method","in",["app.delete","app.stop","app.start","app.redeploy"]]]' \
+  > "$D/appjobs.tmp" 2>/dev/null || echo '[]' > "$D/appjobs.tmp"
 timeout 60 midclt call app.query 2>/dev/null | python3 -c "
 import json,sys
 try: apps=json.load(sys.stdin)
 except Exception: raise SystemExit
+VERB={'app.delete':'removing','app.stop':'stopping','app.start':'starting','app.redeploy':'starting'}
+busy={}
+try:
+    for j in json.load(open(sys.argv[1])):
+        args=j.get('arguments') or []
+        if args and isinstance(args[0],str): busy[args[0]]=VERB.get(j.get('method'))
+except Exception: pass
 out=[]
 for a in apps:
     ports=set()
@@ -155,7 +166,7 @@ for a in apps:
     desc=' '.join(str(md.get('description') or '').split())
     # the catalogue's first sentence is the useful part
     desc=desc.split('. ')[0].rstrip('.')
-    out.append({'name':a.get('name'),'state':a.get('state'),
+    out.append({'name':a.get('name'),'state':a.get('state'),'job':busy.get(a.get('name')),
                 # the catalogue's own name and blurb; custom apps have neither
                 'title':str(md.get('title') or ''),
                 'desc':desc[:90],
@@ -167,7 +178,8 @@ for a in apps:
                 'portals':a.get('portals') or {},
                 'update':bool(a.get('upgrade_available')) or bool(a.get('image_updates_available'))})
 json.dump(out,sys.stdout)
-" > "$D/apps.json.tmp" 2>/dev/null && mv "$D/apps.json.tmp" "$D/apps.json"
+" "$D/appjobs.tmp" > "$D/apps.json.tmp" 2>/dev/null && mv "$D/apps.json.tmp" "$D/apps.json"
+rm -f "$D/appjobs.tmp"
 
 # --- live tiles: where Plex is, and its token. The token lives in Plex's own
 # --- Preferences.xml, which only root can read; it is handed to the container in

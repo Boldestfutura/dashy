@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.4.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -148,6 +148,7 @@ _state = {
     "pools": [],
     "pools_age": None,
     "services": [],
+    "removed": [],
     "cpu_temp": None,
     "drives": [],
     "host": _hostname(),
@@ -1190,6 +1191,29 @@ def serve_map():
     return pub
 
 
+_last_port = {}      # app -> (port, path), so a stopped app keeps its tile
+_removed = {}        # app -> {"name", "at"}: gone from the NAS within the hour
+_seen = {}           # app -> display name, as of the last pass
+REMOVED_FOR = 3600
+
+
+def app_status(svc):
+    """One word for what an app is doing, from what TrueNAS says first and the
+    probe second: an app someone stopped is not an outage."""
+    job, state = svc.get("job"), svc.get("state")
+    if job:
+        return job                              # removing / stopping / starting
+    if state == "STOPPING":
+        return "stopping"
+    if state == "DEPLOYING":
+        return "starting"
+    if state == "STOPPED":
+        return "stopped"
+    if state == "CRASHED":
+        return "crashed"
+    return "up" if svc.get("code") else "noreply"
+
+
 def discover():
     """Every installed app, plus whatever Serve says about how to reach it.
 
@@ -1234,8 +1258,13 @@ def discover():
         me = is_self(app_name)
         if chosen is None and me:
             chosen, ppath = PORT, "/"
+        # A stopped app publishes no ports, which would make its tile vanish as if
+        # it had been removed. Remember where it was last seen.
+        if chosen is None and a.get("state") != "RUNNING" and app_name in _last_port:
+            chosen, ppath = _last_port[app_name]
         if chosen is None:
             continue                 # host networking, or nothing web-facing
+        _last_port[app_name] = (chosen, ppath if chosen == pport else "/")
         # The catalogue's own title and one-line description. A custom app
         # has neither, so it is titled from its name on the NAS.
         if me:
@@ -1246,7 +1275,7 @@ def discover():
         out.append({"port": pub.get(chosen), "lport": chosen,
                     "path": ppath if chosen == pport else "/",
                     "name": label, "desc": desc,
-                    "state": a.get("state"), "app": app_name,
+                    "state": a.get("state"), "job": a.get("job"), "app": app_name,
                     "id": app_name,
                     "version": APP_VERSION if me else a.get("version"),
                     "update": bool(a.get("update")),
@@ -1259,6 +1288,14 @@ def discover():
     out.sort(key=lambda x: (x["port"] is None, x["port"] or 0,
                             (x["name"] or "").lower()))
     return out
+
+
+def _installed_names():
+    try:
+        with open(os.path.join(DATA, "apps.json")) as fh:
+            return [a["name"] for a in json.load(fh) if isinstance(a, dict) and a.get("name")]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
 
 
 def probe(port):
@@ -1287,7 +1324,10 @@ def services_loop():
             tn = tailnet_host()
             for svc in discover():
                 svc = dict(svc)
-                code, ms = probe(svc["lport"])
+                if svc.get("state") in ("STOPPED", "STOPPING", "DEPLOYING") or svc.get("job"):
+                    code, ms = None, None
+                else:
+                    code, ms = probe(svc["lport"])
                 svc["code"] = code
                 svc["rt_ms"] = ms
                 path = svc.get("path") or "/"
@@ -1313,9 +1353,27 @@ def services_loop():
                     d = _app_hist.setdefault(svc["id"], deque(maxlen=APP_HIST))
                     d.append([stamp, ms])
                 svc["rt_hist"] = list(_app_hist.get(svc["id"]) or [])
+                svc["status"] = app_status(svc)
                 found.append(svc)
+            # Anything that was here last pass and is no longer installed was
+            # removed on purpose. Judged against the NAS's own list, not the tiles,
+            # so an app with nothing web-facing never looks removed.
+            installed = set(_installed_names())
+            if installed:
+                now = time.time()
+                for app, name in _seen.items():
+                    if app not in installed:
+                        _removed[app] = {"name": name, "at": now}
+                        _last_port.pop(app, None)
+                for app in list(_removed):
+                    if app in installed or now - _removed[app]["at"] > REMOVED_FOR:
+                        del _removed[app]
+                _seen.clear()
+                _seen.update({x["app"]: x["name"] for x in found})
             with _lock:
                 _state["services"] = found
+                _state["removed"] = sorted(({"app": k, **v} for k, v in _removed.items()),
+                                           key=lambda x: -x["at"])
         except Exception:
             traceback.print_exc()
         time.sleep(20)
@@ -1337,6 +1395,8 @@ def snapshot():
     out["host"] = _hostname()
     out["system"] = system_info()
     out["services"] = svc
+    with _lock:
+        out["removed"] = list(_state["removed"])
     out["queued"] = queued()
     out["updates"] = update_status()
     out["prefs"] = load_prefs()
@@ -1601,6 +1661,10 @@ PAGE = """<!doctype html>
     .cardwrap{transition:none !important}
   }
   .card.ghost{opacity:.45}
+  body.editing .cardwrap{cursor:grab}
+  .cardwrap.dragging{pointer-events:none;z-index:5;cursor:grabbing}
+  .cardwrap.dragging > .jig{animation:none;transform:scale(1.04);
+                            filter:drop-shadow(0 10px 22px rgba(0,0,0,.28))}
   body.editing .card{cursor:default}
   /* a <button> may not contain a <button>; the parser would hoist the tools out
      of the card, so each card sits in a positioned wrapper instead */
@@ -1900,6 +1964,7 @@ PAGE = """<!doctype html>
          background:var(--ok)}
   .srow[data-level="warn"] .sdotL{background:var(--warn)}
   .srow[data-level="bad"] .sdotL{background:var(--bad)}
+  .srow[data-level="info"] .sdotL{background:var(--muted);opacity:.6}
   .srow[data-level="warn"] .t1{color:var(--warn)}
   .srow[data-level="bad"] .t1{color:var(--bad)}
   button.srow{width:100%;background:none;font:inherit;color:inherit;text-align:left;
@@ -1958,8 +2023,15 @@ PAGE = """<!doctype html>
   .apptile:hover{border-color:color-mix(in srgb,var(--accent) 40%,var(--brd))}
   .apptile .sdot{position:absolute;top:calc(50% - 4px);right:16px;width:8px;height:8px;
                  border-radius:50%;background:var(--muted);opacity:.5}
-  .apptile[data-up="1"] .sdot{background:var(--ok);opacity:1}
-  .apptile[data-up="0"]{opacity:.62}
+  /* green when answering, red when it should be and is not, amber while TrueNAS
+     is starting or stopping it, and a grey, faded tile when it is off on purpose */
+  .apptile[data-st="up"] .sdot{background:var(--ok);opacity:1}
+  .apptile[data-st="noreply"] .sdot,.apptile[data-st="crashed"] .sdot{background:var(--bad);opacity:1}
+  .apptile[data-st="noreply"] .ap,.apptile[data-st="crashed"] .ap{color:var(--bad)}
+  .apptile[data-st="starting"] .sdot,.apptile[data-st="stopping"] .sdot,
+  .apptile[data-st="removing"] .sdot{background:var(--warn);opacity:1;animation:stpulse 1.4s ease-in-out infinite}
+  .apptile[data-st="stopped"],.apptile[data-st="removing"]{opacity:.62}
+  @keyframes stpulse{50%{opacity:.35}}
   .apptile .aico{grid-row:1/3;width:36px;height:36px;padding:8px;box-sizing:border-box;
                  border-radius:50%;background:var(--faint);object-fit:contain}
   .apptile .aico.mono{display:flex;align-items:center;justify-content:center;color:#fff;
@@ -2091,6 +2163,7 @@ PAGE = """<!doctype html>
   .pill.up{color:var(--ok);background:color-mix(in srgb,var(--ok) 15%,transparent)}
   .pill.down{color:var(--bad);background:color-mix(in srgb,var(--bad) 16%,transparent)}
   .pill.warn{color:var(--warn);background:color-mix(in srgb,var(--warn) 16%,transparent)}
+  .pill.off{color:var(--muted);background:var(--faint)}
   .pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor}
   .appver{margin-left:auto;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
   .mcards{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:0 16px 12px}
@@ -2524,7 +2597,7 @@ function loadPrefs(){
       if(d.urls && typeof d.urls==='object') prefs.urls=cleanUrls(d.urls);
       if(Array.isArray(d.order)){
         // keep only known cards, then append any card added since this was saved
-        const keep=d.order.filter(k=>CARDK.indexOf(k)>=0);
+        const keep=d.order.filter(knownKey);
         prefs.order=keep.concat(CARDK.filter(k=>keep.indexOf(k)<0));
       }
     }catch(e){}
@@ -2570,7 +2643,7 @@ function adoptPrefs(P){
   const same=(a,b)=>a.length===b.length && a.every((v,i)=>v===b[i]);
 
   if(Array.isArray(P.order)){
-    const keep=P.order.filter(k=>CARDK.indexOf(k)>=0);
+    const keep=P.order.filter(knownKey);
     const next=keep.concat(CARDK.filter(k=>keep.indexOf(k)<0));
     if(!same(next, prefs.order)){ prefs.order=next; layoutChanged=true; }
   }
@@ -3038,16 +3111,20 @@ function build(){
   // CSS hides them. Dropping them would mean guarding every $() in paint().
   // pools first, then the thermometer: which pool is full is the question,
   // how warm the drives are is the footnote
-  // A saved order from an older version has no 'health' in it, and anything
-  // unknown gets appended - which would put the one card that says whether
-  // anything is wrong at the bottom. It leads, always.
-  let base=prefs.order.map(k=>by[k]).filter(Boolean);
-  CARDS.forEach(c=>{ if(base.indexOf(c)<0) base.push(c); });
-  base=base.filter(c=>c.k!=='health');
-  if(by.health) base.unshift(by.health);
-  const order=base.filter(c=>c.sec!=='storage')
-                  .concat(poolCards())
-                  .concat(base.filter(c=>c.sec==='storage'));
+  // Cards can be dragged within their section in arrange mode, pools included,
+  // and prefs.order keeps where they were put. A card the saved order has never
+  // seen still lands where it always did: Health first, a new pool ahead of the
+  // other storage cards, anything else at the end of its section.
+  const pools=poolCards();
+  pools.forEach(c=>by[c.k]=c);
+  const order=prefs.order.map(k=>by[k]).filter(Boolean);
+  if(by.health && order.indexOf(by.health)<0) order.unshift(by.health);
+  pools.forEach(c=>{
+    if(order.indexOf(c)>=0) return;
+    const i=order.findIndex(x=>x.sec==='storage' && !x.pool);
+    if(i<0) order.push(c); else order.splice(i,0,c);
+  });
+  CARDS.forEach(c=>{ if(order.indexOf(c)<0) order.push(c); });
   $('vitals').innerHTML = SECTIONS.map(([id,title])=>{
     if(id==='apps') return appsSection();
     if(id==='vms') return vmsSection();
@@ -3407,7 +3484,28 @@ function updLabel(u){
   return u.k==='queued' ? 'Queued' : u.k==='running' ? u.pct+'%'
        : u.k==='done' ? 'Updated' : 'Failed';
 }
+// What TrueNAS says the app is doing, with the probe as the tie-breaker. The
+// server decides; an older server without a status falls back to the probe.
+const APP_ST={up:'Running',noreply:'Not responding',crashed:'Crashed',stopped:'Stopped',
+              starting:'Starting\u2026',stopping:'Stopping\u2026',removing:'Removing\u2026'};
+function appSt(s){ return s.status || (s.code ? 'up' : 'noreply'); }
+function isDown(s){ const k=appSt(s); return k==='noreply' || k==='crashed'; }
+// The dot and the second line follow every poll; they used to be set only when
+// the grid was rebuilt, so an app that stopped answering kept its green dot.
+function paintAppStatus(){
+  const by={}; (data.services||[]).forEach(s=>by[s.id]=s);
+  document.querySelectorAll('.apptile[data-uid]').forEach(t=>{
+    const s=by[t.dataset.uid]; if(!s) return;
+    const k=appSt(s);
+    if(t.dataset.st===k) return;
+    t.dataset.st=k;
+    const ap=t.querySelector('.ap');
+    if(ap) ap.innerHTML = k==='up' ? esc(niceVer(s)).replace(/^Version /,'<span class="vw">Version </span>')
+                                   : esc(APP_ST[k]||k);
+  });
+}
 function paintAppStates(){
+  paintAppStatus();
   document.querySelectorAll('.apptile[data-app]').forEach(t=>{
     const u=updState(t.dataset.app);
     if(!u){ delete t.dataset.ust; return; }
@@ -3830,12 +3928,14 @@ function healthRows(d){
   else if(warm) rows.push(['warn','Drives',warm.dev+' at '+warm.temp+'\u00b0C']);
   else rows.push(['ok','Drives',drives.length+' healthy'+(range?' \u00b7 '+range:'')]);
 
-  const down=svc.filter(s=>!s.code);
+  const down=svc.filter(isDown);
+  const off=svc.filter(s=>appSt(s)==='stopped').length;
+  const live=svc.filter(s=>appSt(s)==='up').length;
   if(!svc.length) rows.push(['info','Apps','none found']);
   else if(down.length) rows.push(['warn','Apps',
     down.length===1 ? down[0].name+' down' : down.length+' down',
     down.length===1 ? down[0].name+' not responding' : down.length+' apps not responding']);
-  else rows.push(['ok','Apps','all '+svc.length+' responding']);
+  else rows.push(['ok','Apps', off ? live+' responding \u00b7 '+off+' stopped' : 'all '+live+' responding']);
 
   const upd=svc.filter(s=>s.update).length;
   const going=svc.filter(s=>{const u=updState(s.app); return u && (u.k==='queued'||u.k==='running');});
@@ -4026,7 +4126,7 @@ function agoWord(sec){
 function rowsSystem(){
   const out = [];
   const svc = data.services || [];
-  const down = svc.filter(s => !s.code);
+  const down = svc.filter(isDown);
   const upd = svc.filter(s => s.update);
   const su = data.selfupdate || {};
   const pools = data.pools || [];
@@ -4107,8 +4207,24 @@ function rowsSystem(){
     normal.push(srow('ok', sys.cpu || 'Hardware', hw));
   normal.push(srow('ok', 'Dashy ' + data.version,
                    su.checked ? 'Checked for updates ' + agoWord(Math.max(0, Math.round(Date.now()/1000 - su.checked))) : ''));
+  const st = k => svc.filter(s => appSt(s) === k);
   normal.push(srow('ok', svc.length + ' apps installed',
-                   (svc.length - down.length) + ' responding'));
+                   st('up').length + ' responding'));
+  ['starting', 'stopping', 'removing'].forEach(k => {
+    const l = st(k);
+    if (l.length) normal.push(srow('info', l.map(s => s.name).join(', ') + ' \u00b7 ' + APP_ST[k].replace('\u2026', '').toLowerCase(),
+                                   'TrueNAS is working on ' + (l.length === 1 ? 'it' : 'them') + ' now.'));
+  });
+  const stopped = st('stopped');
+  if (stopped.length)
+    normal.push(srow('info', stopped.length === 1 ? stopped[0].name + ' is stopped' : stopped.length + ' apps are stopped',
+                     (stopped.length === 1 ? '' : stopped.map(s => s.name).join(', ') + '. ') +
+                     'Stopped in TrueNAS, so not counted as a problem.'));
+  const gone = data.removed || [];
+  if (gone.length)
+    normal.push(srow('info', gone.length === 1 ? gone[0].name + ' was removed' : gone.length + ' apps were removed',
+                     (gone.length === 1 ? '' : gone.map(g => g.name).join(', ') + '. ') +
+                     'Deleted from TrueNAS ' + agoWord(Math.max(0, Math.round(Date.now()/1000 - gone[0].at))) + '.'));
   pools.forEach(p => {
     const st = ps[p.name] || {};
     normal.push(srow('ok', p.name + ' · ' + p.pct.toFixed(0) + '% full',
@@ -4155,7 +4271,7 @@ function rowsApps(){
   const list=data.services||[];
   if(!list.length) return '<div class="row"><span class="t2">Nothing published yet.</span></div>';
   return '<div class="appgrid">'+list.map(s=>
-    '<a class="apptile" data-up="'+(s.code?'1':'0')+'"'+
+    '<a class="apptile"'+
       ' data-uid="'+esc(s.id)+'" data-name="'+esc(s.name)+'" data-app="'+esc(s.app)+'"'+
       ' href="'+esc(appURL(s)||'#')+'"'+
       ' role="button" aria-label="'+esc(s.name)+' details">'+
@@ -4242,7 +4358,7 @@ function mspark(rows, colour){
 function appSheet(id){
   const s=((data&&data.services)||[]).filter(x=>x.id===id)[0];
   if(!s) return null;
-  const up=!!s.code;
+  const k=appSt(s), up=k==='up';
   const ver=String(s.version||'').trim();
   const newer=String(s.update||'').trim();
   const overrides=urlOverrides(id);
@@ -4252,10 +4368,8 @@ function appSheet(id){
   const tsURL=overrides.ts||tsAuto;
   const target=appURL(s);
 
-  let head;
-  if(up) head='<span class="pill up"><span class="dot"></span>Running</span>';
-  else if(s.code===0) head='<span class="pill down"><span class="dot"></span>Not answering</span>';
-  else head='<span class="pill warn"><span class="dot"></span>Unknown</span>';
+  const pill={up:'up',noreply:'down',crashed:'down',stopped:'off'}[k]||'warn';
+  const head='<span class="pill '+pill+'"><span class="dot"></span>'+esc(APP_ST[k]||k)+'</span>';
   const codeTxt=up?('HTTP '+s.code):(s.code===0?'no reply':'');
   // Response latency is per-app. CPU, RAM, Network and Disk I/O are the live
   // host readings currently available to Dashy, so each is explicitly marked
@@ -4307,7 +4421,8 @@ function appSheet(id){
 
   const sub = up?('running'+(codeTxt?(' \u00b7 '+codeTxt):'')+
                   (rt!==null?' \u00b7 '+rt+' ms':''))
-            : (s.code===0?'not answering':'unknown');
+            : ({noreply:'running in TrueNAS, but not answering',crashed:'crashed in TrueNAS',
+                stopped:'stopped in TrueNAS'}[k] || (APP_ST[k]||k).toLowerCase());
   return [s.name, '<div class="appsheet">'+
       (s.desc?'<div class="appdesc">'+esc(s.desc)+'</div>':'')+
       '<div class="appstat">'+head+
@@ -4593,18 +4708,44 @@ function saveAppURL(id){
 }
 /* ---------- long press to arrange --------------------------------------
    A hold puts the page into arrange mode, where each card carries its size
-   button and its remove badge. Dragging to reorder was removed: once the
-   cards are grouped into System / Storage / Apps, a tile dragged out of its
-   section would have to stop being what the section says it is.          */
+   button and its remove badge, and can be dragged to a new place. Only
+   within its own section: a tile dragged from System into Storage would have
+   to stop being what the section heading says it is.                     */
 const HOLD_MS=450, HOLD_SLOP=10;
-let hold=null;
+let hold=null, drag=null;
+
+function startDrag(ev, wrap){
+  drag={wrap, grid:wrap.parentElement, id:ev.pointerId};
+  wrap.classList.add('dragging');
+  try{ wrap.setPointerCapture(ev.pointerId); }catch(e){}
+}
+function onDragMove(ev){
+  if(!drag || ev.pointerId!==drag.id) return;
+  // the dragged card ignores the pointer (CSS), so this finds what is beneath it
+  const el=document.elementFromPoint(ev.clientX, ev.clientY);
+  const over=el && el.closest('.cardwrap');
+  if(!over || over===drag.wrap || over.parentElement!==drag.grid) return;
+  const kids=[...drag.grid.children];
+  drag.grid.insertBefore(drag.wrap, kids.indexOf(drag.wrap) < kids.indexOf(over) ? over.nextSibling : over);
+}
+function endDrag(){
+  if(!drag) return;
+  drag.wrap.classList.remove('dragging');
+  drag=null;
+  const now=[...document.querySelectorAll('#vitals .cardwrap[data-k]')].map(w=>w.dataset.k).filter(knownKey);
+  prefs.order=now.concat(CARDK.filter(k=>now.indexOf(k)<0));
+  savePrefs();
+}
 
 function onDown(ev){
   if(ev.button!==undefined && ev.button!==0) return;
   const wrap=ev.target.closest('#vitals .cardwrap');
   if(!wrap) return;
   if(ev.target.closest('.cardtools button, .xbtn')) return;   // controls are not handles
-  if(document.body.classList.contains('editing')) return;
+  if(document.body.classList.contains('editing')){
+    if(knownKey(wrap.dataset.k)) startDrag(ev, wrap);     // VM cards keep TrueNAS's order
+    return;
+  }
   hold={wrap, start:{x:ev.clientX, y:ev.clientY}, id:ev.pointerId, t:setTimeout(()=>{
     hold=null;
     setEditing(true);
@@ -4623,8 +4764,9 @@ function onMove(ev){
 
 document.addEventListener('pointerdown', onDown);
 document.addEventListener('pointermove', onMove, {passive:true});
-document.addEventListener('pointerup', cancelHold);
-document.addEventListener('pointercancel', cancelHold);
+document.addEventListener('pointermove', onDragMove, {passive:true});
+document.addEventListener('pointerup', ()=>{ cancelHold(); endDrag(); });
+document.addEventListener('pointercancel', ()=>{ cancelHold(); endDrag(); });
 // a press that turns into a scroll must not arm the hold
 document.addEventListener('scroll', cancelHold, {passive:true});
 

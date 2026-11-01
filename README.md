@@ -38,6 +38,10 @@ add and remove things.
   reads the web password from the TrueNAS app's config and Dashy keeps a single
   session open. Change the password in the app's settings, not in Pi-hole's own
   page, or Dashy will not see it.
+- **Stopped is not down.** Each app says what TrueNAS says it is doing:
+  running, starting, stopping, stopped, crashed, or being removed. Only an app
+  that should be answering and is not counts as a problem; one you stopped is
+  shown grey, and one you deleted drops off with a note in Health for an hour.
 - **Updates from the dashboard.** Apps with an update show a marker; tapping it
   queues the upgrade and a recursive ZFS snapshot is taken first; the newest
   five per app are kept. Dashy updates itself the same way, from the image CI
@@ -50,8 +54,9 @@ add and remove things.
 - **Grouped by what it is.** System, Storage, Apps and Virtual machines, each under its own
   heading, with a Health card that leads and says in words whether anything
   needs you. A pool gets its own card rather than one aggregate number.
-- **Make it yours.** Hold a tile to resize or remove it: normal, or double
-  width with a sparkline. Light, dark
+- **Make it yours.** Hold a tile to arrange: drag it to a new place within its
+  section, resize it (normal, or double width with a sparkline) or remove it.
+  Light, dark
   or system theme and a choice of four accent colours.
   **Layout and theme are stored on the server**, so they follow you to every
   device and apply within seconds without a refresh.
