@@ -445,9 +445,83 @@ try:
 except Exception:
     pass
 
+# --- per-app usage, for the app sheet. Each container is a cgroup, and its
+# --- cgroup files say what the app itself is using: CPU time, memory (less the
+# --- page cache it can drop, as docker stats counts it), bytes read and written.
+# --- Network comes from the container's own namespace; an app on the host
+# --- network has no figure of its own, and says so rather than borrowing the NAS's.
+def containers():
+    seen = {}
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open("/proc/%s/cgroup" % pid) as f:
+                line = [l for l in f.read().splitlines() if l.startswith("0::")]
+        except Exception:
+            continue
+        if not line:
+            continue
+        path = line[0][3:]
+        tail = path.rsplit("/", 1)[-1]
+        cid = tail[7:-6] if tail.startswith("docker-") and tail.endswith(".scope") else (
+            tail if "/docker/" in path else "")
+        if len(cid) >= 12 and cid not in seen:
+            seen[cid] = (path, pid)
+    return seen
+
+
+def cgread(path, pid, hostns):
+    base = "/sys/fs/cgroup" + path
+    r = {"cpu": 0, "mem": 0, "rd": 0, "wr": 0, "ns": None, "rx": 0, "tx": 0}
+    try:
+        with open(base + "/cpu.stat") as f:
+            for l in f:
+                if l.startswith("usage_usec "):
+                    r["cpu"] = int(l.split()[1])
+        with open(base + "/memory.current") as f:
+            r["mem"] = int(f.read().strip() or 0)
+        with open(base + "/memory.stat") as f:
+            for l in f:
+                if l.startswith("inactive_file "):
+                    r["mem"] = max(0, r["mem"] - int(l.split()[1]))
+        with open(base + "/io.stat") as f:
+            for l in f:
+                for part in l.split()[1:]:
+                    k, _, v = part.partition("=")
+                    if k == "rbytes":
+                        r["rd"] += int(v)
+                    elif k == "wbytes":
+                        r["wr"] += int(v)
+    except Exception:
+        return None
+    try:
+        ns = os.readlink("/proc/%s/ns/net" % pid)
+        if ns != hostns:
+            r["ns"] = ns
+            with open("/proc/%s/net/dev" % pid) as f:
+                for l in f.read().splitlines()[2:]:
+                    name, _, rest = l.partition(":")
+                    if name.strip() == "lo":
+                        continue
+                    v = rest.split()
+                    r["rx"] += int(v[0])
+                    r["tx"] += int(v[8])
+    except Exception:
+        pass
+    return r
+
+
+try:
+    hostns = os.readlink("/proc/1/ns/net")
+except Exception:
+    hostns = ""
+ctrs = containers()
+c0, t0 = {cid: cgread(p, pid, hostns) for cid, (p, pid) in ctrs.items()}, time.monotonic()
 a = sample()
 time.sleep(2)
 b = sample()
+c1, t1 = {cid: cgread(p, pid, hostns) for cid, (p, pid) in ctrs.items()}, time.monotonic()
 
 cache, rows = {}, []
 for pid, (comm, ticks, rss) in b.items():
@@ -469,6 +543,55 @@ with open(tmp, "w") as f:
     json.dump({"at": int(time.time()), "cpu": top_cpu, "mem": top_mem,
                "ncpu": os.cpu_count()}, f)
 os.replace(tmp, D + "/procs.json")
+
+dt = max(t1 - t0, 0.5)
+ncpu = os.cpu_count() or 1
+apps, nsseen = {}, set()
+for cid, (path, pid) in ctrs.items():
+    x, y = c0.get(cid), c1.get(cid)
+    if not x or not y:
+        continue
+    # the pid stands in for its container; appname maps it via the compose label
+    name = appname(pid, cache, root)
+    if not name:
+        continue
+    m = apps.setdefault(name, {"cpu": 0.0, "mem": 0, "rd": 0.0, "wr": 0.0,
+                               "rx": 0.0, "tx": 0.0, "net": False})
+    m["cpu"] += max(0, y["cpu"] - x["cpu"]) / (dt * 1e6 * ncpu) * 100
+    m["mem"] += y["mem"]
+    m["rd"] += max(0, y["rd"] - x["rd"]) / dt
+    m["wr"] += max(0, y["wr"] - x["wr"]) / dt
+    # containers in one compose project can share a namespace; count it once
+    if y["ns"] and y["ns"] not in nsseen:
+        nsseen.add(y["ns"])
+        m["net"] = True
+        m["rx"] += max(0, y["rx"] - x["rx"]) / dt
+        m["tx"] += max(0, y["tx"] - x["tx"]) / dt
+now = int(time.time())
+for m in apps.values():
+    for k in ("cpu",):
+        m[k] = round(m[k], 2)
+    for k in ("rd", "wr", "rx", "tx"):
+        m[k] = round(m[k])
+    if not m["net"]:
+        m["rx"] = m["tx"] = None
+    del m["net"]
+# an hour of history at the collector's minute, carried over from the last run
+try:
+    with open(D + "/appstats.json") as f:
+        hist = json.load(f).get("hist") or {}
+except Exception:
+    hist = {}
+for name, m in apps.items():
+    h = [r for r in (hist.get(name) or []) if isinstance(r, list) and now - r[0] < 3700]
+    h.append([now, m["cpu"], m["mem"], m["rd"] + m["wr"],
+              None if m["rx"] is None else m["rx"] + m["tx"]])
+    hist[name] = h[-60:]
+hist = {k: v for k, v in hist.items() if k in apps}
+tmp = D + "/appstats.json.tmp"
+with open(tmp, "w") as f:
+    json.dump({"at": now, "apps": apps, "hist": hist}, f)
+os.replace(tmp, D + "/appstats.json")
 PYPROC
 
 # --- pool health beyond "ONLINE": scrubs, and the three error counters that

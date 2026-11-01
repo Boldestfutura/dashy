@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.5.5"
+APP_VERSION = "1.6.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -582,6 +582,17 @@ def procs_now():
     """Top processes by CPU and by memory, sampled on the host - the container
     has its own pid namespace and can see only itself."""
     return _read_json("procs.json", {})
+
+
+def app_stats():
+    """Each app's own CPU, memory, disk and network, from its containers'
+    cgroups (the root collector, once a minute), with an hour of history.
+    None when the collector has not written it lately: an old reading
+    presented as live would be worse than none."""
+    d = _read_json("appstats.json", {})
+    if not isinstance(d, dict) or time.time() - (d.get("at") or 0) > 300:
+        return None
+    return d
 
 
 def vms_now():
@@ -1367,6 +1378,12 @@ def _clean_prefs(d):
                 clean[k] = entry
         out["urls"] = clean
 
+    # apps whose live tile the owner switched off (the app sheet's Customize tab)
+    nl = d.get("nolive")
+    if isinstance(nl, list):
+        out["nolive"] = sorted({x for x in nl[:128] if isinstance(x, str)
+                                and re.match(r"^[a-z0-9][a-z0-9_-]{0,47}$", x)})
+
     su = d.get("setup")
     if isinstance(su, dict):
         clean = {}
@@ -1706,6 +1723,12 @@ def snapshot():
     out["tailnet"] = tn
     out["host"] = _hostname()
     out["system"] = system_info()
+    st = app_stats()
+    if st:
+        apps, hist = st.get("apps") or {}, st.get("hist") or {}
+        # copies: the polled list is shared state and must not carry per-snapshot extras
+        svc = [dict(x, m=apps[x["app"]], mh=hist.get(x["app"]) or [], m_at=st.get("at"))
+               if x.get("app") in apps else x for x in svc]
     out["services"] = svc
     with _lock:
         out["removed"] = list(_state["removed"])
@@ -2224,21 +2247,39 @@ PAGE = """<!doctype html>
   .scrim{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;
          padding:20px;background:rgba(8,10,14,.5);
          -webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
-  .sheet{width:100%;max-width:470px;max-height:86vh;display:flex;flex-direction:column;
+  .sheet{width:100%;max-width:470px;max-height:86vh;display:flex;flex-direction:column;position:relative;
          background:var(--panel);border:1px solid var(--brd);border-radius:20px;
          box-shadow:0 26px 64px -18px rgba(0,0,0,.55);overflow:hidden;
-         -webkit-backdrop-filter:blur(26px) saturate(180%);backdrop-filter:blur(26px) saturate(180%);
-         animation:pop .34s cubic-bezier(.22,1,.36,1) both}
-  /* flow in: the scrim fades, the sheet rises, then the rows follow in sequence.
-     opacity and transform only, so it stays on the compositor */
-  @keyframes pop{from{opacity:0;transform:translateY(14px) scale(.975)}
-                 to{opacity:1;transform:none}}
-  .scrim{animation:scrimin .22s ease both}
+         -webkit-backdrop-filter:blur(26px) saturate(180%);backdrop-filter:blur(26px) saturate(180%)}
+  /* Sheets come from an edge, the way a phone's own do: up from the bottom on a
+     phone, in from the right on anything wider, where they run the full height.
+     transform and opacity only, so it stays on the compositor. The page behind
+     is held still while one is open (lockPage). */
+  .sheet-grab{display:none}
+  @media (max-width:640px){
+    .scrim{align-items:flex-end;padding:0}
+    .sheet{max-width:none;max-height:92vh;border-radius:22px 22px 0 0;border-bottom:none;
+           animation:sheetup .42s cubic-bezier(.22,1,.36,1) both}
+    .scrim.out .sheet{animation:sheetdown .24s cubic-bezier(.4,0,1,1) both}
+    .sheet-grab{display:block;flex:0 0 auto;height:18px;cursor:grab;touch-action:none;position:relative}
+    .sheet-grab::before{content:"";position:absolute;left:50%;top:7px;width:38px;height:5px;margin-left:-19px;
+                        border-radius:3px;background:color-mix(in srgb,var(--ink) 22%,transparent)}
+    .sheet .sheet-h{padding-top:4px;touch-action:none}
+    .sheet.drag{animation:none;transition:none}
+  }
+  @media (min-width:641px){
+    .scrim{justify-content:flex-end;align-items:stretch;padding:12px}
+    .sheet{max-width:440px;max-height:none;animation:sheetin .42s cubic-bezier(.22,1,.36,1) both}
+    .scrim.out .sheet{animation:sheetout .24s cubic-bezier(.4,0,1,1) both}
+  }
+  @keyframes sheetup{from{transform:translateY(100%)}to{transform:none}}
+  @keyframes sheetdown{to{transform:translateY(100%)}}
+  @keyframes sheetin{from{transform:translateX(calc(100% + 24px))}to{transform:none}}
+  @keyframes sheetout{to{transform:translateX(calc(100% + 24px))}}
+  .scrim{animation:scrimin .25s ease both}
   @keyframes scrimin{from{opacity:0}to{opacity:1}}
-  .scrim.out{animation:scrimout .16s ease both}
-  .scrim.out .sheet{animation:popout .16s ease both}
+  .scrim.out{animation:scrimout .24s ease both}
   @keyframes scrimout{to{opacity:0}}
-  @keyframes popout{to{opacity:0;transform:translateY(6px) scale(.985)}}
 
   /* backwards, not both: once the run finishes the element falls back to its
      normal style, so content is never left stranded at opacity 0 */
@@ -2501,11 +2542,50 @@ PAGE = """<!doctype html>
   .apptile{cursor:pointer}
 
   /* ---- app detail sheet ------------------------------------------------
-     Tapping a tile used to launch the app. It now opens this instead: the
-     same readings HEXOS shows, and the one place the launch address is set. */
-  .appsheet{padding:2px 0 10px}
-  .appdesc{margin:12px 16px 10px;font-size:12.5px;color:var(--muted);line-height:1.45}
-  .appstat{display:flex;align-items:center;gap:8px;margin:0 16px 12px}
+     What the app is, its versions, then two tabs: Live metrics (what the
+     app itself is doing and using) and Customize (its tile and its address).
+     Launch, and Update when there is one, stay pinned along the bottom. */
+  /* a column at least the sheet's height, so Launch sits at the foot of the
+     full-height desktop panel even when there is little above it */
+  .appsheet{padding:2px 0 0;display:flex;flex-direction:column;min-height:100%}
+  .appsheet .appacts{margin-top:auto}
+  .sheet-b{flex:1 1 auto}
+  .appdesc{margin:10px 16px 12px;font-size:13px;color:var(--muted);line-height:1.45}
+  .avers{display:grid;grid-template-columns:1fr 1fr;gap:4px 14px;margin:0 16px 14px}
+  .avers span{font-size:11px;color:var(--muted)}
+  .avers b{display:block;font-size:14px;font-weight:600;font-variant-numeric:tabular-nums;margin-top:1px;
+           overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .avers b em{font-style:normal;color:var(--warn);font-weight:650}
+  .atabs{display:flex;gap:4px;margin:0 16px 12px;padding:3px;border-radius:12px;background:var(--surf);width:max-content}
+  .atabs button{appearance:none;border:none;background:none;color:var(--muted);font:inherit;font-size:12.5px;
+                font-weight:600;padding:7px 13px;border-radius:9px;cursor:pointer}
+  .atabs button[aria-selected="true"]{background:var(--panel);color:var(--ink);
+                box-shadow:0 1px 3px rgba(0,0,0,.12)}
+  .abox{margin:0 16px 12px;padding:10px;border-radius:16px;background:var(--surf)}
+  .abox .ah{display:flex;align-items:baseline;justify-content:space-between;gap:8px;
+            margin:2px 4px 9px;font-size:11px;font-weight:700;letter-spacing:.06em;
+            text-transform:uppercase;color:var(--muted)}
+  .abox .ah span{text-transform:none;letter-spacing:0;font-weight:500}
+  .agrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .acell{background:var(--panel);border-radius:11px;padding:9px 11px;min-width:0;display:flex;flex-direction:column;gap:2px}
+  .acell.full{grid-column:1/-1}
+  .acell .al{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .acell .av{font-size:15px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.25;
+             white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .acell .av small{font-size:11px;font-weight:600;color:var(--muted);margin-left:2px}
+  .acell .av.dim{color:var(--muted);font-weight:600;font-size:13px}
+  .acell .as{font-size:11.5px;color:var(--muted);white-space:normal;line-height:1.35}
+  .acell .mspark{height:20px;margin-top:4px}
+  .acell .mspark svg{width:100%;height:20px;display:block}
+  .anote{margin:-4px 20px 12px;font-size:11.5px;color:var(--muted)}
+  .acust{margin:0 16px 12px;padding:4px 14px;border-radius:16px;background:var(--surf)}
+  .acust .crow{display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid var(--faint)}
+  .acust .crow:last-child{border-bottom:none}
+  .acust .ct{flex:1;min-width:0}
+  .acust .ct b{display:block;font-size:13.5px;font-weight:600}
+  .acust .ct span{display:block;font-size:11.5px;color:var(--muted);margin-top:2px;line-height:1.4}
+  .acust .urlrow{padding:10px 0 12px}
+  .acust .ah{margin:12px 0 2px;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
   .pill{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700;
         letter-spacing:.03em;padding:4px 10px;border-radius:999px}
   .pill.up{color:var(--ok);background:color-mix(in srgb,var(--ok) 15%,transparent)}
@@ -2552,12 +2632,9 @@ PAGE = """<!doctype html>
            margin-top:8px;padding:12px 16px max(12px,env(safe-area-inset-bottom));
            background:var(--panel);border-top:1px solid var(--brd)}
   .appacts .ubtn{flex:1}
-  .appacts{flex-wrap:wrap}
-  .appacts .ubtn.upd{flex:1 0 100%}
   .appacts .launch{background:var(--accent);color:#fff;border-color:transparent;flex:2}
+  .appacts .ubtn.upd{flex:1}
   .appacts .launch:disabled{opacity:.5}
-  .optbox{margin:0 16px 4px;padding:0 0 6px}
-  .optbox .none{font-size:12px;color:var(--muted);padding:2px 0 6px}
 
 
   /* Memory donut: apps / ZFS cache / free, the split TrueNAS's own gauge
@@ -2829,6 +2906,7 @@ PAGE = """<!doctype html>
 
 <div class="scrim" id="scrim" hidden>
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh-t">
+    <div class="sheet-grab" id="sh-grab" aria-hidden="true"></div>
     <div class="sheet-h"><span id="sh-ico" hidden></span><p id="sh-t"></p><span class="sh-sub" id="sh-s"></span>
       <button class="x" id="sh-x" type="button" aria-label="Close">&times;</button></div>
     <div class="sheet-b" id="sh-b"></div>
@@ -2931,7 +3009,7 @@ const ACCENT_WAS={teal:'harbour', blue:'dusk', violet:'heather',
                   amber:'granite', yellow:'granite', rose:'heather', green:'harbour'};
 function migrateAccent(a){ return ACCENTS[a] ? a : (ACCENT_WAS[a] || 'dusk'); }
 const DEFAULTS={theme:'system', accent:'dusk', order:CARDK.slice(), hidden:[], wide:[], size:{},
-                setup:{}, urls:{}};
+                setup:{}, urls:{}, nolive:[]};
 let prefs=Object.assign({}, DEFAULTS);
 let lastTick=0;
 let bootVersion=null;
@@ -2952,6 +3030,7 @@ function loadPrefs(){
       migrateSizes();
       if(d.setup && typeof d.setup==='object') prefs.setup=d.setup;
       if(d.urls && typeof d.urls==='object') prefs.urls=cleanUrls(d.urls);
+      if(Array.isArray(d.nolive)) prefs.nolive=cleanNolive(d.nolive);
       if(Array.isArray(d.order)){
         // keep only known cards, then append any card added since this was saved
         const keep=d.order.filter(knownKey);
@@ -2980,7 +3059,7 @@ function pushPrefs(){
         body:JSON.stringify({order:prefs.order, hidden:prefs.hidden, wide:prefs.wide,
                              size:prefs.size,
                              theme:prefs.theme, accent:prefs.accent,
-                             setup:prefs.setup, urls:prefs.urls})});
+                             setup:prefs.setup, urls:prefs.urls, nolive:prefs.nolive||[]})});
       const j=await r.json();
       if(j && typeof j.rev==='number') prefsRev=j.rev;   // do not re-apply our own echo
     }catch(e){}                 // offline or no writable mount: the local copy still holds
@@ -3023,6 +3102,10 @@ function adoptPrefs(P){
   }
   if(P.setup && typeof P.setup==='object') prefs.setup=P.setup;
   if(P.urls && typeof P.urls==='object') prefs.urls=cleanUrls(P.urls);
+  if(Array.isArray(P.nolive)){
+    const next=cleanNolive(P.nolive);
+    if(!same(next, prefs.nolive||[])){ prefs.nolive=next; layoutChanged=true; }
+  }
   if(P.theme && P.theme!==prefs.theme){ prefs.theme=P.theme; applyTheme(); }
   const inc=P.accent && migrateAccent(P.accent);
   if(inc && inc!==prefs.accent){
@@ -3330,6 +3413,11 @@ function cleanSize(o){
 
 // Per-app LAN and tailnet overrides. Older string values are copied to both
 // modes on load; blank fields stay absent so each can auto-resolve separately.
+function cleanNolive(a){
+  return [...new Set(a.filter(x=>typeof x==='string' && /^[a-z0-9][a-z0-9_-]{0,47}$/.test(x)))].sort();
+}
+// whether an app's live tile is wanted on the dashboard (Customize tab)
+function liveOn(app){ return (prefs.nolive||[]).indexOf(app)<0; }
 function cleanUrls(o){
   const out={};
   for(const k in o){
@@ -3892,7 +3980,11 @@ function liveNow(x){
 function plexLive(){ return (data&&data.live&&data.live.plex)||null; }
 function plexTile(){
   const L=plexLive(); if(!L) return null;
-  return document.querySelector('.apptile[data-app="'+CSS.escape(L.app)+'"]');
+  return liveTile(L.app);
+}
+// the tile an app's live view paints into, or null when its owner switched it off
+function liveTile(app){
+  return liveOn(app) ? document.querySelector('.apptile[data-app="'+CSS.escape(app)+'"]') : null;
 }
 function liveBox(t){
   let b=t.querySelector('.live');
@@ -3936,7 +4028,7 @@ function paintLive(){
   }
   // drive temperatures, on whichever tile is Scrutiny
   const st=document.querySelector('.apptile[data-app*="scrutiny"]');
-  if(st){
+  if(st && liveOn(st.dataset.app)){
     const dr=(data.drives||[]).filter(x=>typeof x.temp==='number');
     if(!dr.length){ dropLive(st,'temps'); }
     else{
@@ -3952,7 +4044,7 @@ function paintLive(){
   }
   // Ollama: only while a model is loaded, with the time until it unloads ticking down
   const OL=data.live&&data.live.ollama;
-  const ot=OL&&document.querySelector('.apptile[data-app="'+CSS.escape(OL.app)+'"]');
+  const ot=OL&&liveTile(OL.app);
   if(ot){
     const m=(OL.models||[])[0];
     if(!m){ dropLive(ot,'ollama'); }
@@ -3970,7 +4062,7 @@ function paintLive(){
   }
   // Tally: always on, this month up front and the all-time split underneath
   const TL=data.live&&data.live.tally;
-  const tt=TL&&document.querySelector('.apptile[data-app="'+CSS.escape(TL.app)+'"]');
+  const tt=TL&&liveTile(TL.app);
   if(tt){
     const ps=TL.players||[];
     if(!ps.length){ dropLive(tt,'tally'); }
@@ -3992,7 +4084,7 @@ function paintLive(){
   }
   // Immich (tall): the library, or what it is still processing
   const IM=data.live&&data.live.immich;
-  const it=IM&&document.querySelector('.apptile[data-app="'+CSS.escape(IM.app)+'"]');
+  const it=IM&&liveTile(IM.app);
   if(it){
     it.classList.add('tall','immich');
     const JOB={thumbnailGeneration:'thumbnails',metadataExtraction:'metadata',videoConversion:'videos',
@@ -4005,7 +4097,7 @@ function paintLive(){
   }
   // Audiobookshelf (tall): only while someone is listening, like Plex, with the cover behind
   const AB=data.live&&data.live.abs;
-  const at=AB&&document.querySelector('.apptile[data-app="'+CSS.escape(AB.app)+'"]');
+  const at=AB&&liveTile(AB.app);
   if(at){
     if(!AB.live||!AB.title){ dropLive(at,'abs'); at.style.removeProperty('--art'); delete at.dataset.art; }
     else{
@@ -4024,7 +4116,7 @@ function paintLive(){
   }
   // SparkyFitness (wide): only while a fast is running, with the clock ticking
   const SP=data.live&&data.live.sparky;
-  const st2=SP&&document.querySelector('.apptile[data-app="'+CSS.escape(SP.app)+'"]');
+  const st2=SP&&liveTile(SP.app);
   if(st2){
     const f=SP.fast;
     st2.classList.remove('fasting','sparky','sperr'); delete st2.dataset.fs; st2.removeAttribute('title');
@@ -4072,7 +4164,7 @@ function paintLive(){
   }
   // Music Assistant (tall): whatever is playing, on which speaker, with the album behind it
   const MA=data.live&&data.live.ma;
-  const mt=MA&&document.querySelector('.apptile[data-app="'+CSS.escape(MA.app)+'"]');
+  const mt=MA&&liveTile(MA.app);
   if(mt){
     const pl=MA.playing||[], x=pl[0];
     if(!x){ dropLive(mt,'maart'); mt.style.removeProperty('--art'); delete mt.dataset.art; }
@@ -4094,7 +4186,7 @@ function paintLive(){
   }
   // Pi-hole: the last 24 hours, and an hourly chart with the blocked share filled in
   const PH=data.live&&data.live.pihole;
-  const pt=PH&&document.querySelector('.apptile[data-app="'+CSS.escape(PH.app)+'"]');
+  const pt=PH&&liveTile(PH.app);
   if(pt){
     if(PH.error||!PH.hist){ dropLive(pt,'dns'); }
     else{
@@ -4144,15 +4236,6 @@ function tickLive(){
 }
 setInterval(tickLive,1000);
 // every stream, for the Plex sheet
-function plexRows(s){
-  const L=plexLive();
-  if(!L || L.app!==s.app || !(L.sessions||[]).length) return '';
-  return '<div class="appurls"><div class="lbl">Now playing</div>'+L.sessions.map(x=>
-    '<div class="urow plx"><span class="uk">'+esc(String(x.user||'Someone').split(' ')[0])+'</span><span class="uv">'+
-      esc(x.title)+(x.sub?' · '+esc(x.sub):'')+(x.ep?' · '+esc(x.ep):'')+'<br>'+
-      esc(x.player)+' · '+esc(x.how)+(x.mbps?' · '+x.mbps+' Mbps':'')+
-      (x.res?' · '+esc(x.res):'')+(x.state==='paused'?' · paused':'')+'</span></div>').join('')+'</div>';
-}
 // Dashy's own update ends with its container restarting, so for a few
 // minutes after it a lost connection is expected, not a fault.
 function selfBusy(){
@@ -4866,114 +4949,186 @@ function mspark(rows, colour){
 // app's own latency trail, the versions the NAS reports, and the auto-resolved
 // address. The launch address is set here rather than on the tile, so the whole
 // decision - where it opens, and everything known about it - is in one place.
+// The app sheet. Live metrics is what the app itself is doing (its own view,
+// where Dashy can read one) and what it is using: CPU, memory, network and
+// disk from its containers' cgroups, sampled by the collector each minute.
+// Customize is its tile and its launch address.
+let appTab='live';
 function appSheet(id){
   const s=((data&&data.services)||[]).filter(x=>x.id===id)[0];
   if(!s) return null;
   const k=appSt(s), up=k==='up';
-  const ver=String(s.version||'').trim();
-  // TrueNAS says whether there is an update, not what it is; only a version string is shown
-  const newer=typeof s.update==='string' ? s.update.trim() : '';
-  const overrides=urlOverrides(id);
-  const lanAuto=s.url_lan_auto||s.url_lan||'';
-  const tsAuto=s.url_ts_auto||s.url_ts||'';
-  const lanURL=overrides.lan||lanAuto;
-  const tsURL=overrides.ts||tsAuto;
   const target=appURL(s);
-
-  const pill={up:'up',noreply:'down',crashed:'down',stopped:'off'}[k]||'warn';
-  const head='<span class="pill '+pill+'"><span class="dot"></span>'+esc(APP_ST[k]||k)+'</span>';
-  const codeTxt=(up&&s.code)?('HTTP '+s.code):(s.code===0?'no reply':(s.lport?'':'no web page'));
-  // Response latency is per-app. CPU, RAM, Network and Disk I/O are the live
-  // host readings currently available to Dashy, so each is explicitly marked
-  // NAS rather than being presented as container-level usage.
-  const rt=(typeof s.rt_ms==='number')?s.rt_ms:null;
-  const rtRows=s.rt_hist||[];
-  const netDev=(data.net||[]).filter(n=>n.down!==null&&n.down!==undefined)
-                 .sort((a,b)=>(b.down+b.up)-(a.down+a.up))[0];
-  const netHist=netDev?(data.net_hist||{})[netDev.name]||[]:[];
-  const netNow=netDev?(netDev.down||0)+(netDev.up||0):0;
-  const ioNow=(data.io||[]).reduce((n,x)=>n+(x.read||0)+(x.write||0),0);
-  const ioHist=(data.io_hist||[]).map(r=>[r[0],(r[1]||0)+(r[2]||0)]);
-  // apps only, like the Memory tile: the ZFS cache is handed back on demand,
-  // and counting it made this read 87% while the tile above said 50%
-  const ramHist=(data.mem_hist||[]).map(r=>[
-    r[0], data.mem&&data.mem.total ? 100*(r[1]||0)/data.mem.total : 0]);
-  const memPct=data.mem?Math.round(data.mem.apps_pct!==undefined?data.mem.apps_pct:data.mem.pct):null;
-  const cards=
-    '<div class="mcards">'+
-      '<div class="mcard"><span class="ml">CPU \u00b7 NAS</span>'+
-        '<span class="mv">'+(data.cpu!==null&&data.cpu!==undefined?Math.round(data.cpu):'\u2014')+
-          (data.cpu!==null&&data.cpu!==undefined?'<span class="mu">%</span>':'')+'</span>'+
-        mspark(data.cpu_hist,'var(--accent)')+'</div>'+
-      '<div class="mcard"><span class="ml">RAM \u00b7 NAS</span>'+
-        '<span class="mv">'+(memPct!==null?memPct:'\u2014')+
-          (memPct!==null?'<span class="mu">%</span>':'')+'</span>'+mspark(ramHist,'var(--brand)')+'</div>'+
-      '<div class="mcard"><span class="ml">Network \u00b7 NAS</span>'+
-        '<span class="mv" style="font-size:16px">'+rate(netNow)+'</span>'+mspark(netHist,'var(--accent)')+'</div>'+
-      '<div class="mcard"><span class="ml">Disk I/O \u00b7 NAS</span>'+
-        '<span class="mv" style="font-size:16px">'+rate(ioNow)+'</span>'+mspark(ioHist,'var(--brand)')+'</div>'+
-    '</div>';
-  const response='<div class="appresponse"><span class="rl">App response</span>'+
-    '<span class="rv">'+(rt!==null?rt+' ms':'\u2014')+'</span>'+mspark(rtRows,'var(--accent)')+'</div>';
-
-  const manual='<span class="utag" title="Typed in Options, not discovered">'+
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" '+
-      'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+
-      '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg>Manual</span>';
-  const urls=
-    '<div class="appurls"><div class="lbl">Launch address</div>'+
-      '<div class="urow"><span class="uk">LAN</span><span class="uv '+(overrides.lan?'on':'')+'">'+
-        esc(lanURL||'Not discovered')+'</span>'+(overrides.lan?manual:'')+'</div>'+
-      '<div class="urow"><span class="uk">Tailnet</span><span class="uv '+(overrides.ts?'on':'')+'">'+
-        esc(tsURL||'Not configured')+'</span>'+(overrides.ts?manual:'')+'</div>'+
-    '</div>';
-
-  const acts=
-    '<div class="appacts">'+
+  const sub=APP_ST[k]||k;
+  // TrueNAS reports "<app version>_<catalogue version>"; custom apps have only one
+  const raw=String(s.version||'').trim(), cut=raw.lastIndexOf('_');
+  const appV=cut>0?raw.slice(0,cut):raw, tail=cut>0?raw.slice(cut+1):'';
+  const catV=tail==='custom'?'':tail;     // a custom app's "catalogue" part is just the word
+  const newer=typeof s.update==='string' ? s.update.trim() : '';
+  const vers='<div class="avers">'+
+    '<div><span>App version</span><b>'+(appV?esc(appV):'—')+
+      (newer?' <em>→ '+esc(newer)+'</em>':(s.update?' <em>· update</em>':''))+'</b></div>'+
+    '<div><span>'+(catV?'Catalogue version':'Source')+'</span><b>'+
+      (catV?esc(catV):(s.custom||tail==='custom'?'Custom app':'—'))+'</b></div></div>';
+  const tabs='<div class="atabs" role="tablist">'+
+    '<button type="button" role="tab" data-atab="live" aria-selected="'+(appTab==='live')+'">Live metrics</button>'+
+    '<button type="button" role="tab" data-atab="custom" aria-selected="'+(appTab==='custom')+'">Customize</button></div>';
+  const acts='<div class="appacts">'+
       (s.update && !updState(s.app)
-        ? '<button class="ubtn yes upd" id="ap-upd" type="button">Update '+esc(s.name)+'</button>' : '')+
-      '<button class="ubtn no" id="ap-opt" type="button">Options</button>'+
-      '<button class="ubtn launch" id="ap-launch" type="button"'+
-        (target?'':' disabled')+'>Launch</button>'+
+        ? '<button class="ubtn yes upd" id="ap-upd" type="button">Update</button>' : '')+
+      '<button class="ubtn launch" id="ap-launch" type="button"'+(target?'':' disabled')+'>Launch</button>'+
     '</div>';
-
-  const sub = up?('running'+(codeTxt?(' \u00b7 '+codeTxt):'')+
-                  (rt!==null?' \u00b7 '+rt+' ms':''))
-            : ({noreply:'running in TrueNAS, but not answering',crashed:'crashed in TrueNAS',
-                stopped:'stopped in TrueNAS'}[k] || (APP_ST[k]||k).toLowerCase());
+  const body = appTab==='custom' ? appCustom(s) : appDetail(s)+appUsage(s);
   return [s.name, '<div class="appsheet">'+
-      (s.desc?'<div class="appdesc">'+esc(s.desc)+'</div>':'')+
-      '<div class="appstat">'+head+
-        '<span class="appver">'+(ver?esc(ver):'')+(newer?' \u2192 '+esc(newer):'')+'</span></div>'+
-      // nothing to probe and nowhere to open: no latency, and Options can still set an address
-      (s.lport?response:'')+cards+plexRows(s)+(s.lport||target?urls:'')+'<div id="ap-optbox"></div>'+acts+
-    '</div>', sub];
+      (s.desc?'<div class="appdesc">'+esc(s.desc)+'</div>':'')+vers+tabs+body+acts+'</div>', sub];
 }
 
-// Rendered on demand by the Options button: the paste field is only in the way
-// when you actually want it, so it stays behind one tap.
-function appOptions(){
-  const id=openKey.slice(4);
-  const fields=urlOverrides(id);
-  const s=((data&&data.services)||[]).find(x=>x.id===id)||{};
+const cell=(label,value,extra,cls)=>'<div class="acell'+(cls?' '+cls:'')+'"><span class="al">'+label+'</span>'+
+  '<span class="av'+(value===null?' dim':'')+'">'+(value===null?'—':value)+'</span>'+(extra||'')+'</div>';
+const abox=(title,inner,aside)=>'<div class="abox"><div class="ah">'+title+(aside?'<span>'+aside+'</span>':'')+'</div>'+
+  '<div class="agrid">'+inner+'</div></div>';
+function unit(v,u){ return v+'<small>'+u+'</small>'; }
+function partsHtml(p){ return p[1]?unit(p[0],p[1]):p[0]; }
+
+// What the app itself reports, for the apps Dashy can read
+function appDetail(s){
+  const L=data.live||{};
+  const of=key=>{ const x=L[key]; return x && x.app===s.app ? x : null; };
+  let x;
+  if((x=of('plex'))){
+    const ss=x.sessions||[];
+    return abox('Now playing', ss.length ? ss.map(p=>cell(esc(String(p.user||'Someone').split(' ')[0])+' · '+esc(p.player||''),
+        esc(p.title)+(p.ep?' · '+esc(p.ep):''),
+        '<span class="as">'+esc(p.how||'')+(p.mbps?' · '+p.mbps+' Mbps':'')+(p.res?' · '+esc(p.res):'')+
+          (p.state==='paused'?' · paused':'')+'</span>','full')).join('')
+      : cell('Streams','Nothing playing',null,'full'));
+  }
+  if((x=of('pihole'))){
+    const h=(x.hist||[]).map((r,i)=>[i,r[0]]);
+    return abox('Pi-hole today', cell('Queries',kNum(x.total))+cell('Blocked',kNum(x.blocked))+
+      cell('Blocked share',unit(x.pct,'%'),mspark((x.hist||[]).map((r,i)=>[i,r[0]?100*r[1]/r[0]:0]),'var(--accent)'))+
+      cell('Queries per hour',kNum(Math.round(x.total/Math.max(1,(x.hist||[]).length))),mspark(h,'var(--accent)')));
+  }
+  if((x=of('ollama'))){
+    const ms=x.models||[];
+    return abox('Loaded models', ms.length ? ms.map(m=>cell(esc(m.params||'model'),esc(m.name),
+        '<span class="as">'+(m.size/1073741824).toFixed(1)+' GB · '+(m.gpu?m.gpu+'% on the GPU':'on the CPU')+
+        (m.left!=null?' · unloads in '+fmtDur(m.left*1000):'')+'</span>','full')).join('')
+      : cell('Models','None loaded','<span class="as">Ollama loads one on the next request</span>','full'));
+  }
+  if((x=of('immich'))){
+    const JOB={thumbnailGeneration:'Thumbnails',metadataExtraction:'Metadata',videoConversion:'Videos',
+               faceDetection:'Faces',facialRecognition:'Faces',smartSearch:'Smart search',
+               duplicateDetection:'Duplicates',library:'Library scan',sidecar:'Sidecars',ocr:'Text'};
+    return abox('Library', cell('Photos',x.photos.toLocaleString())+cell('Videos',x.videos.toLocaleString())+
+      cell('Size',disk(x.bytes))+cell('Processing',(x.busy||[]).length?kNum(x.busy[0][1])+' left':'Idle',
+        (x.busy||[]).length?'<span class="as">'+esc(JOB[x.busy[0][0]]||x.busy[0][0])+'</span>':''));
+  }
+  if((x=of('abs'))){
+    if(!x.live) return abox('Listening', cell('Now','Nobody listening',null,'full'));
+    const left=Math.max(0,(x.dur||0)-(x.at||0));
+    return abox('Listening', cell(esc(x.author||'Now'),esc(x.title),
+      '<span class="as">'+(x.dur?Math.round(100*x.at/x.dur)+'% · '+fmtDur(left*1000)+' left':'')+
+      (x.listeners>1?' · '+x.listeners+' listening':'')+'</span>','full'));
+  }
+  if((x=of('tally'))){
+    const cap=k=>k.charAt(0).toUpperCase()+k.slice(1), ps=x.players||[];
+    return abox('Scores', ps.map(k=>cell(esc(cap(k))+' · this month',String((x.month||{})[k]||0),
+      '<span class="as">'+((x.total||{})[k]||0)+' all time</span>')).join(''));
+  }
+  if((x=of('sparky'))){
+    if(x.error) return abox('Today', cell('SparkyFitness','Can’t read data','<span class="as">Check its key in keys.json</span>','full'));
+    const W=x.weight||[], last=W[W.length-1];
+    return abox('Today', cell('Steps',x.steps.toLocaleString())+
+      cell(x.eaten>0?'Eaten':'Burned',unit((x.eaten>0?x.eaten:x.burned).toLocaleString(),'kcal'),
+        x.eaten>0?'<span class="as">of '+x.goal.toLocaleString()+' · '+x.burned.toLocaleString()+' burned</span>':'')+
+      cell('Water',unit((x.water/1000).toFixed(1),'L'),x.water_goal?'<span class="as">of '+(x.water_goal/1000).toFixed(1)+' L</span>':'')+
+      cell('Weight',last?unit(last[1].toFixed(1),'kg'):null,W.length>1?kgspark(W):''),
+      x.fast&&x.fast.start?'fasting '+fmtDur(Date.now()-x.fast.start*1000):'');
+  }
+  if((x=of('ma'))){
+    const pl=x.playing||[];
+    return abox('Playing', pl.length ? pl.map(p=>cell(esc(p.player),esc(p.title),
+        '<span class="as">'+esc(p.artist||'')+(p.album?' · '+esc(p.album):'')+'</span>','full')).join('')
+      : cell('Speakers','Nothing playing',null,'full'));
+  }
+  if(/scrutiny/.test(s.app)){
+    const dr=(data.drives||[]).filter(d=>typeof d.temp==='number');
+    if(dr.length) return abox('Drive temperatures', dr.map(d=>cell(esc(d.dev)+(d.kind?' · '+esc(d.kind):''),
+      unit(d.temp,'°C'))).join(''));
+  }
+  return '';
+}
+
+// What the app is using, from its own containers
+function appUsage(s){
+  const m=s.m, h=s.mh||[];
+  const col=i=>h.map(r=>[r[0],r[i]]).filter(r=>typeof r[1]==='number');
+  const rt=(typeof s.rt_ms==='number')?s.rt_ms:null;
+  const resp=s.lport ? cell('Response', rt!==null?unit(rt,'ms'):null,
+      (s.code?'<span class="as">HTTP '+s.code+'</span>':'')+mspark(s.rt_hist||[],'var(--accent)'),'full') : '';
+  if(!m) return abox('Usage', cell('CPU',null)+cell('Memory',null)+cell('Network',null)+cell('Disk I/O',null)+resp)+
+    '<div class="anote">'+(appSt(s)==='up'?'Its own readings arrive with the collector’s next run, within a minute.'
+                                          :'Nothing to read while it isn’t running.')+'</div>';
+  const net = m.rx===null||m.rx===undefined
+    ? cell('Network','Host network','<span class="as">Uses the NAS’s own connection</span>')
+    : cell('Network',partsHtml(rateParts(m.rx+m.tx)),'<span class="as">↓ '+rate(m.rx)+' · ↑ '+rate(m.tx)+'</span>'+mspark(col(4),'var(--accent)'));
+  return abox('Usage',
+    cell('CPU',unit(m.cpu<10?m.cpu.toFixed(1):Math.round(m.cpu),'%'),mspark(col(1),'var(--accent)'))+
+    cell('Memory',partsHtml(diskParts(m.mem)),mspark(col(2),'var(--brand)'))+
+    net+
+    cell('Disk I/O',partsHtml(rateParts(m.rd+m.wr)),'<span class="as">read '+rate(m.rd)+' · write '+rate(m.wr)+'</span>'+mspark(col(3),'var(--brand)'))+
+    resp, 'updated '+ago(s.m_at));
+}
+// Weigh-ins, spaced by date and scaled to the readings with a 1 kg floor:
+// mspark keeps 12% of the value as headroom, which flattens a 3 kg change
+// on a 90 kg body into a straight line.
+function kgspark(W){
+  const t=W.map(r=>Date.parse(r[0])), v=W.map(r=>r[1]);
+  const t0=t[0], ts=Math.max(t[t.length-1]-t0,1);
+  let lo=Math.min.apply(null,v), hi=Math.max.apply(null,v);
+  if(hi-lo<1){ const m=(hi+lo)/2; lo=m-.5; hi=m+.5; }
+  const w=120, h=20, x=i=>((t[i]-t0)/ts)*w, y=k=>h-2-((k-lo)/(hi-lo))*(h-4);
+  const line=v.map((k,i)=>(i?'L':'M')+x(i).toFixed(1)+' '+y(k).toFixed(1)).join(' ');
+  return '<div class="mspark"><svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'+
+    '<path d="'+line+'" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linejoin="round" '+
+    'stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg></div>';
+}
+function ago(t){
+  if(!t) return '';
+  const d=Math.max(0,Math.round(Date.now()/1000-t));
+  return d<60?'just now':Math.round(d/60)+' min ago';
+}
+
+// whether this app has a live view on its tile that the owner could switch off
+function hasLive(s){
+  const L=data.live||{};
+  return Object.keys(L).some(k=>L[k] && L[k].app===s.app) || /scrutiny/.test(s.app);
+}
+function appCustom(s){
+  const fields=urlOverrides(s.id);
   const lanAuto=s.url_lan_auto||s.url_lan||'';
   const tsAuto=s.url_ts_auto||s.url_ts||'';
-  appUrlId=id;
-  const box=$('ap-optbox'); if(!box) return;
-  if(box._open){ box._open=false; box.innerHTML=''; return; }
-  box._open=true;
-  box.innerHTML=
-    '<div class="optbox"><div class="urlrow">'+
-      '<label class="urlfield"><span>LAN address</span><input class="fld2" id="au-lan" type="url" inputmode="url" autocomplete="off" '+
+  appUrlId=s.id;
+  const live=hasLive(s)
+    ? '<div class="crow"><span class="ct"><b>Live metrics on the dashboard</b>'+
+        '<span>Show what '+esc(s.name)+' is doing on its tile. Off, the tile is a plain launcher.</span></span>'+
+        '<button class="sw2" id="ap-live" type="button" role="switch" aria-checked="'+liveOn(s.app)+'"><i></i></button></div>'
+    : '';
+  return '<div class="acust">'+live+
+    '<div class="ah">Launch address</div>'+
+    '<div class="urlrow">'+
+      '<label class="urlfield"><span>LAN address'+(fields.lan?' · set by hand':'')+'</span>'+
+        '<input class="fld2" id="au-lan" type="url" inputmode="url" autocomplete="off" '+
         'spellcheck="false" placeholder="'+esc(lanAuto||'http://nas-ip:port')+'" value="'+esc(fields.lan||'')+'"></label>'+
-      '<label class="urlfield"><span>Tailnet address</span><input class="fld2" id="au-ts" type="url" inputmode="url" autocomplete="off" '+
+      '<label class="urlfield"><span>Tailnet address'+(fields.ts?' · set by hand':'')+'</span>'+
+        '<input class="fld2" id="au-ts" type="url" inputmode="url" autocomplete="off" '+
         'spellcheck="false" placeholder="'+esc(tsAuto||'https://nas.tailnet.ts.net')+'" value="'+esc(fields.ts||'')+'"></label>'+
-      '<span class="uhint">Leave either field blank to use its discovered address.</span>'+
+      '<span class="uhint">Leave a field blank to use the address Dashy found.</span>'+
       '<div class="ubtns">'+
-        '<button class="ubtn no clr" id="au-clear">Use automatic</button>'+
-        '<button class="ubtn yes" id="au-save">Save</button>'+
+        '<button class="ubtn no clr" id="au-clear" type="button">Use automatic</button>'+
+        '<button class="ubtn yes" id="au-save" type="button">Save</button>'+
       '</div></div></div>';
-  const i=$('au-lan'); if(i) i.focus();
 }
 
 
@@ -5114,29 +5269,15 @@ function renderPop(opening){
   // entrance animation replayed. That was the flashing. Only touch the DOM
   // when the markup has actually changed.
   if(b._html===r[1] && !opening) return;
-  // The app sheet's Options box is live user input. A 3s poll must not wipe
-  // what is being typed into it, so its contents are lifted out and put back.
-  let opt=null, optValues=null, optFocus='';
-  const prev=b.querySelector('#ap-optbox');
-  if(prev && prev._open && prev.innerHTML){
-    opt=prev.innerHTML;
-    optValues={};
-    prev.querySelectorAll('#au-lan,#au-ts').forEach(i=>optValues[i.id]=i.value);
-    if(document.activeElement && ['au-lan','au-ts'].includes(document.activeElement.id))
-      optFocus=document.activeElement.id;
-  }
+  // Customize holds live input: a 3s poll must never rebuild it under someone
+  // typing. It is redrawn only when opened, or by its own buttons (_html=null).
+  if(!opening && b._html!==null && openKey.indexOf('app-')===0 && appTab==='custom' &&
+     b.querySelector('#au-lan')) return;
+  const keep=b.scrollTop;
   b._html=r[1];
   b.innerHTML=r[1];
   wireIcons(b);
-  if(opt){
-    const nb=b.querySelector('#ap-optbox');
-    if(nb){ nb.innerHTML=opt; nb._open=true;
-            nb.querySelectorAll('#au-lan,#au-ts').forEach(i=>{
-              if(optValues && Object.prototype.hasOwnProperty.call(optValues,i.id))
-                i.value=optValues[i.id];
-            });
-            if(optFocus){ const i=$(optFocus); if(i) i.focus(); } }
-  }
+  if(!opening) b.scrollTop=keep;
 
   if(!opening){
     // a refresh is not an entrance: show it immediately, no animation
@@ -5155,6 +5296,7 @@ function openPop(k){
   if(!data) return;
   if(k.indexOf('vm-')!==0 && k.indexOf('app-')!==0 && !POPS[k]) return;
   openKey=k;
+  appTab='live';
   $('sh-b')._html=null;      // force a rebuild so the entrance plays
   renderPop(true);
   $('scrim').hidden=false;
@@ -5165,8 +5307,61 @@ function closePop(){
   openKey=null;
   sc.classList.add('out');
   // let the exit animation finish, but never leave it stuck open
-  setTimeout(()=>{ sc.classList.remove('out'); sc.hidden=true; }, 170);
+  setTimeout(()=>{ sc.classList.remove('out'); sc.hidden=true;
+                   const sh=sc.querySelector('.sheet'); sh.classList.remove('drag'); sh.style.transform=''; }, 250);
 }
+
+// While a sheet is open the page behind it stays where it is. overflow:hidden
+// alone does not stop iOS Safari scrolling the body, so the body is pinned in
+// place at its scroll offset and put back exactly there on close. Every way a
+// sheet opens (an app, a card, an update prompt) goes through the scrim's
+// hidden attribute, so watching that covers them all.
+let lockedY=null;
+function lockPage(on){
+  const b=document.body;
+  if(on && lockedY===null){
+    lockedY=window.scrollY;
+    b.style.position='fixed'; b.style.top=(-lockedY)+'px'; b.style.left='0'; b.style.right='0';
+  }else if(!on && lockedY!==null){
+    b.style.position=''; b.style.top=''; b.style.left=''; b.style.right='';
+    window.scrollTo(0, lockedY); lockedY=null;
+  }
+}
+new MutationObserver(()=>lockPage(!$('scrim').hidden))
+  .observe($('scrim'), {attributes:true, attributeFilter:['hidden']});
+
+// On a phone the sheet follows a finger dragged down from its handle or
+// header, and a pull of a quarter of its height (or a flick) closes it.
+(()=>{
+  let y0=0, t0=0, dy=0, on=false;
+  const sheet=$('scrim').querySelector('.sheet');
+  const start=e=>{
+    if(window.innerWidth>640 || e.target.closest('button,input')) return;
+    on=true; y0=e.clientY; t0=Date.now(); dy=0;
+    sheet.classList.add('drag');
+  };
+  const move=e=>{
+    if(!on) return;
+    dy=Math.max(0, e.clientY-y0);
+    sheet.style.transform=dy?'translateY('+dy+'px)':'';
+  };
+  const end=()=>{
+    if(!on) return;
+    on=false;
+    const fast=dy>40 && dy/Math.max(1,Date.now()-t0)>0.6;
+    if(dy>sheet.offsetHeight/4 || fast){ sheet.style.transition='transform .2s ease-in';
+                                         sheet.style.transform='translateY(100%)'; closePop();
+                                         setTimeout(()=>{ sheet.style.transition=''; }, 260); }
+    else{ sheet.style.transition='transform .25s cubic-bezier(.22,1,.36,1)'; sheet.style.transform='';
+          setTimeout(()=>{ sheet.style.transition=''; sheet.classList.remove('drag'); }, 260); }
+  };
+  for(const el of [$('sh-grab'), sheet.querySelector('.sheet-h')]){
+    el.addEventListener('pointerdown', start);
+  }
+  document.addEventListener('pointermove', move, {passive:true});
+  document.addEventListener('pointerup', end);
+  document.addEventListener('pointercancel', end);
+})();
 
 async function askSelfUpdate(){
   const u=(data && data.selfupdate) || {};
@@ -5206,7 +5401,7 @@ async function askUpdate(app,name,ver){
 // LAN or tailnet from the global switch; this overrides one tile so an app that
 // lives somewhere else (a different host, a reverse proxy, a cockpit path)
 // still opens where it should. Blank hands it back to the auto-resolution.
-// Set from the app sheet's Options button, via appOptions/saveAppURL.
+// Set from the app sheet's Customize tab, via appCustom/saveAppURL.
 let appUrlId='';
 
 function saveAppURL(id){
@@ -5294,7 +5489,21 @@ document.addEventListener('click',ev=>{
   const tile=ev.target.closest('.apptile');
   if(tile){ ev.preventDefault();
             openPop('app-'+tile.dataset.uid); return; }
-  if(ev.target.id==='ap-opt'){ appOptions(); return; }
+  const tb=ev.target.closest('[data-atab]');
+  if(tb){ if(appTab!==tb.dataset.atab){ appTab=tb.dataset.atab; $('sh-b')._html=null; renderPop(false);
+                                         $('sh-b').scrollTop=0; } return; }
+  if(ev.target.closest('#ap-live')){
+    const s=((data&&data.services)||[]).find(x=>x.id===openKey.slice(4));
+    if(!s) return;
+    const off=new Set(prefs.nolive||[]);
+    if(off.has(s.app)) off.delete(s.app); else off.add(s.app);
+    prefs.nolive=[...off].sort();
+    savePrefs();
+    build();                          // tiles back to plain, then repaint the ones still on
+    if(data) paintLive();
+    $('ap-live').setAttribute('aria-checked', String(liveOn(s.app)));
+    return;
+  }
   if(ev.target.id==='ap-upd'){
     const s=((data&&data.services)||[]).filter(x=>x.id===openKey.slice(4))[0];
     if(s) askUpdate(s.app, s.name, niceVer(s));
@@ -5314,9 +5523,7 @@ document.addEventListener('click',ev=>{
     savePrefs(); if(data) paint(data);
     build();
     if(data) paintLive();
-    // the sheet is still open - rebuild it so the listed
-    // addresses go back to auto straight away, not on the next poll
-    const box=$('ap-optbox'); if(box){ box._open=false; box.innerHTML=''; }
+    // the sheet is still open: redraw it so the fields empty straight away
     $('sh-b')._html=null; renderPop(false);
     return; }
   if(ev.target.id==='u-no'){ closePop(); return; }
