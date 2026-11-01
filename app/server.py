@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.4.4"
+APP_VERSION = "1.4.5"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1277,7 +1277,7 @@ def _clean_prefs(d):
         out["size"] = clean
 
     # Per-app launch URL overrides, kept separately for LAN and tailnet.
-    # Migrate the previous single URL to both fields so existing pins retain
+    # Migrate the previous single URL to both fields so existing overrides keep
     # their old mode-independent behavior until edited by the owner.
     urls = d.get("urls")
     if isinstance(urls, dict):
@@ -2450,6 +2450,13 @@ PAGE = """<!doctype html>
   .urow .uv{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
             text-decoration:none;color:var(--ink)}
   .urow .uv.on{color:var(--accent);font-weight:650}
+  /* says in words, not colour alone, that this address was typed in Options
+     and is not the discovered one - the tiles carry no marker for it */
+  .urow .utag{flex:0 0 auto;display:inline-flex;align-items:center;gap:4px;margin-left:auto;
+              padding:2px 8px 2px 6px;border-radius:999px;font-size:10.5px;font-weight:700;
+              letter-spacing:.02em;color:var(--accent);
+              background:color-mix(in oklab,var(--accent) 14%,transparent)}
+  .urow .utag svg{width:11px;height:11px;flex:0 0 auto}
   .urow.plx{align-items:flex-start}
   .urow.plx .uv{white-space:normal;line-height:1.45}
   .appacts{position:sticky;bottom:-8px;z-index:3;display:flex;gap:9px;
@@ -4158,8 +4165,8 @@ function autoAppURL(s,mode){
 function appURL(s){
   const setup=prefs.setup||{};
   const mode=(setup.links||(setup.tailscale?'ts':'lan'))==='lan'?'lan':'ts';
-  const pin=urlOverrides(s.id)[mode];
-  return pin || autoAppURL(s,mode);
+  const manual=urlOverrides(s.id)[mode];
+  return manual || autoAppURL(s,mode);
 }
 
 function setLinks(mode){
@@ -4788,12 +4795,16 @@ function appSheet(id){
   const response='<div class="appresponse"><span class="rl">App response</span>'+
     '<span class="rv">'+(rt!==null?rt+' ms':'\u2014')+'</span>'+mspark(rtRows,'var(--accent)')+'</div>';
 
+  const manual='<span class="utag" title="Typed in Options, not discovered">'+
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" '+
+      'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+
+      '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg>Manual</span>';
   const urls=
     '<div class="appurls"><div class="lbl">Launch address</div>'+
       '<div class="urow"><span class="uk">LAN</span><span class="uv '+(overrides.lan?'on':'')+'">'+
-        esc(lanURL||'Not discovered')+'</span></div>'+
+        esc(lanURL||'Not discovered')+'</span>'+(overrides.lan?manual:'')+'</div>'+
       '<div class="urow"><span class="uk">Tailnet</span><span class="uv '+(overrides.ts?'on':'')+'">'+
-        esc(tsURL||'Not configured')+'</span></div>'+
+        esc(tsURL||'Not configured')+'</span>'+(overrides.ts?manual:'')+'</div>'+
     '</div>';
 
   const acts=
@@ -4813,7 +4824,7 @@ function appSheet(id){
       (s.desc?'<div class="appdesc">'+esc(s.desc)+'</div>':'')+
       '<div class="appstat">'+head+
         '<span class="appver">'+(ver?esc(ver):'')+(newer?' \u2192 '+esc(newer):'')+'</span></div>'+
-      // nothing to probe and nowhere to open: no latency, and Options can still pin an address
+      // nothing to probe and nowhere to open: no latency, and Options can still set an address
       (s.lport?response:'')+cards+plexRows(s)+(s.lport||target?urls:'')+'<div id="ap-optbox"></div>'+acts+
     '</div>', sub];
 }
@@ -5071,7 +5082,7 @@ async function askUpdate(app,name,ver){
 }
 
 // The launch address, per app, for this install. Auto-resolution already picks
-// LAN or tailnet from the global switch; this pins one tile so an app that
+// LAN or tailnet from the global switch; this overrides one tile so an app that
 // lives somewhere else (a different host, a reverse proxy, a cockpit path)
 // still opens where it should. Blank hands it back to the auto-resolution.
 // Set from the app sheet's Options button, via appOptions/saveAppURL.
@@ -5183,7 +5194,7 @@ document.addEventListener('click',ev=>{
     build();
     if(data) paintLive();
     // the sheet is still open - rebuild it so the listed
-    // address go back to auto straight away, not on the next poll
+    // addresses go back to auto straight away, not on the next poll
     const box=$('ap-optbox'); if(box){ box._open=false; box.innerHTML=''; }
     $('sh-b')._html=null; renderPop(false);
     return; }
