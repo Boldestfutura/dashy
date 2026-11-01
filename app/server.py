@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -2334,6 +2334,11 @@ PAGE = """<!doctype html>
       linear-gradient(90deg,var(--panel) 22%,color-mix(in srgb,var(--panel) 74%,transparent) 52%,
                       color-mix(in srgb,var(--panel) 50%,transparent)),
       var(--art,none) center/cover no-repeat,var(--panel)}
+  /* tall Music Assistant: the album shows through the top and fades out under the text */
+  .apptile.maart.tall{background:
+      linear-gradient(180deg,color-mix(in srgb,var(--panel) 62%,transparent),
+                      color-mix(in srgb,var(--panel) 82%,transparent) 48%,var(--panel) 78%),
+      var(--art,none) center/cover no-repeat,var(--panel)}
   @media (max-width: 520px){
     .apptile.wide{grid-template-columns:36px minmax(0,.5fr) minmax(0,2.5fr)}
   }
@@ -3913,14 +3918,14 @@ function paintLive(){
         '<span class="lm"><span class="fgoal"></span><span class="fleft"></span></span>';
     }
   }
-  // Music Assistant (wide): whatever is playing, on which speaker, with the album behind it
+  // Music Assistant (tall): whatever is playing, on which speaker, with the album behind it
   const MA=data.live&&data.live.ma;
   const mt=MA&&document.querySelector('.apptile[data-app="'+CSS.escape(MA.app)+'"]');
   if(mt){
     const pl=MA.playing||[], x=pl[0];
     if(!x){ dropLive(mt,'maart'); mt.style.removeProperty('--art'); delete mt.dataset.art; }
     else{
-      mt.classList.add('wide','maart');
+      mt.classList.add('tall','maart');
       if(mt.dataset.art!==(x.art||'')){
         mt.dataset.art=x.art||'';
         mt.style.setProperty('--art', x.art ? 'url("/api/ma/art?p='+encodeURIComponent(x.art)+'")' : 'none');
@@ -3929,10 +3934,10 @@ function paintLive(){
       const due=Date.now()-x.at*1000, was=+mt.dataset.mstart||0;
       if(!was || Math.abs(due-was)>4000 || mt.dataset.mtitle!==x.title){ mt.dataset.mstart=String(due); mt.dataset.mtitle=x.title; }
       mt.dataset.mdur=String(x.dur*1000);
-      liveBox(mt).innerHTML='<span class="lk">'+esc(x.player)+(pl.length>1?' · '+(pl.length-1)+' more':'')+'</span>'+
-        '<span class="lt">'+esc(x.title)+(x.artist?' · '+esc(x.artist):'')+'</span>'+
+      const where=esc(x.player)+(pl.length>1?' +'+(pl.length-1):'');
+      liveBox(mt).innerHTML='<span class="lt">'+esc(x.title)+'</span>'+
         (x.dur?'<span class="lbar"><i></i></span>':'')+
-        '<span class="lm"><span>'+esc(x.album||'Playing')+'</span><span class="mtime"></span></span>';
+        '<span class="lm"><span>'+(x.artist?esc(x.artist)+' · ':'')+where+'</span><span class="mtime"></span></span>';
     }
   }
   // Pi-hole: the last 24 hours, and an hourly chart with the blocked share filled in
