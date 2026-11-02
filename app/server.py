@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "2.3.1"
+APP_VERSION = "2.4.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -2112,7 +2112,7 @@ def _clean_prefs(d):
     su = d.get("setup")
     if isinstance(su, dict):
         clean = {}
-        for flag in ("done", "tailscale", "hexos"):
+        for flag in ("done", "tailscale", "hexos", "autoupdate"):
             if isinstance(su.get(flag), bool):
                 clean[flag] = su[flag]
         # whether a tile opens its tailnet address or its address on the LAN
@@ -2752,6 +2752,43 @@ def _push_updates(d):
     return out
 
 
+AUTO_EVERY = 300
+
+
+def auto_update_loop():
+    """The owner opted in (Settings, Install automatically): install a new Dashy
+    as soon as the registry has an image of it, so nothing waits on the cron
+    job's half-hour check. One try per version. A failed try is reported by the
+    update alert and then waits for the owner, rather than looping."""
+    while True:
+        time.sleep(AUTO_EVERY)
+        try:
+            if not ((load_prefs() or {}).get("setup") or {}).get("autoupdate"):
+                continue
+            check_now()
+            su = self_update() or {}
+            if not su.get("available"):
+                continue
+            latest = su["latest"]
+            if "_self" in queued() or (update_status().get("_self") or {}).get("state") == "running":
+                continue
+            with _push_lock:
+                d = _push_load()
+                if d.get("auto_tried") == latest:
+                    continue
+                d["auto_tried"] = latest
+                _push_save(d)
+            if d["kinds"].get("updates", True) is not False:
+                push_all("Dashy %s is out" % latest,
+                         "Installing it now, with a snapshot first. You'll get another "
+                         "notification when it's done.", "update:_self")
+            ok, msg = request_upgrade("_self")
+            if not ok:
+                print("auto-update: could not queue: %s" % msg, flush=True)
+        except Exception:
+            traceback.print_exc()
+
+
 def push_loop():
     prev = set()
     while True:
@@ -2926,8 +2963,13 @@ PAGE = """<!doctype html>
                        font-size:14px;font-weight:600;cursor:pointer}
   .settings-nav button:hover{background:var(--faint);color:var(--ink)}
   .settings-nav button.active{background:var(--panel);color:var(--ink);box-shadow:var(--tile-shadow)}
-  .snb{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--warn);color:#2a1c00;
-       font-size:11px;font-weight:700;display:inline-grid;place-items:center}
+  /* Digits are centred on their cap height, not the line box, which leaves room
+     for descenders and sat every number a pixel high. text-box only trims a
+     block container, hence inline-block with padding instead of grid centring. */
+  .snb{--h:18px;display:inline-block;box-sizing:border-box;min-width:var(--h);height:var(--h);
+       padding:calc((var(--h) - 1cap) / 2) 5px 0;line-height:1;text-align:center;vertical-align:middle;
+       border-radius:999px;background:var(--warn);color:#2a1c00;font-size:11px;font-weight:700;
+       text-box:trim-both cap alphabetic}
   .settings-content{min-width:0;max-width:720px}
   .settings-section>h3{margin:22px 4px 8px;font-size:12px;font-weight:700;letter-spacing:.08em;
                        text-transform:uppercase;color:var(--muted)}
@@ -2989,7 +3031,7 @@ PAGE = """<!doctype html>
     .settings-nav{position:sticky;top:0;z-index:5;flex-direction:row;padding:6px 0;background:var(--bg);
                   display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px}
     .settings-nav button{justify-content:center;padding:9px 4px;font-size:13px}
-    .snb{min-width:16px;height:16px;font-size:10px}
+    .snb{--h:16px;font-size:10px}
     .setrow .sw{grid-template-columns:repeat(4,1fr)}
   }
   /* Opened from the iOS home screen, the system blurs a band just below the status bar, so
@@ -3121,7 +3163,10 @@ PAGE = """<!doctype html>
   .cardtools .wbtn{position:absolute;top:-7px;right:8px;min-width:23px;height:23px;padding:0 5px;
         border-radius:var(--r-full);border:none;display:flex;align-items:center;justify-content:center;
         background:#fff;color:#1c1f24;font-family:inherit;font-size:11px;font-weight:700;line-height:1;letter-spacing:-.02em;
-        cursor:pointer;z-index:6;box-shadow:0 1px 3px rgba(0,0,0,.34),0 0 0 .5px rgba(0,0,0,.12)}
+        cursor:pointer;z-index:6;box-shadow:0 1px 3px rgba(0,0,0,.34),0 0 0 .5px rgba(0,0,0,.12);
+}
+  /* the label is centred on its cap height (see .snb) */
+  .cardtools .wbtn span{display:block;text-box:trim-both cap alphabetic}
   .cardtools .wbtn::before{content:"";position:absolute;inset:-9px}
   body.editing .cardtools{display:contents}
   .cardtools .wbtn:disabled{display:none}
@@ -3312,7 +3357,8 @@ PAGE = """<!doctype html>
   .hrow b{font-weight:650;color:var(--ink);flex:0 0 auto}
   .hrow span{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .hrow i{width:15px;height:15px;flex:0 0 auto;border-radius:50%;display:grid;place-items:center;
-          font-style:normal;font-size:9.5px;font-weight:800;line-height:1;color:#fff;background:var(--ok)}
+          font-style:normal;color:#fff;background:var(--ok)}
+  .hrow i .gl{width:66%;height:66%}
   .hrow[data-level="warn"] i{background:var(--warn)}
   .hrow[data-level="bad"] i{background:var(--bad)}
   .hrow[data-level="info"] i{background:var(--faint);color:var(--muted)}
@@ -3422,7 +3468,10 @@ PAGE = """<!doctype html>
   .sh-sub{font-size:12.5px;font-weight:600;color:var(--muted);margin-right:auto;
           overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .x{appearance:none;border:none;background:var(--faint);color:var(--muted);cursor:pointer;
-     width:28px;height:28px;border-radius:50%;font-size:19px;line-height:1}
+     width:28px;height:28px;border-radius:50%;padding:0;display:grid;place-items:center}
+  /* Icons inside discs are drawn, never typed: a font's x, + or tick sits on its
+     baseline with the font's own side bearings, so it is never the disc's centre. */
+  .gl{display:block;width:58%;height:58%;flex:none}
   .sheet-b{overflow-y:auto;padding:6px 0 8px;-webkit-overflow-scrolling:touch;
            overscroll-behavior:contain}
 
@@ -3934,6 +3983,8 @@ PAGE = """<!doctype html>
               <button class="sbtn" id="mi-self" type="button">
                 <span class="dots" id="mi-selfdots" hidden><i></i><i></i><i></i></span>
                 <span id="mi-selftxt">Check for updates</span><span class="rt" id="mi-selfver"></span></button></div>
+            <div class="setrow"><span class="st"><b>Install automatically</b><span>New versions install within a few minutes of release, with a snapshot first. You get a notification before and after.</span></span>
+              <button class="sw2" id="m-auto" type="button" role="switch" aria-checked="false" aria-label="Install Dashy updates automatically"><i></i></button></div>
             <div class="setrow"><span class="st"><b>What’s new</b><span>The 2.0 tour of live tiles, and which apps still need a key.</span></span>
               <button class="sbtn" id="mi-wn" type="button">Show</button></div>
             <div class="setrow"><span class="st"><b>Welcome screen</b><span>The first-run tour: what Dashy does, theme, Tailscale and HexOS.</span></span>
@@ -4101,7 +4152,7 @@ PAGE = """<!doctype html>
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh-t">
     <div class="sheet-grab" id="sh-grab" aria-hidden="true"></div>
     <div class="sheet-h"><span id="sh-ico" hidden></span><p id="sh-t"></p><span class="sh-sub" id="sh-s"></span>
-      <button class="x" id="sh-x" type="button" aria-label="Close">&times;</button></div>
+      <button class="x" id="sh-x" type="button" aria-label="Close"><svg class="gl" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg></button></div>
     <div class="sheet-b" id="sh-b"></div>
   </div>
 </div>
@@ -4607,7 +4658,7 @@ const PUSH_KINDS=[
   ['drivefail','Drive or pool failure','A drive fails its SMART check, or a pool is degraded or has disk errors.'],
   ['drivetemp','Hot drives','A hard drive passes 55&deg;C, or an SSD 60&deg;C.'],
   ['pool','Pool filling up','A pool passes 80% full, and again at 90%.'],
-  ['updates','Updates finished','An app or Dashy finishes updating, or an update fails.']];
+  ['updates','Updates','Dashy is about to install an update, or an app or Dashy finishes updating or fails.']];
 function pushB64(k){
   const s=String(k).replace(/-/g,'+').replace(/_/g,'/'), b=atob(s+'='.repeat((4-s.length%4)%4));
   return Uint8Array.from(b,c=>c.charCodeAt(0));
@@ -5195,6 +5246,13 @@ function sparkPath(rows, colour, cap, H){
          'stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>';
 }
 
+const GLYPH={x:'<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>', plus:'<path d="M12 5.5v13M5.5 12h13"/>',
+  check:'<path d="M5.5 12.5l4.5 4.5 8.5-9.5"/>', dash:'<path d="M6.5 12h11"/>',
+  bang:'<path d="M12 5.5v8"/><path d="M12 18.4v.1"/>'};
+function glyph(k){
+  return '<svg class="gl" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" '+
+         'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+(GLYPH[k]||'')+'</svg>';
+}
 function applyHidden(){
   const wraps=[].slice.call(document.querySelectorAll('#vitals .cardwrap'));
   wraps.forEach((el,i)=>{
@@ -5202,10 +5260,10 @@ function applyHidden(){
     el.dataset.off = off ? '1' : '0';
     // an arrow with nowhere to go should look like it
     const w=el.querySelector('[data-wide]');
-    if(w) w.textContent = nextSize(el.dataset.k)+'\u00d7';
+    if(w) w.innerHTML = '<span>'+nextSize(el.dataset.k)+'\u00d7</span>';
     const eye=el.querySelector('[data-eye]');
     if(eye){
-      eye.textContent = off ? '\u002b' : '\u00d7';
+      eye.innerHTML = glyph(off ? 'plus' : 'x');
       eye.setAttribute('aria-label', off ? 'Put this card back' : 'Remove this card');
     }
   });
@@ -5968,6 +6026,7 @@ function paintLinks(L){
   paintServeOffer();
   setSwitch('m-ts', !!su.tailscale);
   setSwitch('m-hx', !!su.hexos);
+  setSwitch('m-auto', !!su.autoupdate);
   const nas=$('m-nas');
   // never fight the user mid-type
   if(nas && document.activeElement!==nas) nas.value = su.truenas || L.truenas || '';
@@ -6005,7 +6064,7 @@ function paintHealth(d){
   const l=$('l-health');
   if(l) l.innerHTML = healthRows(d).map(([lv,name,txt])=>
     '<div class="hrow" data-level="'+lv+'"><i>'+
-      ({ok:'\u2713',warn:'!',bad:'\u00d7',info:'\u2013'}[lv])+
+      glyph({ok:'check',warn:'bang',bad:'x',info:'dash'}[lv])+
     '</i><b>'+esc(name)+'</b><span title="'+esc(txt)+'">'+esc(txt)+'</span></div>').join('');
 }
 
@@ -7568,7 +7627,7 @@ document.addEventListener('click',ev=>{
     setSwitch(sw2.id, on);
     if(sw2.id==='p-dev'){ pushDevice(on); return; }
     if(sw2.dataset.kind){ sw2.setAttribute('aria-checked', String(on)); pushKind(sw2.dataset.kind, on); return; }
-    const menuKey={'m-ts':'tailscale','m-hx':'hexos'}[sw2.id];
+    const menuKey={'m-ts':'tailscale','m-hx':'hexos','m-auto':'autoupdate'}[sw2.id];
     if(menuKey){                       // in Settings these apply immediately
       prefs.setup=Object.assign({}, prefs.setup, {done:true});
       prefs.setup[menuKey]=on;
@@ -7914,6 +7973,7 @@ if __name__ == "__main__":
     threading.Thread(target=services_loop, daemon=True).start()
     threading.Thread(target=_glance_loop, daemon=True).start()
     threading.Thread(target=push_loop, daemon=True).start()
+    threading.Thread(target=auto_update_loop, daemon=True).start()
     time.sleep(2.2)                      # let the first CPU sample land before serving
     print("%s on :%s for %s (tailnet %s), data %s"
           % (APP_NAME, PORT, _state["host"], tailnet_host() or "not published", DATA), flush=True)

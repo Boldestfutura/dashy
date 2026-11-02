@@ -19,8 +19,10 @@ screenshot of a real machine.
    to `main`.
 4. GitHub Actions builds `ghcr.io/boldestfutura/dashy:<version>` and cuts a release. Watch
    it at `https://api.github.com/repos/Boldestfutura/dashy/actions/runs?per_page=1`.
-5. The owner installs it from inside Dashy (Settings, then App updates). **Nothing updates
-   unattended**, and that's deliberate.
+5. The owner installs it from inside Dashy (Settings, then App updates). Nothing updates
+   unattended unless the owner turns on Settings > General > Install automatically
+   (`prefs.setup.autoupdate`, 2.4.0): then `auto_update_loop` checks the registry every
+   5 minutes, notifies, and queues `_self` once per version (`auto_tried` in push.json).
    - Right after a push, "up to date" is normal for a minute: ghcr's tag list lags.
    - raw.githubusercontent also caches for several minutes.
 
@@ -119,6 +121,14 @@ CDP and click things; a screenshot alone has missed real bugs here.
   restricted to known push hosts (`PUSH_HOSTS`) so the NAS can't be made to POST anywhere else.
 - `cryptography` is pinned in the Dockerfile. Without it the server still runs and Settings says
   notifications are unavailable.
+
+## Icons in discs
+
+- A glyph inside a round or pill button is drawn (`glyph()` / `.gl` SVG), never typed. A font's
+  x, + or tick carries its own baseline and side bearings and sat visibly off centre.
+- Text that must sit centred in a small disc (badge counts, the 1x/2x size label) uses
+  `text-box:trim-both cap alphabetic` on a block-level box. It does nothing on a flex or grid
+  container itself, so wrap the text in a span inside a flex button.
 
 ## Live tiles (2.0.0)
 
