@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.3.1"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -2997,6 +2997,9 @@ PAGE = """<!doctype html>
   @media(display-mode:standalone){
     body{padding-top:calc(env(safe-area-inset-top,0px) + 34px)}
     .settings-nav{top:calc(env(safe-area-inset-top,0px) + 16px)}
+    /* and that band is painted solid, or the page scrolls by behind it above the tabs */
+    body.in-settings::before{content:"";position:fixed;inset:0 0 auto;z-index:6;pointer-events:none;
+      height:calc(env(safe-area-inset-top,0px) + 16px);background:var(--bg)}
   }
 
   /* shared settings controls */
