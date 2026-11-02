@@ -1,6 +1,8 @@
-# Dashy is stdlib-only Python, so there is nothing to install and nothing to
-# compile - the image is the stock interpreter with the app copied in.
+# Dashy is stdlib Python plus one package: cryptography, for encrypting push
+# notifications. It ships a prebuilt musl wheel, so nothing is compiled.
 FROM python:3.13-alpine
+
+RUN pip install --no-cache-dir cryptography==50.0.2
 
 LABEL org.opencontainers.image.title="Dashy" \
       org.opencontainers.image.description="A self-discovering dashboard for TrueNAS SCALE" \

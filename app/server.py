@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "2.2.3"
+APP_VERSION = "2.3.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -2474,6 +2474,341 @@ def snapshot():
     return out
 
 
+# ---------------------------------------------------------------- notifications
+#
+# Web Push, so a phone gets alerts with Dashy closed. The page subscribes
+# through its service worker and hands the subscription here; push_loop checks
+# the NAS every minute and sends through the browser's push service (Apple's,
+# for an iPhone home-screen app). Each message is encrypted for that one device
+# (RFC 8291) and signed with this install's own key (VAPID, RFC 8292), both
+# made on first use and kept in config/push.json, mode 600.
+#
+# The only third-party package in Dashy, because hand-rolled elliptic-curve
+# code is not worth the risk. Without it notifications are simply unavailable.
+try:
+    from cryptography.hazmat.primitives import hashes as _hashes
+    from cryptography.hazmat.primitives.asymmetric import ec as _ec
+    from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+except ImportError:                       # a dev box without it; the page says so
+    _ec = None
+
+import hmac
+
+PUSH_FILE = os.path.join(CONFIG, "push.json")
+PUSH_KINDS = ("apps", "drivefail", "drivetemp", "pool", "updates")
+# Only real push services. Anything else would let a tailnet visitor make the
+# NAS POST to an address of their choosing.
+PUSH_HOSTS = re.compile(r"^(?:[a-z0-9-]+\.)*(?:push\.apple\.com|fcm\.googleapis\.com|"
+                        r"push\.services\.mozilla\.com|notify\.windows\.com)$")
+PUSH_SUB = "https://github.com/" + UPDATE_REPO   # VAPID contact; Apple refuses none
+PUSH_EVERY = 60
+PUSH_COOLDOWN = 6 * 3600     # the same alert is not repeated within this
+PUSH_APP_GRACE = 180         # restarts and probe blips are not crashes
+PUSH_POOL_STEPS = (80, 90)
+_push_lock = threading.Lock()
+
+
+def _b64u(b):
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+def _unb64u(s):
+    s = str(s)
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def _push_load():
+    try:
+        with open(PUSH_FILE) as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        d = {}
+    if not isinstance(d, dict):
+        d = {}
+    for k, empty in (("subs", []), ("kinds", {}), ("fired", {})):
+        if not isinstance(d.get(k), type(empty)):
+            d[k] = empty
+    return d
+
+
+def _push_save(d):
+    tmp = PUSH_FILE + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(d, fh)
+    os.replace(tmp, PUSH_FILE)
+
+
+def _vapid(d):
+    """This install's signing key, made the first time anything asks."""
+    v = d.get("vapid") or {}
+    if not v.get("d") and _ec:
+        k = _ec.generate_private_key(_ec.SECP256R1())
+        v = {"d": _b64u(k.private_numbers().private_value.to_bytes(32, "big")),
+             "pub": _b64u(k.public_key().public_bytes(Encoding.X962,
+                                                      PublicFormat.UncompressedPoint))}
+        d["vapid"] = v
+        _push_save(d)
+    return v
+
+
+def push_info():
+    if not _ec:
+        return {"ok": False, "msg": "This install is missing its encryption library."}
+    with _push_lock:
+        try:
+            d = _push_load()
+            v = _vapid(d)
+        except OSError:
+            return {"ok": False, "msg": "Dashy's config folder is not writable."}
+    return {"ok": True, "key": v.get("pub"), "subs": len(d["subs"]),
+            "kinds": {k: d["kinds"].get(k, True) is not False for k in PUSH_KINDS}}
+
+
+def _push_send(vapid, sub, payload, urgency):
+    """One encrypted message to one device. Returns the HTTP status, 0 if unreachable."""
+    ep = sub["endpoint"]
+    u = urllib.parse.urlsplit(ep)
+    ua_pub, auth = _unb64u(sub["keys"]["p256dh"]), _unb64u(sub["keys"]["auth"])
+    mac = lambda k, m: hmac.new(k, m, hashlib.sha256).digest()
+    eph = _ec.generate_private_key(_ec.SECP256R1())
+    as_pub = eph.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+    shared = eph.exchange(_ec.ECDH(), _ec.EllipticCurvePublicKey.from_encoded_point(
+        _ec.SECP256R1(), ua_pub))
+    ikm = mac(mac(auth, shared), b"WebPush: info\x00" + ua_pub + as_pub + b"\x01")
+    salt = os.urandom(16)
+    prk = mac(salt, ikm)
+    cek = mac(prk, b"Content-Encoding: aes128gcm\x00\x01")[:16]
+    nonce = mac(prk, b"Content-Encoding: nonce\x00\x01")[:12]
+    body = (salt + (4096).to_bytes(4, "big") + bytes([len(as_pub)]) + as_pub +
+            AESGCM(cek).encrypt(nonce, payload + b"\x02", None))
+    head = _b64u(b'{"typ":"JWT","alg":"ES256"}') + "." + _b64u(json.dumps(
+        {"aud": "%s://%s" % (u.scheme, u.netloc), "exp": int(time.time()) + 43200,
+         "sub": PUSH_SUB}).encode())
+    key = _ec.derive_private_key(int.from_bytes(_unb64u(vapid["d"]), "big"), _ec.SECP256R1())
+    r, s = decode_dss_signature(key.sign(head.encode(), _ec.ECDSA(_hashes.SHA256())))
+    jwt = head + "." + _b64u(r.to_bytes(32, "big") + s.to_bytes(32, "big"))
+    req = urllib.request.Request(ep, data=body, method="POST", headers={
+        "Authorization": "vapid t=%s, k=%s" % (jwt, vapid["pub"]),
+        "Content-Encoding": "aes128gcm", "Content-Type": "application/octet-stream",
+        "TTL": "86400", "Urgency": urgency})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except (urllib.error.URLError, OSError):
+        return 0
+
+
+def push_all(title, body, tag, urgency="normal"):
+    """Send to every subscribed device; drop the ones the push service says are gone."""
+    if not _ec:
+        return 0
+    with _push_lock:
+        d = _push_load()
+        vapid, subs = _vapid(d), list(d["subs"])
+    payload = json.dumps({"title": title, "body": body, "tag": tag, "url": "/"}).encode()
+    sent, gone = 0, set()
+    for sub in subs:
+        code = _push_send(vapid, sub, payload, urgency)
+        if 200 <= code < 300:
+            sent += 1
+        elif code in (404, 410):
+            gone.add(sub["endpoint"])
+        else:
+            print("push: %s answered %s" % (urllib.parse.urlsplit(sub["endpoint"]).netloc, code),
+                  flush=True)
+    if gone:
+        with _push_lock:
+            d = _push_load()
+            d["subs"] = [x for x in d["subs"] if x.get("endpoint") not in gone]
+            _push_save(d)
+    return sent
+
+
+def push_request(body):
+    """POST /api/push: subscribe, unsubscribe, switch an alert kind, or test."""
+    if not _ec:
+        return False, "notifications are unavailable on this install"
+    op = str(body.get("op") or "")
+    if op == "test":
+        n = push_all("Test from Dashy", "Notifications are working on " + _hostname() + ".",
+                     "test")
+        return (True, "sent") if n else (False, "the push service did not accept it")
+    with _push_lock:
+        d = _push_load()
+        if op == "subscribe":
+            sub = body.get("sub") if isinstance(body.get("sub"), dict) else {}
+            ep, keys = str(sub.get("endpoint") or ""), sub.get("keys") or {}
+            u = urllib.parse.urlsplit(ep)
+            try:
+                ok = (u.scheme == "https" and len(ep) < 1024 and PUSH_HOSTS.match(u.hostname or "")
+                      and len(_unb64u(keys.get("p256dh", ""))) == 65
+                      and len(_unb64u(keys.get("auth", ""))) == 16)
+            except (ValueError, TypeError):
+                ok = False
+            if not ok:
+                return False, "not a push subscription"
+            if not d["subs"]:
+                d.pop("seen", None)   # updates from before anyone listened are not news
+            d["subs"] = [x for x in d["subs"] if x.get("endpoint") != ep][-9:]
+            d["subs"].append({"endpoint": ep, "keys": {"p256dh": keys["p256dh"],
+                                                       "auth": keys["auth"]},
+                              "added": int(time.time())})
+        elif op == "unsubscribe":
+            ep = str(body.get("endpoint") or "")
+            d["subs"] = [x for x in d["subs"] if x.get("endpoint") != ep]
+        elif op == "kinds":
+            for k, v in (body.get("kinds") or {}).items():
+                if k in PUSH_KINDS:
+                    d["kinds"][k] = bool(v)
+        else:
+            return False, "unknown request"
+        try:
+            _push_save(d)
+        except OSError:
+            return False, "config folder is not writable"
+    return True, "saved"
+
+
+_push_down = {}   # app -> when it first looked down
+
+
+def _push_problems():
+    """Everything worth a notification right now: {key: (kind, title, body, urgency)}.
+
+    The same thresholds as the page's health rules. A key names one problem at
+    one severity, so a drive going from warm to hot is a second alert."""
+    out, now, host = {}, time.time(), _hostname()
+    with _lock:
+        svc, pools = list(_state["services"]), list(_state["pools"] or [])
+    upd, waiting = update_status(), set(queued())
+    for s in svc:
+        app, st = s.get("app"), s.get("status")
+        busy = app in waiting or (upd.get(app) or {}).get("state") == "running"
+        if st not in ("crashed", "noreply") or busy:
+            _push_down.pop(app, None)
+            continue
+        if now - _push_down.setdefault(app, now) >= PUSH_APP_GRACE:
+            out["app:" + app] = ("apps", s.get("name", app) + (" crashed" if st == "crashed"
+                                                               else " isn't responding"),
+                                 host + (" · TrueNAS reports a crash" if st == "crashed"
+                                         else " · no answer for 3 minutes"), "high")
+    for d in drives_now():
+        dev, t = d.get("dev", "?"), d.get("temp")
+        if d.get("ok") is False:
+            out["smart:" + dev] = ("drivefail", dev + " failed its SMART check",
+                                   host + " · " + (d.get("model") or "drive"), "high")
+        if d.get("level") in ("warn", "bad"):
+            limit = (55 if d.get("rpm") else 60) if d["level"] == "warn" else (60 if d.get("rpm") else 70)
+            out["temp:%s:%s" % (dev, d["level"])] = (
+                "drivetemp", "%s at %s°C" % (dev, t),
+                "%s · %s from %d°C" % (host, "warning" if d["level"] == "warn" else "too hot", limit),
+                "high" if d["level"] == "bad" else "normal")
+    errs = pool_status()
+    for p in pools:
+        name, health = p.get("name", "?"), str(p.get("health") or "").upper()
+        st = errs.get(name) or {}
+        if health and health != "ONLINE":
+            out["health:" + name] = ("drivefail", "%s is %s" % (name, health.lower()), host, "high")
+        elif ((st.get("read") or 0) + (st.get("write") or 0) + (st.get("cksum") or 0) > 0
+              or (st.get("errors") and st.get("errors") != "No known data errors")):
+            out["errors:" + name] = ("drivefail", name + " has disk errors", host, "high")
+        step = max([x for x in PUSH_POOL_STEPS if (p.get("pct") or 0) >= x], default=0)
+        if step:
+            out["pool:%s:%d" % (name, step)] = (
+                "pool", "%s is %d%% full" % (name, p["pct"]),
+                "%s · %.1f TB free" % (host, (p.get("free") or 0) / 1e12),
+                "high" if step >= 90 else "normal")
+    return out
+
+
+def _push_updates(d):
+    """Updates that finished since the last look, as one-shot alerts."""
+    upd, seen = update_status(), d.get("seen")
+    newest = max([v.get("t") or 0 for v in upd.values() if isinstance(v, dict)], default=0)
+    d["seen"] = max(newest, seen or 0)
+    if seen is None:                 # first run: history is not news
+        return []
+    names = {}
+    with _lock:
+        for s in _state["services"]:
+            names[s.get("app")] = s.get("name")
+    out = []
+    for app, v in upd.items():
+        if not isinstance(v, dict) or (v.get("t") or 0) <= seen or v.get("state") not in ("done", "failed"):
+            continue
+        if app.startswith("_") and app != "_self":
+            continue
+        nm = "Dashy" if app == "_self" else names.get(app) or app
+        if v["state"] == "done":
+            out.append(("update:" + app, nm + " updated",
+                        "Now on " + APP_VERSION if app == "_self" else _hostname()))
+        else:
+            out.append(("update:" + app, nm + " update failed", str(v.get("msg") or _hostname())[:120]))
+    return out
+
+
+def push_loop():
+    prev = set()
+    while True:
+        time.sleep(PUSH_EVERY)
+        try:
+            with _push_lock:
+                d = _push_load()
+            if not d["subs"] or not _ec:
+                prev = set()
+                continue
+            on = lambda k: d["kinds"].get(k, True) is not False
+            now = time.time()
+            # A problem alerts once, when it appears. One that could not be sent
+            # stays out of `handled` and is tried again next minute.
+            handled = set()
+            for key, (kind, title, body, urgency) in _push_problems().items():
+                if key in prev or not on(kind) or now - d["fired"].get(key, 0) < PUSH_COOLDOWN:
+                    handled.add(key)
+                elif push_all(title, body, key, urgency):
+                    d["fired"][key] = now
+                    handled.add(key)
+            prev = handled
+            for key, title, body in _push_updates(d):
+                if on("updates"):
+                    push_all(title, body, key)
+            with _push_lock:          # subs or switches may have changed meanwhile
+                cur = _push_load()
+                fired = {k: t for k, t in d["fired"].items() if now - t < PUSH_COOLDOWN}
+                if (cur["fired"], cur.get("seen")) != (fired, d.get("seen")):
+                    cur["fired"], cur["seen"] = fired, d.get("seen")
+                    _push_save(cur)
+        except Exception:
+            traceback.print_exc()
+
+
+SW_JS = """// Dashy's service worker: shows pushed alerts and opens Dashy when one is tapped.
+// No fetch handler, so it never caches or intercepts anything.
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
+self.addEventListener('push', e => {
+  let m = {};
+  try { m = e.data ? e.data.json() : {}; } catch (x) {}
+  e.waitUntil(self.registration.showNotification(m.title || 'Dashy', {
+    body: m.body || '', tag: m.tag || undefined, icon: '/icon-192.png',
+    data: {url: m.url || '/'}}));
+});
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  const url = new URL((e.notification.data || {}).url || '/', self.location.origin).href;
+  e.waitUntil(self.clients.matchAll({type: 'window', includeUncontrolled: true}).then(cs => {
+    for (const c of cs) if ('focus' in c) return c.focus();
+    return self.clients.openWindow(url);
+  }));
+});
+"""
+
+
 PAGE = """<!doctype html>
 <html lang="en">
 <head>
@@ -3601,6 +3936,10 @@ PAGE = """<!doctype html>
             <div class="setrow"><span class="st"><b>Welcome screen</b><span>The first-run tour: what Dashy does, theme, Tailscale and HexOS.</span></span>
               <button class="sbtn" id="mi-setup" type="button">Show</button></div>
           </div>
+          <h3>Notifications</h3>
+          <div class="sgroup" id="s-push"></div>
+          <p class="snote" id="s-pushnote" hidden>Alerts go to every device with notifications on. The same alert
+            won&rsquo;t repeat within 6 hours.</p>
           <h3>Diagnostics</h3>
           <p class="snote">Whether Dashy itself is healthy. If something on the dashboard looks wrong, start here.</p>
           <div class="sgroup" id="s-diag"></div>
@@ -4256,6 +4595,114 @@ function ageText(sec){
   if(sec<172800) return Math.round(sec/3600)+' h ago';
   return Math.round(sec/86400)+' days ago';
 }
+// ---- notifications --------------------------------------------------------
+// The server keeps the subscriptions and decides what is worth sending; this
+// device only subscribes. On iPhone that works only in the home-screen app.
+let pushInfo=null, pushBusy=false;
+const PUSH_KINDS=[
+  ['apps','App crashes','An app crashes or stops answering for 3 minutes. Apps you stop yourself don&rsquo;t count.'],
+  ['drivefail','Drive or pool failure','A drive fails its SMART check, or a pool is degraded or has disk errors.'],
+  ['drivetemp','Hot drives','A hard drive passes 55&deg;C, or an SSD 60&deg;C.'],
+  ['pool','Pool filling up','A pool passes 80% full, and again at 90%.'],
+  ['updates','Updates finished','An app or Dashy finishes updating, or an update fails.']];
+function pushB64(k){
+  const s=String(k).replace(/-/g,'+').replace(/_/g,'/'), b=atob(s+'='.repeat((4-s.length%4)%4));
+  return Uint8Array.from(b,c=>c.charCodeAt(0));
+}
+function pushIOS(){ return /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+                           (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1); }
+function pushCan(){ return window.isSecureContext && 'serviceWorker' in navigator &&
+                           'PushManager' in window && 'Notification' in window; }
+async function pushSub(){
+  if(!pushCan()) return null;
+  try{ const r=await navigator.serviceWorker.getRegistration('/');
+       return r ? await r.pushManager.getSubscription() : null; }catch(e){ return null; }
+}
+// a subscription made for a different key (config reset) can never be delivered to
+function pushSameKey(sub){
+  const k=sub && sub.options && sub.options.applicationServerKey;
+  if(!k || !pushInfo || !pushInfo.key) return false;
+  const a=new Uint8Array(k), b=pushB64(pushInfo.key);
+  return a.length===b.length && a.every((x,i)=>x===b[i]);
+}
+function pushPost(body){
+  return fetch('/api/push',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(r=>r.json()).then(j=>{ if(!j.ok) throw new Error(j.msg||'failed'); return j; });
+}
+async function paintPush(msg){
+  const box=$('s-push'); if(!box) return;
+  try{ pushInfo=await (await fetch('/api/push')).json(); }catch(e){ pushInfo=null; }
+  const sub=await pushSub();
+  const on=!!sub && pushSameKey(sub) && Notification.permission==='granted';
+  const note=msg ? '<span class="pubmsg">'+esc(msg)+'</span>' : '';
+  const row=(t,s,right)=>'<div class="setrow"><span class="st"><b>'+t+'</b><span>'+s+'</span>'+
+                         (t==='This device'?note:'')+'</span>'+(right||'')+'</div>';
+  let h;
+  if(!pushInfo || !pushInfo.ok) h=row('This device', esc((pushInfo&&pushInfo.msg)||'Could not reach Dashy.'));
+  else if(!window.isSecureContext) h=row('This device','Open Dashy on its https tailnet address to turn these on.');
+  else if(!pushCan()) h=row('This device', pushIOS()
+    ? 'On iPhone and iPad, add Dashy to your Home Screen and open it from there.'
+    : 'This browser can&rsquo;t receive notifications.');
+  else if(Notification.permission==='denied') h=row('This device', pushIOS()
+    ? 'Blocked. Allow them in Settings, Notifications, Dashy.'
+    : 'Blocked for this site in the browser&rsquo;s settings.');
+  else{
+    h=row('This device', on ? 'On. Alerts arrive even when Dashy is closed.'
+                            : 'Get alerts here, even when Dashy is closed.',
+      '<button class="sw2" id="p-dev" type="button" role="switch" aria-checked="'+on+
+      '" aria-label="Notifications on this device"><i></i></button>');
+    if(on) h+=row('Test','Send one to every device that has notifications on.',
+                  '<button class="sbtn" id="p-test" type="button">Send</button>');
+  }
+  if(pushInfo && pushInfo.ok)
+    h+=PUSH_KINDS.map(k=>row(k[1],k[2],'<button class="sw2 sm" type="button" role="switch" data-kind="'+k[0]+
+       '" aria-checked="'+(pushInfo.kinds[k[0]]!==false)+'" aria-label="'+k[1]+'"><i></i></button>')).join('');
+  box.innerHTML=h;
+  $('s-pushnote').hidden=!(pushInfo && pushInfo.ok);
+}
+function pushDevice(on){
+  if(pushBusy || !pushInfo || !pushInfo.key) return;
+  pushBusy=true;
+  // asked first, straight from the tap: Safari only shows the prompt inside the gesture
+  const perm=on ? Notification.requestPermission() : Promise.resolve('granted');
+  (async()=>{
+    let msg='';
+    try{
+      const reg=await navigator.serviceWorker.register('/sw.js');
+      await navigator.serviceWorker.ready;
+      let sub=await reg.pushManager.getSubscription();
+      if(on){
+        if(await perm!=='granted') throw new Error('Notifications were not allowed.');
+        if(sub && !pushSameKey(sub)){ await sub.unsubscribe(); sub=null; }
+        if(!sub) sub=await reg.pushManager.subscribe({userVisibleOnly:true,
+                                                     applicationServerKey:pushB64(pushInfo.key)});
+        await pushPost({op:'subscribe', sub:sub.toJSON()});
+      }else if(sub){
+        await pushPost({op:'unsubscribe', endpoint:sub.endpoint}).catch(()=>{});
+        await sub.unsubscribe();
+      }
+    }catch(e){ msg=(on?'Couldn\u2019t turn on: ':'Couldn\u2019t turn off: ')+((e&&e.message)||String(e)); }
+    pushBusy=false;
+    paintPush(msg);
+  })();
+}
+function pushTest(btn){
+  btn.disabled=true; btn.textContent='Sending…';
+  pushPost({op:'test'}).then(()=>paintPush('Sent. It should arrive in a few seconds.'))
+                       .catch(e=>paintPush('Not sent: '+e.message));
+}
+function pushKind(k,on){
+  pushPost({op:'kinds', kinds:{[k]:on}}).catch(e=>paintPush('Not saved: '+e.message));
+}
+// Re-send this device's subscription on every visit, so a lost config folder
+// heals itself instead of going quiet.
+if(pushCan()) navigator.serviceWorker.register('/sw.js').then(async r=>{
+  const sub=await r.pushManager.getSubscription();
+  if(!sub || Notification.permission!=='granted') return;
+  pushInfo=await (await fetch('/api/push')).json();
+  if(pushInfo.ok && pushSameKey(sub)) pushPost({op:'subscribe', sub:sub.toJSON()}).catch(()=>{});
+}).catch(()=>{});
+
 function diagRows(){
   const d=data, rows=[];
   const row=(t,sub,val,lvl)=>'<div class="setrow"><span class="st"><b>'+t+'</b><span>'+sub+'</span></span>'+
@@ -4312,6 +4759,7 @@ function showSettingsTab(id){
   document.querySelectorAll('.settings-section').forEach(x=>{ x.hidden=x.id!==id; });
   try{ sessionStorage.setItem('dashy.stab', id); }catch(e){}
   window.scrollTo(0,0);
+  if(id==='settings-general') paintPush();
   if(data) paintSettings();
 }
 function openSettings(tab){
@@ -7103,6 +7551,8 @@ document.addEventListener('click',ev=>{
           if(s) openPop('app-'+s.id,'custom'); return; }
   const lk=ev.target.closest('#su-links button, #m-links button');
   if(lk){ setLinks(lk.dataset.links); return; }
+  const pt=ev.target.closest('#p-test');
+  if(pt){ pushTest(pt); return; }
   const selfRow=ev.target.closest('#mi-self');
   if(selfRow){
     if(selfRow.dataset.state==='ready'){ closeSettings(); askSelfUpdate(); }
@@ -7113,6 +7563,8 @@ document.addEventListener('click',ev=>{
   if(sw2){
     const on = sw2.getAttribute('aria-checked')!=='true';
     setSwitch(sw2.id, on);
+    if(sw2.id==='p-dev'){ pushDevice(on); return; }
+    if(sw2.dataset.kind){ sw2.setAttribute('aria-checked', String(on)); pushKind(sw2.dataset.kind, on); return; }
     const menuKey={'m-ts':'tailscale','m-hx':'hexos'}[sw2.id];
     if(menuKey){                       // in Settings these apply immediately
       prefs.setup=Object.assign({}, prefs.setup, {done:true});
@@ -7356,6 +7808,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(404, b"", "image/png")
         elif path == "/figtree.woff2":
             self._send_icon("figtree.woff2", "font/woff2")
+        elif path == "/sw.js":
+            # no-cache, so a new Dashy's worker is picked up on the next visit
+            self._send(200, SW_JS, "text/javascript; charset=utf-8", cache="no-cache")
+        elif path == "/api/push":
+            self._send(200, json.dumps(push_info()), "application/json; charset=utf-8")
         elif path == "/manifest.webmanifest":
             self._send(200, json.dumps(MANIFEST), "application/manifest+json",
                        cache="public, max-age=86400")
@@ -7419,7 +7876,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?", 1)[0]
         limits = {"/api/layout": 65536, "/api/check": 1024, "/api/vm": 4096,
-                  "/api/serve": 8192, "/api/update": 4096, "/api/keys": 4096}
+                  "/api/serve": 8192, "/api/update": 4096, "/api/keys": 4096,
+                  "/api/push": 4096}
         if path not in limits:
             return self._fail(404, "not found")
         body = self._json_body(limits[path])
@@ -7438,6 +7896,8 @@ class Handler(BaseHTTPRequestHandler):
             ok, msg = request_serve(str(body.get("host") or ""))
         elif path == "/api/keys":
             ok, msg = save_keys(body)
+        elif path == "/api/push":
+            ok, msg = push_request(body)
         else:
             ok, msg = request_upgrade(str(body.get("app", "")))
         # /api/check reports a failed lookup in its message, not its status
@@ -7450,6 +7910,7 @@ if __name__ == "__main__":
     threading.Thread(target=vitals_loop, daemon=True).start()
     threading.Thread(target=services_loop, daemon=True).start()
     threading.Thread(target=_glance_loop, daemon=True).start()
+    threading.Thread(target=push_loop, daemon=True).start()
     time.sleep(2.2)                      # let the first CPU sample land before serving
     print("%s on :%s for %s (tailnet %s), data %s"
           % (APP_NAME, PORT, _state["host"], tailnet_host() or "not published", DATA), flush=True)

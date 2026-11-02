@@ -2,7 +2,7 @@
 
 Dashy is a one-page dashboard for a TrueNAS box. It shows vitals, pools, drives, VMs and
 every installed app, and needs no API key. The whole app is `app/server.py`: a stdlib
-Python server with the page's HTML, CSS and JS inline. The host-side cron scripts are
+(plus `cryptography`, for push only) Python server with the page's HTML, CSS and JS inline. The host-side cron scripts are
 `app/collect.sh` and `app/worker.sh`, and `install.sh` / `test.sh` are for installs.
 
 This repo is **public**. Never commit a real hostname, IP address, tailnet name or
@@ -102,6 +102,23 @@ CDP and click things; a screenshot alone has missed real bugs here.
   Simple Icons paths, inline). No match keeps the generic monitor icon.
 - Settings, System, App updates is one button. It checks; if a version is waiting it
   becomes "Update to x" and opens the install sheet.
+
+## Notifications (2.3.0)
+
+- Web Push to the home-screen app (iOS 16.4+ needs it opened from the Home Screen, over the
+  https tailnet address). The page subscribes through `/sw.js` (no fetch handler, never caches)
+  and posts the subscription to `/api/push`; everything lives in `config/push.json` (mode 600):
+  this install's VAPID key, the subscriptions, the five alert switches, and what already fired.
+- `push_loop` checks every minute, and only when someone is subscribed. `_push_problems` uses the
+  page's thresholds; keep the two in step. A key names one problem at one severity
+  (`temp:sda:warn`), alerts once when it appears, and not again within `PUSH_COOLDOWN` (6 h,
+  survives restarts). Apps need 3 minutes down and are skipped mid-update. Update alerts come
+  from `updates.json` timestamps newer than `seen`.
+- Encryption is RFC 8291 aes128gcm, checked byte for byte against the RFC's Appendix A vector;
+  the sender has also been tested end to end through Mozilla's push service. Endpoints are
+  restricted to known push hosts (`PUSH_HOSTS`) so the NAS can't be made to POST anywhere else.
+- `cryptography` is pinned in the Dockerfile. Without it the server still runs and Settings says
+  notifications are unavailable.
 
 ## Live tiles (2.0.0)
 
