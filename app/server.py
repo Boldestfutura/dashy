@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.5.1"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -2621,6 +2621,7 @@ def push_all(title, body, tag, urgency="normal"):
         else:
             print("push: %s answered %s" % (urllib.parse.urlsplit(sub["endpoint"]).netloc, code),
                   flush=True)
+    print("push: %r to %d of %d device(s)" % (title, sent, len(subs)), flush=True)
     if gone:
         with _push_lock:
             d = _push_load()
@@ -2782,7 +2783,7 @@ def auto_update_loop():
             if d["kinds"].get("updates", True) is not False:
                 push_all("Dashy %s is out" % latest,
                          "Installing it now, with a snapshot first. You'll get another "
-                         "notification when it's done.", "update:_self")
+                         "notification when it's done.", "update:_self:out")
             ok, msg = request_upgrade("_self")
             if not ok:
                 print("auto-update: could not queue: %s" % msg, flush=True)
@@ -7739,6 +7740,10 @@ ICONS = {
 # Settings > General > Release notes shows it, and the "Dashy updated"
 # notification quotes the first line. Every version bump adds an entry here.
 RELEASES = [
+    ("2.5.1", "2026-11-02", [
+        "The \u201cupdate is out\u201d and \u201cDashy updated\u201d notifications both show. "
+        "The second used to replace the first silently.",
+    ]),
     ("2.5.0", "2026-11-02", [
         "What's new is now Release notes: what changed in every version, newest first.",
         "The Dashy updated notification says what's new in that version.",
