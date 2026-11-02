@@ -142,3 +142,14 @@ CDP and click things; a screenshot alone has missed real bugs here.
 - The dragged card follows the pointer via a transform on its `.cardwrap`; the others FLIP into place with `el.animate()`. `.jig` carries the wobble animation, so never put the drag transform on it.
 - Hit-test against layout boxes (`offsetLeft/Top`), not `getBoundingClientRect` or `elementFromPoint`: a card mid-slide is not where it will land, and testing what is on screen made the cards swap back and forth on phones.
 - A hold carries straight on into a drag. iOS ignores `touch-action` changed mid-gesture, so a non-passive `touchmove` listener calls `preventDefault` while `drag` is set. Without it Safari scrolls the page and cancels the pointer.
+
+## Remote providers and the welcome screen (2.1.0)
+
+- A provider with `"remote": <base URL>` is fetched from that URL, not the app's port, and
+  runs even when the app has no web port (Tailscale has none). Only Tailscale does this.
+- Tailscale takes an OAuth client ID + secret, never an API access token: those expire in
+  at most 90 days, the failure the tile exists to warn about. The 1-hour access token is
+  cached in `_ts_tok` (not the cookie jar, which is sent as a Cookie header).
+- The welcome screen uses the Settings building blocks (`.sgroup`, `.setrow`, `.sbtn`).
+  Its step dots are `.su-dots`: `.dots` is the blinking "Updating…" ellipsis and animates
+  opacity.

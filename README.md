@@ -321,10 +321,15 @@ in. The status under the field says whether it worked.
 | Paperless-ngx | profile → API Auth Token | documents, inbox |
 | Syncthing | Actions → Settings → General → API Key | in sync, devices, folders |
 | Navidrome | username and password | what is playing; else song count |
+| Tailscale | an OAuth client (admin console → Settings → OAuth clients, Devices: Core, read) | devices online, the next key to expire (amber within 14 days), updates waiting |
 | Immich | Account Settings → API Keys (`server.statistics`, `job.read`) | photos, videos, size; jobs still running |
 | Audiobookshelf | Settings → API Keys | the book being listened to |
 | SparkyFitness | Settings → API Keys | today, or the fast under way |
 | Music Assistant | a long-lived token from its settings | what each speaker is playing, album art behind |
+
+Tailscale is the one tile that asks the internet rather than the app:
+Dashy calls `api.tailscale.com` from the NAS. It takes an OAuth client
+because, unlike an API access token, a client never expires.
 
 Keys are saved in `config/keys.json` (mode 600) and used server-side only. The
 page is told which fields are saved, never what they hold. A `keys.json` next

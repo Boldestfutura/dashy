@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1173,8 +1173,8 @@ class _AppHttp:
     and Deluge hand out a session; logging in on every poll would pile them up)."""
     jars = {}
 
-    def __init__(self, svc):
-        self.base = "http://%s:%d" % (svc.get("bind") or HOST_IP, int(svc["lport"]))
+    def __init__(self, svc, base=None):
+        self.base = base or "http://%s:%d" % (svc.get("bind") or HOST_IP, int(svc["lport"]))
         self.jar = _AppHttp.jars.setdefault(svc["app"], {})
         self.headers = {}
 
@@ -1485,6 +1485,74 @@ def g_navidrome(h, c):
             "line": "Scanning…" if n.get("scanning") else "Nothing playing"}
 
 
+_ts_tok = {}             # OAuth client id -> {"tok", "exp", "sec"}
+
+
+def _ts_when(iso):
+    """Tailscale's RFC 3339 time as epoch seconds; None for its zero time."""
+    try:
+        t = datetime.datetime.strptime(str(iso)[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+    except ValueError:
+        return None
+    return t.timestamp() if t.year > 2000 else None
+
+
+def _ts_days(sec):
+    d = int(round(sec / 86400))
+    return "today" if d < 1 else "tomorrow" if d == 1 else "in %d days" % d
+
+
+def g_tailscale(h, c):
+    """The tailnet from Tailscale's own API: who is online, and whose key runs
+    out next. An OAuth client never expires, unlike an API access token, which
+    would have the very problem this tile is meant to warn about."""
+    cid, sec = c["user"], c["pass"]
+    for attempt in (0, 1):
+        t = _ts_tok.get(cid)
+        if not t or t["sec"] != sec or t["exp"] < time.time() + 120:
+            try:
+                r = h.req("/api/v2/oauth/token", data={"client_id": cid, "client_secret": sec,
+                                                        "grant_type": "client_credentials"}, form=True)
+            except urllib.error.HTTPError as e:
+                if e.code == 400:
+                    raise GlanceAuth()
+                raise
+            t = _ts_tok[cid] = {"tok": r["access_token"], "sec": sec,
+                                "exp": time.time() + float(r.get("expires_in") or 3600)}
+        try:
+            devs = (h.req("/api/v2/tailnet/-/devices", headers={"Authorization": "Bearer " + t["tok"]})
+                    or {}).get("devices") or []
+            break
+        except GlanceAuth:
+            _ts_tok.pop(cid, None)
+            if attempt:
+                raise
+    devs = [d for d in devs if isinstance(d, dict) and not d.get("isExternal")]
+    now = time.time()
+    on = sum(1 for d in devs if d.get("connectedToControl"))
+    upd = sum(1 for d in devs if d.get("updateAvailable"))
+    exp = sorted((w - now, (d.get("name") or d.get("hostname") or "?").split(".")[0])
+                 for d in devs if not d.get("keyExpiryDisabled") and d.get("authorized", True)
+                 for w in [_ts_when(d.get("expires"))] if w)
+    gone = [n for left, n in exp if left <= 0]
+    soon = [(left, n) for left, n in exp if 0 < left <= 14 * 86400]
+    nxt = next(((left, n) for left, n in exp if left > 0), None)
+    if gone:
+        line = "%s's key has expired" % gone[0] + (" (+%d more)" % (len(gone) - 1) if len(gone) > 1 else "")
+    elif soon:
+        line = "%s's key expires %s" % (soon[0][1], _ts_days(soon[0][0]))
+    elif upd:
+        line = "%d device%s can update" % (upd, "" if upd == 1 else "s")
+    elif nxt:
+        line = "%s's key expires next" % nxt[1]
+    else:
+        line = "Key expiry is off everywhere"
+    return {"head": "Tailnet", "warn": bool(gone or soon), "line": line,
+            "stats": [["%d/%d" % (on, len(devs)), "Online"],
+                      ["Expired" if gone else ("%dd" % round(nxt[0] / 86400) if nxt else "Off"), "Next key"],
+                      [_count(upd), "Updates"]]}
+
+
 # Order matters only where one name contains another. "bespoke" providers keep
 # their own collector and tile above; they are listed for their key field.
 GLANCE = [
@@ -1518,6 +1586,10 @@ GLANCE = [
      "hint": "In Syncthing: Actions, Settings, General, API Key."},
     {"id": "navidrome", "what": "What's playing, or the library", "name": "Navidrome", "match": r"navidrome", "fields": [USER, PASS], "fetch": g_navidrome,
      "hint": "The username and password you sign in to Navidrome with."},
+    {"id": "tailscale", "what": "Devices online, and keys about to expire", "name": "Tailscale", "match": r"tailscale",
+     "fields": [("user", "Client ID", False, False), ("pass", "Client secret", True, False)], "fetch": g_tailscale,
+     "remote": "https://api.tailscale.com",
+     "hint": "In the Tailscale admin console: Settings, OAuth clients, Generate OAuth client. Tick Devices, Core, Read only."},
     {"id": "immich", "what": "Photos, videos and jobs still running", "name": "Immich", "match": r"immich", "fields": [KEY], "bespoke": True,
      "hint": "In Immich: Account Settings, API Keys, New API Key."},
     {"id": "audiobookshelf", "what": "The book being listened to", "name": "Audiobookshelf", "match": r"audiobookshelf", "fields": [KEY], "bespoke": True,
@@ -1563,7 +1635,7 @@ def _glance_one(svc, p):
         v = {"need": True}
     else:
         try:
-            v = p["fetch"](_AppHttp(svc), c)
+            v = p["fetch"](_AppHttp(svc, p.get("remote")), c)
         except GlanceAuth:
             v = {"error": "key"}
         except urllib.error.HTTPError as e:
@@ -1586,9 +1658,11 @@ def _glance_loop():
             svcs = [dict(x) for x in _state["services"]]
         jobs = []
         for svc in svcs:
-            if not svc.get("lport") or svc.get("status") != "up":
+            if svc.get("status") != "up":
                 continue
             p = _glance_provider(svc)
+            if not svc.get("lport") and not (p and p.get("remote")):
+                continue
             if p is None:
                 fp = _glance_fp.get(svc["app"])
                 if not fp or now - fp["at"] > 21600:
@@ -2748,21 +2822,50 @@ PAGE = """<!doctype html>
 
 
   /* ---- first-run setup ------------------------------------------------- */
-  .setup{position:fixed;inset:0;z-index:90;display:flex;align-items:center;
-         justify-content:center;padding:20px;background:var(--bg);
-         overflow-y:auto}
+  /* The welcome screen is a page, not a pop-up card: the same big title,
+     grouped rows and pill buttons as Settings, so the first thing anyone
+     sees already looks like the rest of Dashy. */
+  .setup{position:fixed;inset:0;z-index:90;display:flex;justify-content:center;
+         background:var(--bg);overflow-y:auto;overscroll-behavior:contain;
+         padding:calc(env(safe-area-inset-top) + 18px) 16px calc(env(safe-area-inset-bottom) + 18px)}
   .setup[hidden]{display:none}
-  .setupcard{width:100%;max-width:430px;background:var(--panel);
-             border:1px solid var(--brd);border-radius:20px;box-shadow:var(--shadow);
-             padding:24px 22px 18px;animation:pop .34s cubic-bezier(.22,1,.36,1) both}
-  .setupcard h2{margin:14px 0 6px;font-size:21px;letter-spacing:-.02em}
-  .setupcard .lede{margin:0 0 18px;font-size:13.5px;color:var(--muted);line-height:1.5}
-  .setupcard .mark{width:46px;height:46px;border-radius:12px}
-  .feat{display:flex;gap:11px;align-items:flex-start;margin:0 0 11px;font-size:13px;
-        line-height:1.45}
-  .feat b{font-weight:650}
-  .feat .ic{flex:0 0 auto;width:17px;height:17px;color:var(--brand);margin-top:1px}
-  .feat span{color:var(--muted)}
+  .setupcard{width:100%;max-width:560px;margin:auto 0;display:flex;flex-direction:column;
+             animation:settingsin .22s ease both}
+  .su-top{display:flex;align-items:center;justify-content:space-between;min-height:40px}
+  .su-back{min-height:40px;padding:0 16px 0 11px;gap:5px}
+  .setupcard h2{margin:26px 2px 6px;font-size:30px;font-weight:700;letter-spacing:-.025em;line-height:1.15}
+  .setupcard .lede{margin:0 2px 20px;font-size:15px;color:var(--muted);line-height:1.45}
+  .su-feat{align-items:flex-start}
+  .su-ic{flex:none;width:38px;height:38px;border-radius:12px;display:grid;place-items:center;
+         background:color-mix(in srgb,var(--accent) 13%,transparent);color:var(--accent)}
+  .su-ic svg{width:20px;height:20px}
+  .su-feat .st{padding-top:1px}
+  .su-new{display:inline-block;margin-left:7px;padding:2px 7px;border-radius:var(--r-full);vertical-align:2px;
+          background:var(--accent);color:#fff;font-size:10.5px;font-weight:700;letter-spacing:.03em}
+  .setup .sgroup .seg{margin:0}
+  .setup .sgroup .sw{padding:2px 0 4px;grid-template-columns:repeat(4,minmax(46px,1fr));justify-items:start}
+  /* the old option rows, in the settings-row look */
+  .setup .opt{border-top:0;border-bottom:1px solid var(--faint);padding:13px 0;gap:14px}
+  .setup .opt:last-child{border-bottom:0}
+  .setup .opt.col{display:flex;flex-direction:column;align-items:stretch;gap:10px}
+  .setup .opt .txt b{font-size:14.5px;font-weight:600}
+  .setup .opt .txt > span{font-size:12.5px;line-height:1.4;margin-top:2px}
+  /* "published 3" means nothing on day one; only a failure is worth saying here */
+  .setup .pubmsg:not(.bad), .setup .pubmsg:empty{display:none}
+  .setup .fld{width:100%;padding:11px 12px;border-radius:12px;border:1px solid var(--brd);
+              background:var(--faint);color:var(--ink);font:inherit;font-size:14px}
+  .su-foot{margin-top:22px;display:flex;flex-direction:column;align-items:stretch}
+  .su-dots{display:flex;gap:6px;justify-content:center;margin:0 0 16px}
+  .su-dots i{flex:none;display:block;width:8px;height:8px;border-radius:var(--r-full);background:var(--brd);
+                 transition:width .25s cubic-bezier(.22,1,.36,1),background .2s ease}
+  .su-dots i.on{width:24px;background:var(--accent)}
+  .setup .go{width:100%;min-height:50px;border-radius:var(--r-full);border:none;
+             background:var(--accent);color:#fff;font:inherit;font-size:15.5px;
+             font-weight:700;cursor:pointer;box-shadow:var(--tile-shadow)}
+  .setup .go:active{transform:scale(.98)}
+  .setup .skip{display:block;width:100%;margin-top:6px;min-height:44px;background:none;
+               border:none;color:var(--muted);font:inherit;font-size:14px;font-weight:600;cursor:pointer}
+  .setup .skip[hidden]{display:none}
   .opt{display:flex;align-items:center;gap:12px;padding:11px 2px;
        border-top:1px solid var(--brd)}
   .opt .txt{min-width:0}
@@ -2806,25 +2909,6 @@ PAGE = """<!doctype html>
   .urlrow .ubtns{display:flex;gap:8px;margin-top:2px}
   .urlrow .ubtns button{flex:1 1 auto}
   .urlrow .ubtns .clr{background:transparent;border:1px solid var(--brd);color:var(--ink)}
-  .setup .fld{width:100%;margin-top:8px;padding:9px 11px;border-radius:10px;
-              border:1px solid var(--brd);background:var(--faint);color:var(--ink);
-              font:inherit;font-size:13px}
-  .setup .go{width:100%;margin-top:16px;padding:12px;border-radius:12px;border:none;
-             background:var(--brand);color:#fff;font:inherit;font-size:14.5px;
-             font-weight:700;cursor:pointer}
-  .setup .hint2{margin:8px 2px 2px;font-size:11.5px;color:var(--muted)}
-  .dots{display:flex;gap:6px;justify-content:center;margin:18px 0 0}
-  .dots i{width:6px;height:6px;border-radius:50%;background:var(--brd);display:block;
-          transition:background .2s ease,transform .2s ease}
-  .dots i.on{background:var(--brand);transform:scale(1.25)}
-  /* top-right: the logo owns the left corner */
-  .setup .back{position:absolute;top:18px;right:16px;background:none;border:none;
-               color:var(--muted);font:inherit;font-size:13px;font-weight:600;
-               cursor:pointer;padding:6px 8px;border-radius:8px}
-  .setup .back:hover{background:var(--faint);color:var(--ink)}
-  .setupcard{position:relative}
-  .setup .skip{display:block;width:100%;margin-top:8px;padding:8px;background:none;
-               border:none;color:var(--muted);font:inherit;font-size:12.5px;cursor:pointer}
 
   /* Structure comes from grouping, not from size. A section heading costs
      eleven pixels and does more than any amount of typographic shouting. */
@@ -3188,6 +3272,7 @@ PAGE = """<!doctype html>
   .apptile.glance .live .nums span:last-child b{color:inherit}
   .apptile.glance .live .nums b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .apptile.gerr .live .lt{color:var(--bad)}
+  .apptile.gwarn .live .lm span:first-child{color:var(--warn);font-weight:600}
   .live .b{flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;justify-content:flex-end}
   .live .b em{font-style:normal;font-size:10px;color:var(--muted);font-variant-numeric:tabular-nums}
   .live .b i{display:block;width:100%;max-width:20px;border-radius:5px;margin-top:2px;
@@ -3434,7 +3519,7 @@ PAGE = """<!doctype html>
                 <span id="mi-selftxt">Check for updates</span><span class="rt" id="mi-selfver"></span></button></div>
             <div class="setrow"><span class="st"><b>What’s new</b><span>The 2.0 tour of live tiles, and which apps still need a key.</span></span>
               <button class="sbtn" id="mi-wn" type="button">Show</button></div>
-            <div class="setrow"><span class="st"><b>Welcome screen</b><span>The first-run setup: Tailscale, HexOS and theme.</span></span>
+            <div class="setrow"><span class="st"><b>Welcome screen</b><span>The first-run tour: what Dashy does, theme, Tailscale and HexOS.</span></span>
               <button class="sbtn" id="mi-setup" type="button">Show</button></div>
           </div>
           <h3>Diagnostics</h3>
@@ -3514,60 +3599,55 @@ PAGE = """<!doctype html>
 </div>
 
 <div class="setup" id="setup" hidden>
-  <div class="setupcard">
-    <button class="back" id="su-back" hidden type="button">&lsaquo; Back</button>
-    <svg class="mark" viewBox="0 0 48 48" role="img" aria-label="Dashy">
-      <rect width="48" height="48" rx="12" fill="var(--brand)"/>
-      <g fill="#fbfcff">
-        <rect x="11" y="26" width="6.5" height="12" rx="3.25"/>
-        <rect x="20.75" y="19" width="6.5" height="19" rx="3.25"/>
-        <rect x="30.5" y="11" width="6.5" height="27" rx="3.25"/>
-      </g>
-    </svg>
+  <div class="setupcard" role="dialog" aria-modal="true" aria-labelledby="su-h">
+    <div class="su-top">
+      <svg class="mark" viewBox="0 0 48 48" role="img" aria-label="Dashy">
+        <rect width="48" height="48" rx="12" fill="var(--brand)"/>
+        <g fill="#fbfcff">
+          <rect x="11" y="26" width="6.5" height="12" rx="3.25"/>
+          <rect x="20.75" y="19" width="6.5" height="19" rx="3.25"/>
+          <rect x="30.5" y="11" width="6.5" height="27" rx="3.25"/>
+        </g>
+      </svg>
+      <button class="sbtn su-back" id="su-back" hidden type="button"><svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+        stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>Back</button>
+    </div>
     <h2 id="su-h">Welcome to Dashy</h2>
-    <p class="lede" id="su-lede">A dashboard for your NAS that finds your apps
-      on its own.</p>
+    <p class="lede" id="su-lede">A dashboard for your NAS that finds your apps on its own.</p>
 
-    <div id="su-feats">
-      <p class="feat"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-         stroke-width="2" stroke-linecap="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>
-        <span><b>Live vitals.</b> CPU, memory, temperatures, disks, network.
-        Tap any tile for detail.</span></p>
-      <p class="feat"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-         stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.6"/></svg>
-        <span><b>Your apps, automatically.</b> Versions, status, and one-tap
-        updates with a snapshot taken first.</span></p>
-      <p class="feat"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-         stroke-width="2" stroke-linecap="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><circle cx="12" cy="12" r="3.4"/></svg>
-        <span><b>Drive health.</b> Per-drive temperatures and SMART, with
-        warnings up top.</span></p>
-      <p class="feat"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-         stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17h16M4 7h16M4 12h10"/></svg>
-        <span><b>Make it yours.</b> Resize and hide tiles. Your layout
-        follows you to every device.</span></p>
+    <div id="su-feats" class="sgroup">
+        <div class="setrow su-feat"><span class="su-ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg></span><span class="st"><b>Live vitals</b><span>CPU, memory, temperatures, disks and network, as they happen. Tap any card for more.</span></span></div>
+        <div class="setrow su-feat"><span class="su-ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.6"/></svg></span><span class="st"><b>Every app, found for you</b><span>Status and version for each app, and one-tap updates with a snapshot taken first.</span></span></div>
+        <div class="setrow su-feat"><span class="su-ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7 15l3-3 2 2 5-5"/></svg></span><span class="st"><b>Live tiles<span class="su-new">New</span></b><span>App tiles show what each app is doing: what&rsquo;s playing, downloads, photos, requests. Some apps need a key, which you add in that app&rsquo;s Customize tab.</span></span></div>
+        <div class="setrow su-feat"><span class="su-ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><circle cx="12" cy="12" r="3.4"/></svg></span><span class="st"><b>Drive health</b><span>Temperature and SMART for every drive, with warnings at the top.</span></span></div>
+        <div class="setrow su-feat"><span class="su-ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17h16M4 7h16M4 12h10"/></svg></span><span class="st"><b>Make it yours</b><span>Hold a tile to move it, make it 1x or 2x, or hide it. Your layout follows you to every device.</span></span></div>
     </div>
 
-    <div id="su-look" hidden>
-      <div class="seg" id="su-theme" role="group" aria-label="Theme">
-        <button type="button" data-theme="system" aria-pressed="true">System</button>
-        <button type="button" data-theme="light"  aria-pressed="false">Light</button>
-        <button type="button" data-theme="dark"   aria-pressed="false">Dark</button>
+    <div id="su-look" class="sgroup" hidden>
+      <div class="setrow col">
+        <span class="st"><b>Theme</b><span>System follows your phone or computer.</span></span>
+        <div class="seg" id="su-theme" role="group" aria-label="Theme">
+          <button type="button" data-theme="system" aria-pressed="true">System</button>
+          <button type="button" data-theme="light"  aria-pressed="false">Light</button>
+          <button type="button" data-theme="dark"   aria-pressed="false">Dark</button>
+        </div>
       </div>
-      <p class="hint2">System follows your phone or computer.</p>
-      <p class="mh" style="padding-left:2px">Accent</p>
-      <div class="sw" id="su-accent" role="group" aria-label="Accent colour"></div>
+      <div class="setrow col">
+        <span class="st"><b>Accent</b><span>Buttons, charts and highlights.</span></span>
+        <div class="sw" id="su-accent" role="group" aria-label="Accent colour"></div>
+      </div>
     </div>
 
-    <div id="su-opts" hidden>
+    <div id="su-opts" class="sgroup" hidden>
       <div class="opt">
         <span class="txt"><b>Tailscale<span class="auto" id="a-ts"></span></b>
           <span>Open apps by their tailnet address.</span></span>
-        <button class="sw2" id="o-ts" role="switch" aria-checked="false"><i></i></button>
+        <button class="sw2" id="o-ts" role="switch" aria-checked="false" aria-label="Tailscale"><i></i></button>
       </div>
       <div class="opt col" id="su-serve" hidden>
         <span class="txt"><b>App links</b>
-          <span>Which address a tile opens. Tailnet works from anywhere you are
-          signed in; your local network only works at home.</span></span>
+          <span>Which address a tile opens. Tailnet works anywhere you&rsquo;re
+          signed in to Tailscale; your local network only works at home.</span></span>
         <div class="seg" id="su-links" role="group" aria-label="App links">
           <button type="button" data-links="ts" aria-pressed="true">Tailnet</button>
           <button type="button" data-links="lan" aria-pressed="false">Local network</button>
@@ -3577,21 +3657,22 @@ PAGE = """<!doctype html>
       <div class="opt">
         <span class="txt"><b>HexOS<span class="auto" id="a-hx"></span></b>
           <span>Adds a link to your HexOS deck.</span></span>
-        <button class="sw2" id="o-hx" role="switch" aria-checked="false"><i></i></button>
+        <button class="sw2" id="o-hx" role="switch" aria-checked="false" aria-label="HexOS"><i></i></button>
       </div>
-      <div class="opt" style="display:block">
+      <div class="opt col">
         <span class="txt"><b>TrueNAS address</b>
-          <span>The address you normally type to open TrueNAS itself.
-          Usually its IP, like <code>http://192.168.1.10</code>. We have had a
-          guess below &mdash; if it opens TrueNAS, it is right.</span></span>
+          <span>The address you type to open TrueNAS itself, usually its IP, like
+          <code>http://192.168.1.10</code>. If the guess below opens TrueNAS, it&rsquo;s right.</span></span>
         <input class="fld" id="o-nas" type="url" inputmode="url"
-               placeholder="http://192.168.1.10">
+               placeholder="http://192.168.1.10" aria-label="TrueNAS address">
       </div>
     </div>
 
-    <div class="dots" id="su-dots"><i></i><i></i><i></i></div>
-    <button class="go" id="su-go">Get started</button>
-    <button class="skip" id="su-skip">Skip for now</button>
+    <div class="su-foot">
+      <div class="su-dots" id="su-dots" aria-hidden="true"><i></i><i></i><i></i></div>
+      <button class="go" id="su-go" type="button">Get started</button>
+      <button class="skip" id="su-skip" type="button">Skip for now</button>
+    </div>
   </div>
 </div>
 
@@ -4027,7 +4108,7 @@ function setupGo(step){
                 (location.protocol+'//'+location.hostname+'/');
     $('o-nas').value=su.truenas || guess;
     $('su-h').textContent='What do you use?';
-    $('su-lede').textContent='Already filled in from what is installed.';
+    $('su-lede').textContent='Already filled in from what’s installed on your NAS.';
     $('su-go').textContent='Finish';
   }
 }
@@ -5048,11 +5129,12 @@ function paintGlance(){
     askKey(t,g);
     if(g.bespoke) continue;
     if(!v || v.need || v.error==='down'){
-      dropLive(t,'glance'); t.classList.remove('gart','gerr'); glanceArt(t,''); t.removeAttribute('title');
+      dropLive(t,'glance'); t.classList.remove('gart','gerr','gwarn'); glanceArt(t,''); t.removeAttribute('title');
       continue;
     }
     const w=sizeLive(t,g.size||1,'glance');
     t.classList.toggle('gerr', v.error==='key');
+    t.classList.toggle('gwarn', !!v.warn && v.error!=='key');
     if(v.error==='key'){
       glanceArt(t,'');
       liveBox(t).innerHTML='<span class="lt">Key refused</span><span class="lm"><span>Check it in Customize</span></span>';
