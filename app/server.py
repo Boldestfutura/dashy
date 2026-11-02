@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.4.1"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -3036,12 +3036,16 @@ PAGE = """<!doctype html>
   }
   /* Opened from the iOS home screen, the system blurs a band just below the status bar, so
      the header and the sticky settings tabs sit clear of it. The browser is unaffected. */
+  .topband{display:none;position:fixed;inset:0 0 auto;z-index:6;
+           height:calc(env(safe-area-inset-top,0px) + 16px);background:var(--bg)}
   @media(display-mode:standalone){
     body{padding-top:calc(env(safe-area-inset-top,0px) + 34px)}
     .settings-nav{top:calc(env(safe-area-inset-top,0px) + 16px)}
-    /* and that band is painted solid, or the page scrolls by behind it above the tabs */
-    body.in-settings::before{content:"";position:fixed;inset:0 0 auto;z-index:6;pointer-events:none;
-      height:calc(env(safe-area-inset-top,0px) + 16px);background:var(--bg)}
+    /* and that band is painted solid, or the page scrolls by behind it above the tabs.
+       It is a real element that takes taps: iOS 26 fills the status bar with the colour
+       of a fixed bar it finds at the top edge by hit-testing, and otherwise shows the
+       page blurred through it. A pointer-events:none band was looked straight through. */
+    body.in-settings .topband{display:block}
   }
 
   /* shared settings controls */
@@ -3933,6 +3937,7 @@ PAGE = """<!doctype html>
 </style>
 </head>
 <body>
+<div class="topband" aria-hidden="true"></div>
 <div class="wrap">
   <header>
     <div class="id">
