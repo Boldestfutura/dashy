@@ -186,3 +186,8 @@ CDP and click things; a screenshot alone has missed real bugs here.
   page two (a failing drive). The pages are `nth-child(1)` and `(2)`, so keep the rail last.
 - Audiobookshelf: an open session with no `updatedAt` in 3 minutes is stale. ABS leaves
   sessions open after playback stops.
+- The sheet header's icon slot (`#sh-ico`) is shared by every sheet. Anything that writes the
+  sheet directly (`askSelfUpdate`, `askUpdate`) must call `sheetIcon()`, or the last app opened
+  keeps showing. Fixed in 2.2.2.
+- Health and Network sheets (2.2.2) use the same helpers as the vitals sheets. Every network
+  number is the smoothed latest point of `net_hist`, so the headline, rows and chart agree.

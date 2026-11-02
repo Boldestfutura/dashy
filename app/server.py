@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "2.2.1"
+APP_VERSION = "2.2.2"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -3108,9 +3108,6 @@ PAGE = """<!doctype html>
   button.srow{width:100%;background:none;font:inherit;color:inherit;text-align:left;
               cursor:pointer;border-left:none;border-right:none;border-top:none}
   button.srow .t1::after{content:" \u203a";color:var(--muted);font-weight:700}
-  .allok{padding:22px 16px 18px;text-align:center}
-  .allok p{margin:0;font-weight:650;font-size:14px}
-  .allok .t2{margin-top:5px;white-space:normal;font-weight:500}
   .row{display:flex;align-items:center;gap:10px;padding:10px 16px;
        border-bottom:1px solid var(--faint)}
   .row:last-child{border-bottom:none}
@@ -3413,6 +3410,11 @@ PAGE = """<!doctype html>
   .vl-v.sm{font-size:12.5px;font-weight:600;color:var(--muted)}
   .vl-b{grid-column:1/-1;height:6px;border-radius:var(--r-full);background:var(--faint);overflow:hidden}
   .vl-b i{display:block;height:100%;border-radius:inherit;background:var(--accent)}
+  .vl-s{grid-column:1/-1;font-size:12px;color:var(--muted);line-height:1.4}
+  .vh-n.txt{font-size:26px;letter-spacing:-.01em}
+  .vpanel .srow{padding:10px 0}
+  button.acell{border:0;font:inherit;color:inherit;text-align:left;cursor:pointer}
+  button.acell .al::after{content:" ›";font-weight:700}
   .vl-b i[data-level="warn"],.vthreads i[data-level="warn"]{background:var(--warn)}
   .vl-b i[data-level="bad"],.vthreads i[data-level="bad"]{background:var(--bad)}
   .vthreads{display:flex;gap:4px;height:78px;background:var(--panel);border-radius:11px;padding:8px}
@@ -3545,10 +3547,6 @@ PAGE = """<!doctype html>
   .legend span{display:inline-flex;align-items:center;gap:6px;font-variant-numeric:tabular-nums}
   .legend u{width:9px;height:9px;border-radius:3px;display:block}
 
-  .chart{padding:14px 16px 2px}
-  .chart svg{width:100%;height:112px;display:block;overflow:visible}
-  .chart .cap{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);
-              margin-top:6px}
 
   .tl{padding:12px 16px 4px}
   .tl .seg{display:flex;height:22px;border-radius:7px;overflow:hidden;background:var(--faint)}
@@ -5658,16 +5656,6 @@ function upWord(sec){
 }
 
 // "4 cores · 8 threads · 32 GiB memory, ECC · Supermicro X11SCL-F", from system.info
-function hardwareLine(sys){
-  sys=sys||{};
-  const bits=[];
-  if(sys.cores) bits.push(sys.cores+(sys.cores===1?' core':' cores'));
-  if(sys.threads && sys.threads!==sys.cores) bits.push(sys.threads+' threads');
-  if(sys.memory) bits.push(ram(sys.memory)+' memory'+(sys.ecc===true?', ECC':''));
-  const board=[sys.maker,sys.product].filter(Boolean).join(' ');
-  if(board) bits.push(board);
-  return bits.join(' \u00b7 ');
-}
 
 
 
@@ -5755,54 +5743,75 @@ function rowsSystem(){
     .forEach(v => out.push(srow('warn', vmName(v) + ' is not running',
                                 'It is set to start with the server.', 'vm-' + v.id)));
 
-  const head = out.length
-    ? '<p class="shead">' + out.length + (out.length === 1 ? ' thing wants' : ' things want') +
-      ' your attention</p>'
-    : '<div class="allok"><p>Nothing needs you.</p>' +
-      '<p class="t2">Every app is answering, every pool is online, no drive is warm '+
+  const st = k => svc.filter(s => appSt(s) === k);
+  const ago = t => agoWord(Math.max(0, Math.round(Date.now()/1000 - t)));
+  // problems first, in the same rows the Health card uses; otherwise one line
+  // in the place the other sheets put their number
+  let h = out.length
+    ? vBox(out.length + (out.length === 1 ? ' thing needs you' : ' things need you'),
+           '<div class="vpanel">' + out.join('') + '</div>')
+    : '<div class="vhero"><div class="vh-top"><span class="vh-n txt">Nothing needs you</span></div>' +
+      '<p class="vh-s">Every app is answering, every pool is online, no drive is warm ' +
       'and every VM that should be running is.</p></div>';
 
-  // what is normal, so the sheet says something either way
-  const normal = [];
-  // the machine itself, as TrueNAS describes it
   const sys = data.system || {};
-  if (sys.version || sys.hostname)
-    normal.push(srow('ok', 'TrueNAS ' + String(sys.version || '').replace(/^TrueNAS-?/i, ''),
-                     [sys.hostname, sys.timezone].filter(Boolean).join(' \u00b7 ')));
-  const hw = hardwareLine(sys);
-  if (sys.cpu || hw)
-    normal.push(srow('ok', sys.cpu || 'Hardware', hw));
-  normal.push(srow('ok', 'Dashy ' + data.version,
-                   su.checked ? 'Checked for updates ' + agoWord(Math.max(0, Math.round(Date.now()/1000 - su.checked))) : ''));
-  const st = k => svc.filter(s => appSt(s) === k);
-  normal.push(srow('ok', svc.length + ' apps installed',
-                   st('up').length + ' responding'));
+  const responding = st('up').length;
+  const cells = [];
+  if (sys.version)
+    cells.push(cell('TrueNAS', esc(String(sys.version).replace(/^TrueNAS-?/i, '')),
+      '<span class="as">' + esc([sys.hostname, sys.timezone].filter(Boolean).join(' · ')) + '</span>'));
+  if (data.uptime || data.uptime === 0)
+    cells.push('<button type="button" class="acell go" data-pop="up"><span class="al">Up for</span>' +
+      '<span class="av">' + upWord(data.uptime) + '</span>' +
+      '<span class="as">Since ' + when(Date.now()/1000 - data.uptime) + '</span></button>');
+  cells.push(cell('Dashy', esc(data.version || ''),
+    '<span class="as">' + (su.checked ? 'Checked ' + ago(su.checked) : 'Not checked yet') + '</span>'));
+  cells.push(cell('Apps', responding + (svc.length !== responding ? ' of ' + svc.length : ''),
+    '<span class="as">' + (svc.length === responding ? 'All answering' : 'answering') + '</span>'));
+  h += abox('This server', cells.join(''));
+
+  const hw = [];
+  if (sys.cpu)
+    hw.push(cell('Processor', esc(sys.cpu.replace(/^(Intel|AMD)( Core)? ?/, '')),
+      '<span class="as">' + [sys.cores && sys.cores + ' cores', sys.threads && sys.threads !== sys.cores && sys.threads + ' threads']
+        .filter(Boolean).join(', ') + '</span>'));
+  if (sys.memory)
+    hw.push(cell('Memory', ram(sys.memory), '<span class="as">' + (sys.ecc === true ? 'ECC' : sys.ecc === false ? 'Not ECC' : '') + '</span>'));
+  const maker = String(sys.maker || '').replace(/^Micro-Star International.*$/i, 'MSI')
+    .replace(/,? (Co\\.,? ?Ltd\\.?|Inc\\.?|Corporation|Corp\\.?|Ltd\\.?|GmbH)$/i, '');
+  if (maker || sys.product)
+    hw.push(cell('Motherboard', esc([maker, sys.product].filter(Boolean).join(' ')), '', 'full'));
+  if (hw.length) h += abox('Hardware', hw.join(''));
+
+  if (pools.length)
+    h += vBox('Pools', '<div class="vpanel">' + pools.map(p => {
+      const lv = p.pct >= 90 ? 'bad' : p.pct >= 80 ? 'warn' : 'ok';
+      return '<div class="vl-r"><span class="vl-n">' + esc(p.name) + '</span>' +
+        '<span class="vl-v"' + (lv !== 'ok' ? ' style="color:' + LV_COL[lv] + '"' : '') + '>' + p.pct.toFixed(0) + '% full</span>' +
+        '<span class="vl-b"><i style="width:' + Math.max(2, p.pct).toFixed(1) + '%"' + (lv !== 'ok' ? ' data-level="' + lv + '"' : '') + '></i></span>' +
+        '<span class="vl-s">' + esc(disk(p.free) + ' free' + (scrubWord(ps[p.name] || {}) ? ' · ' + scrubWord(ps[p.name] || {}) : '')) + '</span></div>';
+    }).join('') + '</div>');
+
+  // apps TrueNAS is busy with, stopped on purpose, or recently deleted:
+  // worth knowing, not problems
+  const notes = [];
   ['starting', 'stopping', 'removing'].forEach(k => {
     const l = st(k);
-    if (l.length) normal.push(srow('info', l.map(s => s.name).join(', ') + ' \u00b7 ' + APP_ST[k].replace('\u2026', '').toLowerCase(),
-                                   'TrueNAS is working on ' + (l.length === 1 ? 'it' : 'them') + ' now.'));
+    if (l.length) notes.push(srow('info', l.map(s => s.name).join(', ') + ' · ' + APP_ST[k].replace('…', '').toLowerCase(),
+                                  'TrueNAS is working on ' + (l.length === 1 ? 'it' : 'them') + ' now.'));
   });
   const stopped = st('stopped');
   if (stopped.length)
-    normal.push(srow('info', stopped.length === 1 ? stopped[0].name + ' is stopped' : stopped.length + ' apps are stopped',
-                     (stopped.length === 1 ? '' : stopped.map(s => s.name).join(', ') + '. ') +
-                     'Stopped in TrueNAS, so not counted as a problem.'));
+    notes.push(srow('info', stopped.length === 1 ? stopped[0].name + ' is stopped' : stopped.length + ' apps are stopped',
+                    (stopped.length === 1 ? '' : stopped.map(s => s.name).join(', ') + '. ') +
+                    'Stopped in TrueNAS, so not counted as a problem.'));
   const gone = data.removed || [];
   if (gone.length)
-    normal.push(srow('info', gone.length === 1 ? gone[0].name + ' was removed' : gone.length + ' apps were removed',
-                     (gone.length === 1 ? '' : gone.map(g => g.name).join(', ') + '. ') +
-                     'Deleted from TrueNAS ' + agoWord(Math.max(0, Math.round(Date.now()/1000 - gone[0].at))) + '.'));
-  pools.forEach(p => {
-    const st = ps[p.name] || {};
-    normal.push(srow('ok', p.name + ' · ' + p.pct.toFixed(0) + '% full',
-                     scrubWord(st)));
-  });
-  if (data.uptime || data.uptime === 0)
-    normal.push(srow('ok', 'Up ' + upWord(data.uptime),
-                     'See the uptime record', 'up'));
-
-  return head + out.join('') +
-         '<p class="shead">Everything else</p>' + normal.join('');
+    notes.push(srow('info', gone.length === 1 ? gone[0].name + ' was removed' : gone.length + ' apps were removed',
+                    (gone.length === 1 ? '' : gone.map(g => g.name).join(', ') + '. ') +
+                    'Deleted from TrueNAS ' + ago(gone[0].at) + '.'));
+  if (notes.length) h += vBox('Apps', '<div class="vpanel">' + notes.join('') + '</div>');
+  return h;
 }
 
 // "scrub repaired 0B in 00:14:39 with 0 errors on Sun Oct 11 00:14:40 2026"
@@ -6286,32 +6295,6 @@ function appCustom(s){
 }
 
 
-// series: [{key, colour, label}] over rows of [stamp, v1, v2...]
-function chart(rows, series, fmtv){
-  if(!rows || rows.length<2) return '';
-  const W=430, H=112, n=rows.length;
-  let peak=1;
-  rows.forEach(p=>series.forEach(s=>{ peak=Math.max(peak, p[s.key]); }));
-  const x=i=>(i/(n-1))*W;
-  // square-root scale: a quiet line would be a flat smear on a linear axis
-  const y=v=>H-Math.sqrt(Math.max(0,v)/peak)*(H-8)-4;
-  const path=k=>rows.map((p,i)=>(i?'L':'M')+x(i).toFixed(1)+' '+y(p[k]).toFixed(1)).join(' ');
-  const area=k=>'M0 '+H+' '+rows.map((p,i)=>'L'+x(i).toFixed(1)+' '+y(p[k]).toFixed(1)).join(' ')+' L'+W+' '+H+' Z';
-  const mins=Math.max(1,Math.round((rows[n-1][0]-rows[0][0])/60));
-  return '<div class="chart"><svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'+
-      series.map(s=>'<path d="'+area(s.key)+'" fill="'+s.colour+'" opacity=".10"/>').join('')+
-      series.map(s=>'<path d="'+path(s.key)+'" fill="none" stroke="'+s.colour+'" stroke-width="2.8" '+
-        'stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>').join('')+
-    '</svg><div class="cap"><span>'+mins+' min ago</span><span>peak '+fmtv(peak)+'</span>'+
-      '<span>now</span></div></div>'+
-    '<div class="legend">'+series.map(s=>
-      '<span><u style="background:'+s.colour+'"></u>'+s.label+'</span>').join('')+'</div>';
-}
-
-function netChart(name){
-  return chart((data.net_hist||{})[name]||[],
-    [{key:1,colour:'var(--accent)',label:'down'},{key:2,colour:'var(--brand)',label:'up'}], rate);
-}
 
 /* ---------- vitals sheets (2.2) --------------------------------------------
    CPU, memory, CPU temperature, drive temperatures and storage share one
@@ -6554,17 +6537,39 @@ function storeSheet(){
 }
 
 
-function rowsNet(){
-  const list=data.net||[];
-  if(!list.length) return '<div class="row"><span class="t2">No interface data.</span></div>';
-  return list.map(n=>
-    '<div class="row"><span class="l"><span class="t1">'+esc(n.name)+'</span>'+
-      '<span class="t2">'+(n.speed? n.speed+' Mb/s link \\u00b7 ':'')+
-        disk(n.rx)+' in \\u00b7 '+disk(n.tx)+' out'+
-        (n.errors? ' \\u00b7 '+n.errors+' errors':'')+'</span></span>'+
-      '<span class="val" style="min-width:86px">'+rate(n.down)+'<br>'+
-        '<span style="font-size:11px;color:var(--muted);font-weight:600">'+rate(n.up)+' up</span>'+
-      '</span></div>').join('');
+function netKind(name){
+  return /^tailscale/.test(name) ? 'Tailscale' : /^(en|eth)/.test(name) ? 'Ethernet'
+       : /^macvtap/.test(name) ? 'VM network' : /^wl/.test(name) ? 'Wi-Fi'
+       : /^(br|mac-|bond)/.test(name) ? 'Bridge' : /^(veth|docker|kube)/.test(name) ? 'Containers' : '';
+}
+function linkWord(mb){ return mb>=1000 ? (+(mb/1000).toFixed(1))+' Gb/s' : mb+' Mb/s'; }
+function netSheet(){
+  // the interface that has carried the most is the real uplink
+  const l=(data.net||[]).slice().sort((a,b)=>(b.rx+b.tx)-(a.rx+a.tx));
+  if(!l.length) return '<div class="row"><span class="t2">No interface data.</span></div>';
+  const p=l[0];
+  // two-second samples are all spikes, as with disk activity
+  const smooth=name=>{ const raw=(data.net_hist||{})[name]||[];
+    return raw.map((r,i)=>{
+      const w=raw.slice(Math.max(0,i-2), i+3), avg=k=>w.reduce((a,x)=>a+(x[k]||0),0)/w.length;
+      return [r[0], avg(1), avg(2)];
+    }); };
+  // every number on the sheet is the smoothed latest point, so they agree with the chart
+  const now=n=>{ const sm=smooth(n.name); return sm.length?sm[sm.length-1]:[0,n.down,n.up]; };
+  const sm=smooth(p.name), last=now(p), dp=rateParts(last[1]);
+  let h=vHero(dp[0], dp[1], 'Coming in on '+esc(p.name)+', with '+rate(last[2])+' going out'+
+    (p.speed?'. '+linkWord(p.speed)+' link':'')+'.');
+  h+=vChart(sm, {min:0, fmt:v=>v?rate(v):'0',
+    series:[{v:r=>r[1], colour:'var(--accent)', label:'Down'},
+            {v:r=>r[2], colour:'var(--mem-cache)', label:'Up'}]});
+  h+=vBox('Interfaces', '<div class="vpanel">'+l.map(n=>{
+    const k=netKind(n.name), r=now(n);
+    return '<div class="vl-r"><span class="vl-n">'+esc(n.name)+'</span>'+
+      '<span class="vl-v sm">'+rate(r[1])+' down · '+rate(r[2])+' up</span>'+
+      '<span class="vl-s">'+[k, n.speed?linkWord(n.speed):'', disk(n.rx)+' in, '+disk(n.tx)+' out since boot'].filter(Boolean).join(' · ')+
+      (n.errors?' · <b style="color:var(--bad)">'+n.errors+' errors</b>':'')+'</span></div>';
+  }).join('')+'</div>', 'busiest first');
+  return h;
 }
 
 function uptimeChart(){
@@ -6641,20 +6646,24 @@ function maybeWhatsNew(){
 }
 const POPS={
   whatsnew:whatsNew,
-  system:()=>['System', rowsSystem()],
+  system:()=>['Health',               rowsSystem()],
   cpu:   ()=>['CPU',                  cpuSheet()],
   mem:   ()=>['Memory',               memSheet()],
   ctemp: ()=>['CPU temperature',      ctempSheet()],
   dtemp: ()=>['Drive temperatures',   dtempSheet()],
   store: ()=>['Storage',              storeSheet()],
-  net:   ()=>['Network', (function(){
-            const l=data.net||[];
-            const p=l.slice().sort((a,b)=>(b.rx+b.tx)-(a.rx+a.tx))[0];
-            return (p?netChart(p.name):'')+rowsNet();
-          })()],
+  net:   ()=>['Network',              netSheet()],
   apps:  ()=>['Apps',                 rowsApps()],
   up:    ()=>['Uptime record',        uptimeChart()],
 };
+
+// The sheet header's icon slot is shared by every sheet. Anything that writes
+// a sheet sets it, or the last app opened keeps showing on the next one.
+function sheetIcon(svc){
+  const icon=$('sh-ico'), html=svc?appIcon(svc):'';
+  if(icon.innerHTML!==html){ icon.innerHTML=html; wireIcons(icon); }
+  icon.hidden=!html;
+}
 
 function renderPop(opening){
   if(!openKey || !data) return;
@@ -6669,15 +6678,7 @@ function renderPop(opening){
   if($('sh-t').textContent!==r[0]) $('sh-t').textContent=r[0];
   const sub=r[2]||'';
   if($('sh-s').textContent!==sub) $('sh-s').textContent=sub;
-  const icon=$('sh-ico');
-  if(openKey.indexOf('app-')===0){
-    const svc=((data.services)||[]).find(s=>s.id===openKey.slice(4));
-    const html=svc?appIcon(svc):'';
-    if(icon.innerHTML!==html){ icon.innerHTML=html; wireIcons(icon); }
-    icon.hidden=!html;
-  }else{
-    icon.innerHTML=''; icon.hidden=true;
-  }
+  sheetIcon(openKey.indexOf('app-')===0 ? ((data.services)||[]).find(s=>s.id===openKey.slice(4)) : null);
 
   // The poll runs every 3s. Rewriting innerHTML each time rebuilt the whole
   // subtree - images reloaded, charts redrew, scroll position jumped and the
@@ -6782,6 +6783,8 @@ async function askSelfUpdate(){
   const u=(data && data.selfupdate) || {};
   $('sh-t').textContent='Update Dashy';
   $('sh-s').textContent='';
+  const me=(data && data.system && data.system.app) || '';
+  sheetIcon(((data && data.services)||[]).find(s=>me && s.app===me));
   $('sh-b').innerHTML=
     '<div class="row"><span class="l"><span class="t1">'+esc(u.current||'')+
       ' \u2192 '+esc(u.latest||'')+'</span>'+
@@ -6808,6 +6811,7 @@ async function askUpdate(app,name,ver){
       '<button class="ubtn yes" id="u-yes" data-app="'+esc(app)+'">Update '+esc(name)+'</button></div>';
   $('sh-t').textContent='Update available';
   $('sh-s').textContent='';
+  sheetIcon(((data && data.services)||[]).find(s=>s.app===app));
   $('sh-b').innerHTML=body;
   $('scrim').hidden=false; openKey=null;
 }
