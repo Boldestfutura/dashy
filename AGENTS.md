@@ -153,3 +153,14 @@ CDP and click things; a screenshot alone has missed real bugs here.
 - The welcome screen uses the Settings building blocks (`.sgroup`, `.setrow`, `.sbtn`).
   Its step dots are `.su-dots`: `.dots` is the blinking "Updating…" ellipsis and animates
   opacity.
+
+## App grid packing (2.1.1)
+
+- With three or more columns, `packApps()` places every app tile with an explicit
+  `grid-column`/`grid-row`. It aims for the fewest rows, then no enclosed gaps, then the
+  order closest to the server's. Phones (two columns) keep the plain dense flow.
+- Tiles never stretch to fill a gap. A widened 1x tile was tried and rejected.
+- Count columns with the placements cleared: a tile placed past the last track makes the
+  browser add implicit columns, and `gridTemplateColumns` then reports those too.
+- In headless Chrome, `captureScreenshot` with `captureBeyondViewport` resizes the viewport,
+  which fires `resize` and re-packs. Scroll to the grid and capture inside the viewport.

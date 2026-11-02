@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.1"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -5094,6 +5094,7 @@ function paintLive(){
   }
   paintGlance();
   tickLive();      // fill the clocks now, not on the next one-second tick
+  packApps();      // tile sizes may have just changed
 }
 // Apps Dashy recognised on its own (the server's GLANCE list). They all share
 // one look: with something under way (playing, downloading) its title, a
@@ -5814,6 +5815,95 @@ function srow(level, title, sub, pop){
     (sub ? '<span class="t2">' + esc(sub) + '</span>' : '') + '</span>' +
     '</' + (pop ? 'button' : 'div') + '>';
 }
+
+/* Packing the app grid on wide screens. Two columns on a phone pair up on
+   their own; five do not, and the browser's dense flow left a hole wherever
+   a tall tile landed late (one real desktop had six empty cells). Here Dashy
+   places every tile itself: the fewest rows, then the fewest gaps, then the
+   order that strays least from the owner's. The search is greedy plus a few
+   hundred seeded random tries, so the same tiles always land the same way. Tiles keep their own size (a 1x tile stretched
+   across a row looked wrong), so a spare cell or two can stay at the end.
+   Phones (fewer than three columns) keep the plain order.                        */
+function packLayout(items, cols){
+  const N=items.length;
+  function run(k, big, rnd){
+    const occ=[], out=new Array(N), left=items.map((_,i)=>i);
+    const free=(r,c)=>!(occ[r]&&occ[r][c]!==undefined);
+    const fits=(it,r,c)=>{ if(c+it.w>cols) return false;
+      for(let y=r;y<r+it.h;y++) for(let x=c;x<c+it.w;x++) if(!free(y,x)) return false; return true; };
+    let r=0, c=0, moved=0;
+    while(left.length){
+      if(free(r,c)){
+        let pick=-1;
+        for(let j=0;j<Math.min(left.length,k+1);j++){
+          const it=items[left[j]];
+          if(!fits(it,r,c)) continue;
+          if(rnd){ pick=j; if(rnd()<.55) break; continue; }
+          if(pick<0 || (big && it.w*it.h>items[left[pick]].w*items[left[pick]].h)) pick=j;
+          if(!big) break;
+        }
+        if(pick>=0){
+          const i=left.splice(pick,1)[0], it=items[i];
+          moved+=pick;
+          for(let y=r;y<r+it.h;y++){ occ[y]=occ[y]||[]; for(let x=c;x<c+it.w;x++) occ[y][x]=i; }
+          out[i]={r,c,w:it.w,h:it.h};
+        }
+      }
+      if(++c>=cols){ c=0; r++; }
+      if(r>4*N+4) break;      // cannot happen; never loop forever on a bad item
+    }
+    let rows=0; out.forEach(p=>{ if(p) rows=Math.max(rows,p.r+p.h); });
+    // an empty cell with a tile to its right or below it is a gap; one at
+    // the ragged right or bottom edge is just where the grid ends
+    let holes=0;
+    for(let y=0;y<rows;y++) for(let x=0;x<cols;x++){
+      if(!free(y,x)) continue;
+      let shut=false;
+      for(let xx=x+1;xx<cols&&!shut;xx++) if(!free(y,xx)) shut=true;
+      for(let yy=y+1;yy<rows&&!shut;yy++) if(!free(yy,x)) shut=true;
+      if(shut) holes++;
+    }
+    // how far the reading order (row by row, by each tile's top-left) strays from the owner's order
+    const read=out.map((p,i)=>[p?p.r:1e9,p?p.c:0,i]).sort((a,b)=>a[0]-b[0]||a[1]-b[1]);
+    moved=read.reduce((a,[,,i],pos)=>a+Math.abs(pos-i),0);
+    return {out, rows, holes, moved};
+  }
+  let best=null, seed=7;
+  const rnd=()=>((seed=(seed*1103515245+12345)&0x7fffffff)/0x7fffffff);
+  const tries=[];
+  for(let k=0;k<N;k++) tries.push([k,false,null],[k,true,null]);
+  for(let n=0;n<300;n++) tries.push([N,false,rnd]);
+  for(const [k,big,r] of tries){
+    const t=run(k,big,r);
+    if(t.out.some(p=>!p)) continue;
+    if(!best || t.rows<best.rows || t.rows===best.rows && (t.holes<best.holes ||
+        t.holes===best.holes && t.moved<best.moved)) best=t;
+  }
+  return best ? best.out : items.map(()=>null);
+}
+let packSig='', packW=0;
+function packApps(){
+  const g=document.querySelector('.sec[data-sec="apps"] > .appgrid'); if(!g) return;
+  const ts=[...g.children].filter(t=>t.classList.contains('apptile'));
+  // a tile placed past the last column makes the browser add columns, so the
+  // count is only honest with the placements cleared; do that when the width
+  // changed, in the same frame, so nothing visibly moves
+  if(g.clientWidth!==packW){ packW=g.clientWidth; ts.forEach(t=>{ t.style.gridColumn=''; t.style.gridRow=''; }); }
+  const cols=getComputedStyle(g).gridTemplateColumns.split(' ').filter(Boolean).length;
+  const items=ts.map(t=>{ const w=t.classList.contains('wide');
+    return {w:w?2:1, h:(w||t.classList.contains('tall'))?2:1}; });
+  const sig=cols+'|'+ts.map((t,i)=>t.dataset.app+items[i].w+items[i].h).join(',');
+  if(sig===packSig && ts.every(t=>t.style.gridRow || cols<3)) return;
+  packSig=sig;
+  if(cols<3){ ts.forEach(t=>{ t.style.gridColumn=''; t.style.gridRow=''; }); return; }
+  packLayout(items, cols).forEach((p,i)=>{
+    if(!p) return;
+    ts[i].style.gridColumn=(p.c+1)+' / span '+p.w;
+    ts[i].style.gridRow=(p.r+1)+' / span '+p.h;
+  });
+}
+let packRaf=0;
+addEventListener('resize', ()=>{ cancelAnimationFrame(packRaf); packRaf=requestAnimationFrame(packApps); });
 
 function appHidden(app){ return (prefs.hiddenapps||[]).indexOf(app)>=0; }
 function rowsApps(){
