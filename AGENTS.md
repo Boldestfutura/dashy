@@ -10,7 +10,9 @@ screenshot of a real machine.
 
 ## Shipping a change
 
-1. Bump `APP_VERSION` at the top of `app/server.py`. Use minor for features, patch for
+1. Bump `APP_VERSION` at the top of `app/server.py`, and add the version's entry at the top of
+   `RELEASES` (plain words the owner would use; the first line is quoted in the
+   "Dashy updated" notification). Use minor for features, patch for
    fixes. 1.0.0 shipped on 2026-10-27 after a full audit; a breaking change to prefs,
    the data files or the queue format would be 2.0.
 2. Test locally against real data (see below), in light and dark, at desktop and phone

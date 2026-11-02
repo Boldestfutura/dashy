@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "2.4.1"
+APP_VERSION = "2.5.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -2745,8 +2745,9 @@ def _push_updates(d):
             continue
         nm = "Dashy" if app == "_self" else names.get(app) or app
         if v["state"] == "done":
-            out.append(("update:" + app, nm + " updated",
-                        "Now on " + APP_VERSION if app == "_self" else _hostname()))
+            out.append(("update:" + app, nm + " updated", (
+                "Now on %s. %s" % (APP_VERSION, (release_notes(APP_VERSION) or [""])[0])).strip()
+                if app == "_self" else _hostname()))
         else:
             out.append(("update:" + app, nm + " update failed", str(v.get("msg") or _hostname())[:120]))
     return out
@@ -3290,13 +3291,12 @@ PAGE = """<!doctype html>
   .sw2[aria-checked="true"] i{transform:translateX(18px);background:#fff}
   .acust .lsz{margin:0;flex:none;width:112px}
   .apptile.needkey .ap{color:var(--accent);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .wn{padding:4px 0 8px}
-  .wn p{margin:0 16px 12px;color:var(--muted);font-size:14px;line-height:1.5}
-  .wn .abox p{margin:2px 4px 10px;font-size:13px}
-  .wn .wnok{margin:16px 16px 0}
+  .rn{padding:4px 0 8px}
   .vl-r .ubtn{padding:6px 12px;font-size:13px;min-height:0;flex:none}
-  .wn .wnok{display:flex}
-  .wn .wnok .ubtn{flex:1}
+  .rn-l{margin:2px 0 4px;padding:0 4px 0 20px;display:grid;gap:6px;font-size:14px;line-height:1.45;color:var(--ink)}
+  .rn-l li::marker{color:var(--muted)}
+  .rn .ah .rn-cur{margin-left:8px;margin-right:auto;padding:2px 8px;border-radius:999px;background:var(--faint);color:var(--accent);
+          font-style:normal;font-size:11px;font-weight:700;letter-spacing:0;text-transform:none;vertical-align:1px}
   .kstat{font-size:12.5px;color:var(--muted)}
   .kstat:empty{display:none}
   .kstat[data-level="ok"]::before{content:"\\2713  ";color:var(--ok);font-weight:700}
@@ -3990,7 +3990,7 @@ PAGE = """<!doctype html>
                 <span id="mi-selftxt">Check for updates</span><span class="rt" id="mi-selfver"></span></button></div>
             <div class="setrow"><span class="st"><b>Install automatically</b><span>New versions install within a few minutes of release, with a snapshot first. You get a notification before and after.</span></span>
               <button class="sw2" id="m-auto" type="button" role="switch" aria-checked="false" aria-label="Install Dashy updates automatically"><i></i></button></div>
-            <div class="setrow"><span class="st"><b>What’s new</b><span>The 2.0 tour of live tiles, and which apps still need a key.</span></span>
+            <div class="setrow"><span class="st"><b>Release notes</b><span>What changed in each update.</span></span>
               <button class="sbtn" id="mi-wn" type="button">Show</button></div>
             <div class="setrow"><span class="st"><b>Welcome screen</b><span>The first-run tour: what Dashy does, theme, Tailscale and HexOS.</span></span>
               <button class="sbtn" id="mi-setup" type="button">Show</button></div>
@@ -4300,7 +4300,7 @@ function savePrefs(){
   pushPrefs();
 }
 
-let setupShown=false, wnTimer=null;
+let setupShown=false;
 let prefsRev=-1;          // last revision this device has seen or written
 let pushTimer=null, pushing=false;
 
@@ -5278,7 +5278,6 @@ function paint(d){
   // settings may have been changed on another device; adopt before drawing
   const relayout=adoptPrefs(d.prefs);
   if(!setupShown && setupNeeded()){ setupShown=true; openSetup(false); }
-  if(!wnTimer) wnTimer=setTimeout(maybeWhatsNew, 1500);
   // Adopt the new payload BEFORE asking whether the layout changed:
   // layoutSig() reads `data`, so testing it first compared the signature of
   // the previous poll and every new section arrived one tick late.
@@ -7098,53 +7097,21 @@ function uptimeChart(){
     vBox('Boots', '<div class="vpanel">'+rows+'</div>', 'newest first');
 }
 
-// Shown once per device after the move to 2.0: what live tiles are, which apps
-// on this NAS have one, and which still need a key (each with a button that
-// opens that app's Customize tab).
-const WN_KEY='dashy.seen', WN_VER='2';
-const BESPOKE_WHAT={plex:'What is playing, with the artwork', pihole:'Queries and blocks over 24 hours',
-  scrutiny:'Drive temperatures', ollama:'The model loaded and when it unloads', tally:'This month and all time'};
-function whatsNew(){
-  const G=data.glance||{}, L=data.live||{}, rows=[], need=[];
-  (data.services||[]).forEach(s=>{
-    const g=G[s.app];
-    let what=g?g.what:'';
-    if(!g){
-      const k=Object.keys(BESPOKE_WHAT).find(k=>(L[k]&&L[k].app===s.app) || (k==='scrutiny'&&/scrutiny/.test(s.app)));
-      if(!k) return;
-      what=BESPOKE_WHAT[k];
-    }
-    const row=v=>'<div class="vl-r"><span class="vl-n">'+esc(s.name)+'</span>'+
-      '<span class="vl-v sm">'+v+'</span><span class="vl-s">'+esc(what)+'</span></div>';
-    const bad = g && !needsKey(g) && (g.bespoke
-      ? Object.keys(L).some(k=>L[k] && L[k].app===s.app && L[k].error)
-      : !!(g.v && g.v.error==='key'));
-    if(g && (needsKey(g) || bad))
-      need.push(row('<button class="ubtn yes" type="button" data-wnapp="'+esc(s.app)+'">'+
-                (bad?'Fix key':g.fields.length>1?'Sign in':'Add key')+'</button>'));
-    else rows.push(row('\u2713'));
-  });
-  return ['Live tiles', '<div class="wn">'+
-    '<p>App tiles can now show what each app is doing: what’s playing, downloads in progress, '+
-    'library sizes. Dashy recognises the apps it knows by itself, whatever they’re called.</p>'+
-    (need.length?vBox('Needs a key',
-      '<p>These apps only share their data with a key or sign-in. Tap one to open its Customize '+
-      'tab; the hint there says where to find it in the app. It is kept on the NAS and never shown again.</p>'+
-      '<div class="vpanel">'+need.join('')+'</div>'):'')+
-    (rows.length?vBox('Already live','<div class="vpanel">'+rows.join('')+'</div>'):'')+
-    '<p>Open any live tile and choose Customize to make it 1x (one column) or 2x (two columns, like Plex), '+
-    'or to switch it back to a plain launcher.</p>'+
-    '<div class="wnok"><button class="ubtn yes" id="wn-ok" type="button">Got it</button></div></div>', 'New in Dashy 2.0'];
+// Release notes, newest first, from RELEASES in the server (injected at serve time).
+const RELEASES=RELEASES_JSON;
+function relDate(d){
+  const t=new Date(d+'T12:00:00');
+  return isNaN(t) ? d : t.toLocaleDateString(undefined,{day:'numeric',month:'short',year:'numeric'});
 }
-function maybeWhatsNew(){
-  let seen=null;
-  try{ seen=localStorage.getItem(WN_KEY); }catch(e){ return; }    // no storage: never nag on every load
-  if(seen===WN_VER || openKey || !data || setupNeeded()) return;
-  try{ localStorage.setItem(WN_KEY, WN_VER); }catch(e){}
-  openPop('whatsnew');
+function releaseNotes(){
+  const cur=data&&data.version;
+  return ['Release notes', '<div class="rn">'+RELEASES.map(r=>
+    vBox('Version '+esc(r.v)+(r.v===cur?'<em class="rn-cur">Installed</em>':''),
+         '<ul class="rn-l">'+r.n.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>', esc(relDate(r.d)))).join('')+
+    '</div>', cur ? 'Dashy '+cur : ''];
 }
 const POPS={
-  whatsnew:whatsNew,
+  whatsnew:releaseNotes,
   system:()=>['Health',               rowsSystem()],
   cpu:   ()=>['CPU',                  cpuSheet()],
   mem:   ()=>['Memory',               memSheet()],
@@ -7461,12 +7428,6 @@ document.addEventListener('click',ev=>{
             openPop('app-'+tile.dataset.uid, need?'custom':'live');
             if(need) setTimeout(()=>{ const k=$('akeys'); if(k) k.scrollIntoView({block:'center',behavior:'smooth'}); },300);
             return; }
-  const wn=ev.target.closest('[data-wnapp]');
-  if(wn){ const s=((data&&data.services)||[]).find(x=>x.app===wn.dataset.wnapp);
-          if(s){ openPop('app-'+s.id,'custom');
-                 setTimeout(()=>{ const k=$('akeys'); if(k) k.scrollIntoView({block:'center',behavior:'smooth'}); },300); }
-          return; }
-  if(ev.target.id==='wn-ok'){ closePop(); return; }
   const tb=ev.target.closest('[data-atab]');
   if(tb){ if(appTab!==tb.dataset.atab){ appTab=tb.dataset.atab; $('sh-b')._html=null; renderPop(false);
                                          $('sh-b').scrollTop=0; } return; }
@@ -7774,6 +7735,144 @@ ICONS = {
     "/icon-512-maskable.png": "icon-512-maskable.png",
 }
 
+# What changed in each version, newest first, in the words the owner would use.
+# Settings > General > Release notes shows it, and the "Dashy updated"
+# notification quotes the first line. Every version bump adds an entry here.
+RELEASES = [
+    ("2.5.0", "2026-11-02", [
+        "What's new is now Release notes: what changed in every version, newest first.",
+        "The Dashy updated notification says what's new in that version.",
+    ]),
+    ("2.4.1", "2026-11-02", [
+        "On iPhone, the status bar above Settings is solid instead of showing the page blurred behind it.",
+    ]),
+    ("2.4.0", "2026-11-02", [
+        "Install automatically: new versions of Dashy install themselves within a few minutes of release, "
+        "with a notification before and after. Turn it on in Settings, General.",
+        "Crosses, ticks and badges sit exactly in the middle of their circles.",
+    ]),
+    ("2.3.1", "2026-11-02", [
+        "The gap above the Settings tabs no longer shows the page scrolling past.",
+    ]),
+    ("2.3.0", "2026-11-02", [
+        "Notifications on your phone, even with Dashy closed: an app crashes, a drive fails or runs hot, "
+        "a pool fills up, or an update finishes. Turn them on in Settings, General.",
+    ]),
+    ("2.2.3", "2026-11-02", [
+        "The uptime, VM and update sheets match the new style.",
+        "Uptime no longer counts the time before the first recorded boot as downtime.",
+    ]),
+    ("2.2.2", "2026-11-02", [
+        "Health and Network sheets redesigned.",
+        "Update sheets show the right app's icon.",
+    ]),
+    ("2.2.1", "2026-11-02", [
+        "The VM console preview works on newer TrueNAS.",
+    ]),
+    ("2.2.0", "2026-11-02", [
+        "Simpler vitals sheets. Storage only turns a colour from 80% full.",
+        "VM cards show a preview of the console.",
+        "The Scrutiny tile flips between temperatures and drive health.",
+        "The Audiobookshelf tile goes away when listening stops.",
+    ]),
+    ("2.1.1", "2026-11-02", [
+        "On wide screens, app tiles pack without gaps.",
+    ]),
+    ("2.1.0", "2026-11-02", [
+        "Tailscale live tile: devices online and keys about to expire.",
+        "A new welcome screen.",
+    ]),
+    ("2.0.0", "2026-11-02", [
+        "Live tiles for any app. Add a key in an app's Customize tab, and pick 1x or 2x.",
+        "Settings rebuilt in four tabs, with a switch to hide each app.",
+        "A dragged card follows your finger.",
+    ]),
+    ("1.6.1", "2026-11-02", [
+        "An app's sheet shows the same live view as its tile.",
+    ]),
+    ("1.6.0", "2026-11-02", [
+        "Tap an app for its sheet: that app's own CPU and memory, and a Customize tab.",
+    ]),
+    ("1.5.5", "2026-11-01", [
+        "The SparkyFitness tile rides out one failed check instead of showing an error.",
+    ]),
+    ("1.5.4", "2026-11-01", [
+        "Your server's name replaces the Dashy wordmark in the header.",
+    ]),
+    ("1.5.3", "2026-11-01", [
+        "The update line under the name is quieter.",
+    ]),
+    ("1.5.2", "2026-11-01", [
+        "Updates show as a line under the logo, such as “Updating Plex…”, instead of a card.",
+    ]),
+    ("1.5.1", "2026-11-01", [
+        "The SparkyFitness tile is tall: steps, calories, weight and water.",
+    ]),
+    ("1.5.0", "2026-11-01", [
+        "The SparkyFitness tile shows your day, not only a running fast.",
+    ]),
+    ("1.4.5", "2026-11-01", [
+        "Addresses you typed in yourself are marked Manual in the app sheet.",
+    ]),
+    ("1.4.4", "2026-11-01", [
+        "App tiles lose the pin mark.",
+    ]),
+    ("1.4.3", "2026-11-01", [
+        "The Audiobookshelf tile shows only while something is playing, with its cover.",
+        "The Tally tile is half width.",
+    ]),
+    ("1.4.2", "2026-11-01", [
+        "The Music Assistant tile is tall.",
+    ]),
+    ("1.4.1", "2026-11-01", [
+        "Every app gets a tile. An app with an update gets an amber outline and an Update button.",
+        "Live tiles for Ollama, Immich, Audiobookshelf, Tally, SparkyFitness and Music Assistant.",
+    ]),
+    ("1.4.0", "2026-11-01", [
+        "App status comes from TrueNAS, so a stopped app is no longer called down.",
+        "Drag to reorder tiles.",
+    ]),
+    ("1.3.1", "2026-11-01", [
+        "Live Pi-hole tile.",
+    ]),
+    ("1.3.0", "2026-11-01", [
+        "Live Plex tile: what's playing, with artwork and progress.",
+        "The Scrutiny tile shows drive temperatures.",
+    ]),
+    ("1.2.0", "2026-11-01", [
+        "A new font, rounder corners, and row-shaped app tiles, two per row on a phone.",
+    ]),
+    ("1.1.5", "2026-10-31", [
+        "Clears the iPhone status bar when opened from the home screen.",
+    ]),
+    ("1.1.4", "2026-10-31", [
+        "Hard drives turn yellow at 55°C and red at 60°C.",
+    ]),
+    ("1.1.3", "2026-10-28", [
+        "App tiles are all one size, versions read plainly, and VM cards show the OS logo.",
+    ]),
+    ("1.1.2", "2026-10-28", [
+        "Memory card: a trend line at 1x, a donut at 2x.",
+        "Arrange mode names each card.",
+    ]),
+    ("1.1.1", "2026-10-28", [
+        "A thicker memory donut.",
+    ]),
+    ("1.1.0", "2026-10-28", [
+        "Updates show every step, from queued to done.",
+        "Works on any TrueNAS box; nothing is tied to one machine.",
+    ]),
+    ("1.0.0", "2026-10-27", [
+        "First stable release, after a full audit: one set of health rules everywhere, "
+        "a clear warning when readings stop, and safer updates.",
+    ]),
+]
+
+
+def release_notes(v):
+    return next((n for rv, _, n in RELEASES if rv == v), [])
+
+
 MANIFEST = {
     "name": APP_NAME,
     "short_name": APP_NAME,
@@ -7845,7 +7944,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html"):
-            self._send(200, PAGE.replace("ICON_VERSION", APP_VERSION), "text/html; charset=utf-8")
+            self._send(200, PAGE.replace("ICON_VERSION", APP_VERSION).replace(
+                "RELEASES_JSON", json.dumps([{"v": v, "d": d, "n": n} for v, d, n in RELEASES])
+                .replace("</", "<\\/")),
+                "text/html; charset=utf-8")
         elif path.startswith("/appicon/"):
             self._send_appicon(path[len("/appicon/"):])
         elif path in ICONS:
@@ -7974,6 +8076,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    if RELEASES[0][0] != APP_VERSION:
+        print("warning: no release notes for %s" % APP_VERSION, flush=True)
     threading.Thread(target=vitals_loop, daemon=True).start()
     threading.Thread(target=services_loop, daemon=True).start()
     threading.Thread(target=_glance_loop, daemon=True).start()
