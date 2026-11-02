@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "2.2.2"
+APP_VERSION = "2.2.3"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -506,12 +506,13 @@ def uptime_report(sessions, days=90):
         return {"pct": None, "down": None, "restarts": 0, "last_boot": None}
     now = time.time()
     window = now - days * 86400
+    # before the first recorded boot is unknown, not downtime
+    first = min(s["start"] for s in sessions)
+    restarts = sum(1 for s in sessions if s["start"] >= window and s["start"] > first)
+    window = max(window, first)
     span = now - window
     up = 0.0
-    restarts = 0
     for s in sessions:
-        if s["start"] >= window:
-            restarts += 1
         a = max(s["start"], window)
         b = s["end"] if s["end"] else now
         if b > a:
@@ -2904,9 +2905,9 @@ PAGE = """<!doctype html>
   .apptile.needkey .ap{color:var(--accent);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .wn{padding:4px 0 8px}
   .wn p{margin:0 16px 12px;color:var(--muted);font-size:14px;line-height:1.5}
-  .wn .ah{margin:18px 16px 6px;font-size:12px;font-weight:650;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  .wn .abox p{margin:2px 4px 10px;font-size:13px}
   .wn .wnok{margin:16px 16px 0}
-  .wn .row .val .ubtn{padding:7px 12px;font-size:13px;min-height:0;flex:none}
+  .vl-r .ubtn{padding:6px 12px;font-size:13px;min-height:0;flex:none}
   .wn .wnok{display:flex}
   .wn .wnok .ubtn{flex:1}
   .kstat{font-size:12.5px;color:var(--muted)}
@@ -3108,26 +3109,9 @@ PAGE = """<!doctype html>
   button.srow{width:100%;background:none;font:inherit;color:inherit;text-align:left;
               cursor:pointer;border-left:none;border-right:none;border-top:none}
   button.srow .t1::after{content:" \u203a";color:var(--muted);font-weight:700}
-  .row{display:flex;align-items:center;gap:10px;padding:10px 16px;
-       border-bottom:1px solid var(--faint)}
-  .row:last-child{border-bottom:none}
-  .row .l,.applink .l{min-width:0;flex:1 1 auto}
   .t1{display:block;font-weight:650;font-size:13.5px}
   .t2{display:block;font-size:11.5px;color:var(--muted);margin-top:2px;
       overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .t2.wrap{white-space:normal;overflow:visible;line-height:1.45}
-  .row .val{font-size:18px;font-weight:700;font-variant-numeric:tabular-nums;
-            flex:0 0 auto;min-width:52px;text-align:right}
-  .row .val[data-level="warn"]{color:var(--warn)}
-  .row .val[data-level="bad"]{color:var(--bad)}
-  .row .tag{font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;font-weight:700;
-            color:var(--muted);background:var(--faint);padding:3px 7px;border-radius:999px;
-            flex:0 0 auto;min-width:54px;text-align:center}
-  .row .bar{flex:1 1 auto;height:6px;border-radius:999px;background:var(--faint);
-            overflow:hidden;min-width:60px}
-  .row .bar i{display:block;height:100%;background:var(--accent)}
-  .row .bar i[data-level="warn"]{background:var(--warn)}
-  .row .bar i[data-level="bad"]{background:var(--bad)}
 
   .ubtn{flex:1;appearance:none;border:1px solid var(--brd);border-radius:var(--r-full);padding:13px 0;
         font:inherit;font-weight:650;font-size:14px;cursor:pointer}
@@ -3413,6 +3397,9 @@ PAGE = """<!doctype html>
   .vl-s{grid-column:1/-1;font-size:12px;color:var(--muted);line-height:1.4}
   .vh-n.txt{font-size:26px;letter-spacing:-.01em}
   .vpanel .srow{padding:10px 0}
+  .vempty{margin:6px 16px 18px;color:var(--muted);font-size:14px;line-height:1.45}
+  .abox .tl{padding:2px 2px 0}
+  .abox .legend{padding:10px 2px 2px}
   button.acell{border:0;font:inherit;color:inherit;text-align:left;cursor:pointer}
   button.acell .al::after{content:" ›";font-weight:700}
   .vl-b i[data-level="warn"],.vthreads i[data-level="warn"]{background:var(--warn)}
@@ -3549,8 +3536,8 @@ PAGE = """<!doctype html>
 
 
   .tl{padding:12px 16px 4px}
-  .tl .seg{display:flex;height:22px;border-radius:7px;overflow:hidden;background:var(--faint)}
-  .tl .seg i{display:block;height:100%}
+  .tl .tseg{display:flex;height:22px;border-radius:7px;overflow:hidden;background:var(--faint)}
+  .tl .tseg i{display:block;height:100%}
   .tl .cap{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:6px}
 
           font-weight:600;color:var(--muted);background:none;border:none;cursor:pointer;
@@ -4648,37 +4635,29 @@ function title1(s){ s=String(s||'').toLowerCase(); return s.charAt(0).toUpperCas
 // stray tap on the dashboard.
 function vmSheet(id){
   const v=((data&&data.vms)||[]).find(x=>String(x.id)===String(id));
-  if(!v) return ['Virtual machine','<div class="row"><span class="t2">Gone.</span></div>'];
+  if(!v) return ['Virtual machine',vEmpty('Gone.')];
   const run=(v.state||'').toUpperCase()==='RUNNING';
   const st=(data&&data.updates&&data.updates._vm)||null;
   const busy = st && st.state==='running' && (Date.now()/1000 - (st.t||0)) < 300;
 
-  const rows=
-    srow(run?'ok':'warn', run?'Running':title1(v.state||'Stopped'),
-         (v.autostart?'Starts with the server':'Does not start automatically'))+
-    '<div class="row"><span class="l"><span class="t1">Allocated</span>'+
-      '<span class="t2">'+(v.cpus||'?')+' cpu'+(v.cpus===1?'':'s')+
-      (v.memory?' \u00b7 '+ram(v.memory*1024*1024)+' memory':'')+'</span></span></div>'+
-    (v.usb&&v.usb.length
-      ? '<div class="row"><span class="l"><span class="t1">USB passed through</span>'+
-        '<span class="t2">'+v.usb.map(esc).join(', ')+'</span></span></div>' : '')+
-    (v.description
-      ? '<div class="row"><span class="t2 wrap">'+esc(v.description)+'</span></div>' : '')+
-    (st && (Date.now()/1000-(st.t||0) < 600)
-      ? '<div class="row"><span class="t2">'+esc(st.msg||'')+'</span></div>' : '');
+  const state=run?'Running':title1(v.state||'Stopped');
+  const box=abox('Allocated',
+    cell('Processors', v.cpus?String(v.cpus):null)+
+    cell('Memory', v.memory?ram(v.memory*1024*1024):null)+
+    cell('At boot', v.autostart?'Starts with the server':'Starts only by hand', null, 'full')+
+    (v.usb&&v.usb.length ? cell('USB passed through', v.usb.map(esc).join(', '), null, 'full') : ''));
+  const msg = st && (Date.now()/1000-(st.t||0) < 600) ? '<p class="appdesc">'+esc(st.msg||'')+'</p>' : '';
 
   const btn=(act,label,cls)=>
     '<button class="ubtn '+cls+'" data-vm="'+v.id+'" data-vmact="'+act+'"'+
     (busy?' disabled':'')+'>'+label+'</button>';
-  const controls='<div class="m-row" style="padding:12px 16px 14px;display:flex;gap:10px">'+
-    // Neither action on a running VM gets the emphasised style: highlighting
-    // one would nudge a choice that should be deliberate. Start is safe, so
-    // it keeps it.
-    (run ? btn('stop','Stop','no')+btn('restart','Restart','no')
-         : btn('start','Start','yes'))+'</div>'+
-    '<div class="row"><span class="t2 wrap">The container cannot reach the '+
-    'hypervisor, so this is queued for the root job and runs within a '+
-    'minute.</span></div>';
+  // Neither action on a running VM gets the emphasised style: highlighting
+  // one would nudge a choice that should be deliberate. Start is safe, so
+  // it keeps it.
+  const controls='<p class="appdesc">The container cannot reach the hypervisor, so power '+
+    'actions are queued for the root job and run within a minute.</p>'+
+    '<div class="appacts">'+(run ? btn('stop','Stop','no')+btn('restart','Restart','no')
+                                 : btn('start','Start','yes'))+'</div>';
 
   // The frame's timestamp is left out of the markup: a new frame every 10s
   // would rebuild the sheet each time. paintVmShot swaps the image in place.
@@ -4686,7 +4665,8 @@ function vmSheet(id){
     ? '<div class="vmshot"><img alt="Console of '+esc(vmName(v))+'" data-vmshot="'+v.id+'"></div>'
     : '';
 
-  return [vmName(v), preview+rows+controls];
+  return [vmName(v), '<div class="appsheet">'+preview+
+    (v.description?'<div class="appdesc">'+esc(v.description)+'</div>':'')+box+msg+controls+'</div>', state];
 }
 
 function paintVmShot(){
@@ -5472,7 +5452,6 @@ function setLinks(mode){
   }
   savePrefs();
   paintServeOffer();
-  if(openKey==='apps') renderPop(false);
   build();
   if(data) paintLive();
   // choosing the tailnet is also a request to make those addresses exist
@@ -5935,7 +5914,7 @@ addEventListener('resize', ()=>{ cancelAnimationFrame(packRaf); packRaf=requestA
 function appHidden(app){ return (prefs.hiddenapps||[]).indexOf(app)>=0; }
 function rowsApps(){
   const all=data.services||[], list=all.filter(s=>!appHidden(s.app)), nh=all.length-list.length;
-  if(!all.length) return '<div class="row"><span class="t2">Nothing published yet.</span></div>';
+  if(!all.length) return vEmpty('Nothing published yet.');
   const more=nh?'<div class="apphid"><button type="button" id="s-showhid">'+nh+' hidden '+(nh===1?'app':'apps')+'</button></div>':'';
   return '<div class="appgrid">'+list.map(s=>
     '<a class="apptile"'+
@@ -6303,6 +6282,7 @@ function appCustom(s){
    accent; the status colours appear only where something is fine, warm or
    wrong, so amber always means "look at this".                            */
 const LV_COL={ok:'var(--ok)', warn:'var(--warn)', bad:'var(--bad)'};
+function vEmpty(t){ return '<p class="vempty">'+t+'</p>'; }
 function vHero(num, unit, sub){
   return '<div class="vhero"><div class="vh-top"><span class="vh-n">'+num+
       (unit?'<small>'+unit+'</small>':'')+'</span></div>'+
@@ -6424,7 +6404,7 @@ function cpuSheet(){
 
 function memSheet(){
   const m=data.mem;
-  if(!m) return '<div class="row"><span class="t2">No memory data.</span></div>';
+  if(!m) return vEmpty('No memory data.');
   const apps=(m.apps!==undefined)?m.apps:m.used, arc=m.arc||0;
   const free=Math.max(0, m.total-apps-arc), ap=apps/m.total*100;
   const parts=ram(apps).split(' ');
@@ -6453,7 +6433,7 @@ function memSheet(){
 function ctempLevel(t){ return t>=85?'bad':t>=75?'warn':'ok'; }
 function ctempSheet(){
   const t=data.cpu_temp, cores=data.core_temps||[];
-  if(typeof t!=='number') return '<div class="row"><span class="t2">This CPU reports no temperature.</span></div>';
+  if(typeof t!=='number') return vEmpty('This CPU reports no temperature.');
   const hot=cores.length?Math.max.apply(null, cores.map(c=>c.temp)):null;
   let h=vHero(t.toFixed(0), '°C',
     (hot!==null?'Hottest core '+hot.toFixed(0)+'°. ':'')+'Warm from 75°, too hot from 85°.');
@@ -6484,7 +6464,7 @@ function driveRow(d){
 }
 function dtempSheet(){
   const ds=data.drives||[];
-  if(!ds.length) return '<div class="row"><span class="t2">No drive data.</span></div>';
+  if(!ds.length) return vEmpty('No drive data.');
   const temps=ds.map(d=>d.temp).filter(v=>typeof v==='number');
   const lo=Math.min.apply(null, temps), hi=Math.max.apply(null, temps);
   let h=vHero(temps.length?(lo===hi?lo:lo+'–'+hi):'–', '°C',
@@ -6517,7 +6497,7 @@ function poolBox(p){
 }
 function storeSheet(){
   const pools=(data.pools||[]).slice().sort((a,b)=>(poolKey(b.name)===storeFocus)-(poolKey(a.name)===storeFocus));
-  let h=pools.map(poolBox).join('') || '<div class="row"><span class="t2">No pool data.</span></div>';
+  let h=pools.map(poolBox).join('') || vEmpty('No pool data.');
   const busy=(data.io||[]).filter(x=>(x.read||0)+(x.write||0)>0);
   // two-second samples of disk traffic are all spikes; a short running
   // average shows the shape without hiding a real burst
@@ -6546,7 +6526,7 @@ function linkWord(mb){ return mb>=1000 ? (+(mb/1000).toFixed(1))+' Gb/s' : mb+' 
 function netSheet(){
   // the interface that has carried the most is the real uplink
   const l=(data.net||[]).slice().sort((a,b)=>(b.rx+b.tx)-(a.rx+a.tx));
-  if(!l.length) return '<div class="row"><span class="t2">No interface data.</span></div>';
+  if(!l.length) return vEmpty('No interface data.');
   const p=l[0];
   // two-second samples are all spikes, as with disk activity
   const smooth=name=>{ const raw=(data.net_hist||{})[name]||[];
@@ -6574,9 +6554,9 @@ function netSheet(){
 
 function uptimeChart(){
   const b=(data.boots||[]).slice().sort((a,c)=>a.start-c.start);
-  if(!b.length) return '<div class="row"><span class="t2">No boot history yet.</span></div>';
+  if(!b.length) return vEmpty('No boot history yet.');
   const now=Date.now()/1000;
-  const from=Math.min(b[0].start, now-90*86400);
+  const from=Math.max(b[0].start, now-90*86400);
   const span=Math.max(1, now-from);
   let segs='', cursor=from;
   b.forEach(s=>{
@@ -6585,17 +6565,22 @@ function uptimeChart(){
     if(e>a)      segs+='<i style="width:'+((e-a)/span*100)+'%;background:var(--ok)"></i>';
     cursor=Math.max(cursor,e);
   });
+  const last=b[b.length-1], av=data.availability;
+  const sinceBoot='Up '+durLong(now-last.start)+' since the last boot.';
+  const hero = av!==null && av!==undefined
+    ? vHero(av.toFixed(2), '%', (from>now-89*86400 ? 'Available since '+when(from)+', when the record starts. '
+                                                    : 'Available over the last 90 days. ')+sinceBoot)
+    : vHero(durLong(now-last.start), '', 'Since the last boot.');
   const rows=b.slice().reverse().map(s=>
-    '<div class="row"><span class="l"><span class="t1">booted '+when(s.start)+'</span>'+
-      '<span class="t2">'+(s.end?('until '+when(s.end)):'still running')+'</span></span>'+
-      '<span class="val">'+durLong((s.end||now)-s.start)+'</span></div>').join('');
-  return '<div class="tl"><div class="seg">'+segs+'</div>'+
+    '<div class="vl-r"><span class="vl-n">Booted '+when(s.start)+'</span>'+
+      '<span class="vl-v">'+durLong((s.end||now)-s.start)+'</span>'+
+      '<span class="vl-s">'+(s.end?'Until '+when(s.end):'Still running')+'</span></div>').join('');
+  return hero+
+    vBox('Since '+when(from), '<div class="tl"><div class="tseg">'+segs+'</div>'+
       '<div class="cap"><span>'+when(from)+'</span><span>now</span></div></div>'+
-    '<div class="legend"><span><u style="background:var(--ok)"></u>up</span>'+
-      '<span><u style="background:var(--bad)"></u>down</span>'+
-      ((data.availability!==null&&data.availability!==undefined)
-        ? '<span>'+data.availability.toFixed(2)+'% available over 90 days</span>' : '')+'</div>'+
-    rows;
+      '<div class="legend"><span><u style="background:var(--ok)"></u>Up</span>'+
+        '<span><u style="background:var(--bad)"></u>Down</span></div>')+
+    vBox('Boots', '<div class="vpanel">'+rows+'</div>', 'newest first');
 }
 
 // Shown once per device after the move to 2.0: what live tiles are, which apps
@@ -6614,25 +6599,24 @@ function whatsNew(){
       if(!k) return;
       what=BESPOKE_WHAT[k];
     }
-    const row='<div class="row"><span class="l"><span class="t1">'+esc(s.name)+'</span>'+
-      '<span class="t2">'+esc(what)+'</span></span><span class="val">';
+    const row=v=>'<div class="vl-r"><span class="vl-n">'+esc(s.name)+'</span>'+
+      '<span class="vl-v sm">'+v+'</span><span class="vl-s">'+esc(what)+'</span></div>';
     const bad = g && !needsKey(g) && (g.bespoke
       ? Object.keys(L).some(k=>L[k] && L[k].app===s.app && L[k].error)
       : !!(g.v && g.v.error==='key'));
     if(g && (needsKey(g) || bad))
-      need.push(row+'<button class="ubtn yes" type="button" data-wnapp="'+esc(s.app)+'">'+
-                (bad?'Fix key':g.fields.length>1?'Sign in':'Add key')+'</button></span></div>');
-    else rows.push(row+'\u2713</span></div>');
+      need.push(row('<button class="ubtn yes" type="button" data-wnapp="'+esc(s.app)+'">'+
+                (bad?'Fix key':g.fields.length>1?'Sign in':'Add key')+'</button>'));
+    else rows.push(row('\u2713'));
   });
   return ['Live tiles', '<div class="wn">'+
     '<p>App tiles can now show what each app is doing: what’s playing, downloads in progress, '+
     'library sizes. Dashy recognises the apps it knows by itself, whatever they’re called.</p>'+
-    (need.length?'<div class="ah">Needs a key</div>'+
+    (need.length?vBox('Needs a key',
       '<p>These apps only share their data with a key or sign-in. Tap one to open its Customize '+
       'tab; the hint there says where to find it in the app. It is kept on the NAS and never shown again.</p>'+
-      need.join(''):'')+
-    (rows.length?'<div class="ah">Already live</div>'+rows.join(''):'')+
-    '<div class="ah">Sizes</div>'+
+      '<div class="vpanel">'+need.join('')+'</div>'):'')+
+    (rows.length?vBox('Already live','<div class="vpanel">'+rows.join('')+'</div>'):'')+
     '<p>Open any live tile and choose Customize to make it 1x (one column) or 2x (two columns, like Plex), '+
     'or to switch it back to a plain launcher.</p>'+
     '<div class="wnok"><button class="ubtn yes" id="wn-ok" type="button">Got it</button></div></div>', 'New in Dashy 2.0'];
@@ -6653,7 +6637,6 @@ const POPS={
   dtemp: ()=>['Drive temperatures',   dtempSheet()],
   store: ()=>['Storage',              storeSheet()],
   net:   ()=>['Network',              netSheet()],
-  apps:  ()=>['Apps',                 rowsApps()],
   up:    ()=>['Uptime record',        uptimeChart()],
 };
 
@@ -6785,33 +6768,30 @@ async function askSelfUpdate(){
   $('sh-s').textContent='';
   const me=(data && data.system && data.system.app) || '';
   sheetIcon(((data && data.services)||[]).find(s=>me && s.app===me));
-  $('sh-b').innerHTML=
-    '<div class="row"><span class="l"><span class="t1">'+esc(u.current||'')+
-      ' \u2192 '+esc(u.latest||'')+'</span>'+
-      '<span class="t2">from '+esc(u.repo||'the repository')+'</span></span></div>'+
-    '<div class="row"><span class="t2 wrap">The new files are downloaded and '+
-      'checked before anything is replaced, and a ZFS snapshot is taken first. '+
-      'Dashy restarts, so the page will go quiet for a few seconds.</span></div>'+
-    '<div class="m-row" style="padding:12px 16px 14px;display:flex;gap:10px">'+
-      '<button class="ubtn no" id="u-no">Cancel</button>'+
-      '<button class="ubtn yes" id="su-yes">Update</button></div>';
+  $('sh-b').innerHTML='<div class="appsheet">'+
+    abox('Version', cell('Installed', u.current?esc(u.current):null)+cell('New', u.latest?esc(u.latest):null)+
+      cell('From', esc(u.repo||'the repository'), null, 'full'))+
+    '<p class="appdesc">The new files are downloaded and checked before anything is replaced, '+
+      'and a ZFS snapshot is taken first. Dashy restarts, so the page will go quiet for a few seconds.</p>'+
+    '<div class="appacts"><button class="ubtn no" id="u-no">Cancel</button>'+
+      '<button class="ubtn yes" id="su-yes">Update</button></div></div>';
   $('sh-b')._html=null;
   $('scrim').hidden=false;
 }
 
 async function askUpdate(app,name,ver){
-  const body=
-    '<div class="row"><span class="l"><span class="t1">'+esc(name)+'</span>'+
-      '<span class="t2">'+(ver?'currently '+esc(ver.replace(/^Version /,'on version ')):'version unknown')+'</span></span></div>'+
-    '<div class="row"><span class="t2 wrap">The app will restart while it upgrades, so it will be '+
-      'briefly unavailable. A ZFS snapshot of its data is taken first, so there is a rollback '+
-      'point. The upgrade starts within a minute.</span></div>'+
-    '<div class="m-row" style="padding:12px 16px 14px;display:flex;gap:10px">'+
-      '<button class="ubtn no" id="u-no">Cancel</button>'+
-      '<button class="ubtn yes" id="u-yes" data-app="'+esc(app)+'">Update '+esc(name)+'</button></div>';
+  const svc=((data && data.services)||[]).find(s=>s.app===app);
+  const newer=svc && typeof svc.update==='string' ? svc.update.trim() : '';
+  const now=String(ver||'').replace(/^Version /,'');
+  const body='<div class="appsheet">'+
+    abox(esc(name), cell('Installed', now?esc(now):null)+cell('Available', newer?esc(newer):'Newer release'))+
+    '<p class="appdesc">The app will restart while it upgrades, so it will be briefly unavailable. '+
+      'A ZFS snapshot of its data is taken first, so there is a rollback point. The upgrade starts within a minute.</p>'+
+    '<div class="appacts"><button class="ubtn no" id="u-no">Cancel</button>'+
+      '<button class="ubtn yes" id="u-yes" data-app="'+esc(app)+'">Update '+esc(name)+'</button></div></div>';
   $('sh-t').textContent='Update available';
   $('sh-s').textContent='';
-  sheetIcon(((data && data.services)||[]).find(s=>s.app===app));
+  sheetIcon(svc);
   $('sh-b').innerHTML=body;
   $('scrim').hidden=false; openKey=null;
 }
