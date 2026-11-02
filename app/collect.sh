@@ -723,6 +723,113 @@ with open(tmp, "w") as f:
 os.replace(tmp, D + "/vms.json")
 PYVM
 
+# --- VM console previews. libvirt answers root only, so the screenshots are
+# --- taken here: every 10s through the minute, in the background so the power
+# --- sampling below is not held up. Its own lock stops two minutes overlapping;
+# --- fd 9 is closed so it never holds the collector's.
+(
+  flock -n 8 || exit 0
+  python3 - "$D" <<'PYSHOT'
+import json, os, struct, subprocess, sys, time, zlib
+
+D = sys.argv[1]
+URI = "qemu+unix:///system?socket=/run/truenas_libvirt/libvirt-sock"
+MAXW = 960
+
+
+def virsh(*a):
+    return subprocess.run(["virsh", "-c", URI] + list(a), capture_output=True, timeout=20)
+
+
+def ppm_png(raw):
+    # virsh writes binary PPM (P6). Header: magic, width, height, maxval, each
+    # separated by whitespace, comments allowed.
+    tok, i = [], 0
+    while len(tok) < 4:
+        while raw[i:i + 1].isspace():
+            i += 1
+        if raw[i:i + 1] == b"#":
+            i = raw.index(b"\n", i) + 1
+            continue
+        j = i
+        while not raw[j:j + 1].isspace():
+            j += 1
+        tok.append(raw[i:j])
+        i = j
+    if tok[0] != b"P6" or tok[3] != b"255":
+        return None
+    w, h = int(tok[1]), int(tok[2])
+    px = raw[i + 1:i + 1 + w * h * 3]
+    step = -(-w // MAXW)            # whole-number downscale, nearest pixel
+    ow, oh = len(range(0, w, step)), len(range(0, h, step))
+    rows = []
+    for y in range(0, h, step):
+        r = px[y * w * 3:(y + 1) * w * 3]
+        if step > 1:
+            r = b"".join(r[x:x + 3] for x in range(0, w * 3, step * 3))
+        rows.append(b"\0" + r)
+
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", ow, oh, 8, 2, 0, 0, 0)) +
+            chunk(b"IDAT", zlib.compress(b"".join(rows), 6)) + chunk(b"IEND", b""))
+
+
+def shoot():
+    try:
+        vms = json.load(open(D + "/vms.json"))
+    except Exception:
+        vms = []
+    try:
+        doms = virsh("list", "--name").stdout.decode().split()
+    except Exception:
+        doms = []
+    keep = set()
+    for v in vms:
+        if (v.get("state") or "").upper() != "RUNNING":
+            continue
+        # TrueNAS names the libvirt domain "<id>_<name>"; match the id, not
+        # the name, which TrueNAS may have mangled
+        dom = next((d for d in doms if d.split("_", 1)[0] == str(v.get("id"))), None)
+        if not dom:
+            continue
+        ppm = D + "/.vmshot.ppm"
+        try:
+            if virsh("screenshot", dom, ppm).returncode != 0:
+                continue
+            png = ppm_png(open(ppm, "rb").read())
+        except Exception:
+            png = None
+        finally:
+            try:
+                os.unlink(ppm)
+            except OSError:
+                pass
+        if not png:
+            continue
+        out = "%s/vmshot-%s.png" % (D, v.get("id"))
+        with open(out + ".tmp", "wb") as f:
+            f.write(png)
+        os.chmod(out + ".tmp", 0o644)
+        os.replace(out + ".tmp", out)
+        keep.add(os.path.basename(out))
+    # a stopped VM's last frame is not a preview of anything
+    for n in os.listdir(D):
+        if n.startswith("vmshot-") and n.endswith(".png") and n not in keep:
+            try:
+                os.unlink(os.path.join(D, n))
+            except OSError:
+                pass
+
+
+for k in range(5):
+    t = time.time()
+    shoot()
+    if k < 4:
+        time.sleep(max(0, 10 - (time.time() - t)))
+PYSHOT
+) 8>"$D/.vmshot.lock" 9>&- &
+
 # --- CPU package power. RAPL is root-only, so sample it here and leave a trail
 # --- the container can read. 25 samples at 2s covers most of each minute.
 E=/sys/class/powercap/intel-rapl:0/energy_uj

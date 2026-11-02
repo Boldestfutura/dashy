@@ -47,7 +47,8 @@ add and remove things.
   five per app are kept. Dashy updates itself the same way, from the image CI
   publishes, and only offers a version once that image exists.
 - **Virtual machines.** Every VM on the box, whether it is running, and what
-  it has been given. Tapping one offers start, stop and restart (stop and
+  it has been given. A running VM's sheet opens with a preview of its console,
+  refreshed every 10 seconds. Tapping one offers start, stop and restart (stop and
   restart ask for a second tap); the container
   cannot reach the hypervisor, so the request goes to the same root worker
   that performs app upgrades and runs within a minute.

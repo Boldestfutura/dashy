@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.2.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -600,7 +600,19 @@ def app_stats():
 def vms_now():
     """Virtual machines, written by the root cron job - the container has no
     midclt of its own."""
-    return _read_json("vms.json", [])
+    vms = _read_json("vms.json", [])
+    now = time.time()
+    for v in vms:
+        # the same job screenshots each running console every 10s; the mtime
+        # tells the page when there is a new frame, and a stale one (the job
+        # stopped, or libvirt refused) is not offered as a live preview
+        try:
+            t = os.path.getmtime(os.path.join(DATA, "vmshot-%s.png" % int(v.get("id"))))
+        except (OSError, TypeError, ValueError):
+            continue
+        if now - t < 90:
+            v["shot"] = int(t)
+    return vms
 
 
 def request_vm(vm_id, action):
@@ -882,7 +894,12 @@ def abs_live():
     on = _app_json(svc, "/api/users/online", 15, h)
     if not isinstance(on, dict):
         return None
-    sess = on.get("openSessions") or []
+    # A paused or abandoned session stays open for hours, so "open" is not
+    # "playing". A player syncs its position every 15 s or so while it plays;
+    # three minutes without a sync means nobody is listening.
+    now_ms = time.time() * 1000
+    sess = [x for x in on.get("openSessions") or []
+            if isinstance(x, dict) and now_ms - float(x.get("updatedAt") or 0) < 180_000]
     if sess:
         x = max(sess, key=lambda x: x.get("updatedAt") or 0)
         item = str(x.get("libraryItemId") or "")
@@ -3094,8 +3111,6 @@ PAGE = """<!doctype html>
   .allok{padding:22px 16px 18px;text-align:center}
   .allok p{margin:0;font-weight:650;font-size:14px}
   .allok .t2{margin-top:5px;white-space:normal;font-weight:500}
-  .pnote{margin:-2px 16px 11px;font-size:11.5px;color:var(--muted);line-height:1.45}
-  .pnote.bad{color:var(--bad);font-weight:600}
   .row{display:flex;align-items:center;gap:10px;padding:10px 16px;
        border-bottom:1px solid var(--faint)}
   .row:last-child{border-bottom:none}
@@ -3117,11 +3132,6 @@ PAGE = """<!doctype html>
   .row .bar i[data-level="warn"]{background:var(--warn)}
   .row .bar i[data-level="bad"]{background:var(--bad)}
 
-  .smart{display:inline-flex;align-items:center;font-size:10px;font-weight:700;white-space:nowrap;
-         padding:3px 8px;border-radius:999px;letter-spacing:.04em;flex:0 0 auto}
-  .smart.ok{color:var(--ok);background:color-mix(in srgb,var(--ok) 15%,transparent)}
-  .smart.bad{color:var(--bad);background:color-mix(in srgb,var(--bad) 18%,transparent)}
-  .smart.unk{color:var(--muted);background:var(--faint)}
   .ubtn{flex:1;appearance:none;border:1px solid var(--brd);border-radius:var(--r-full);padding:13px 0;
         font:inherit;font-weight:650;font-size:14px;cursor:pointer}
   .ubtn.no{background:var(--faint);color:var(--ink)}
@@ -3263,6 +3273,21 @@ PAGE = """<!doctype html>
   .live .hbars i{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:flex-end;
                  border-radius:2px;overflow:hidden;background:color-mix(in srgb,var(--ink) 16%,transparent)}
   .live .hbars s{display:block;background:var(--accent)}
+  /* two-page live tiles: both pages share one cell and cross-fade */
+  .live .cyc{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:12px;flex:1;min-height:0}
+  .live .cyc .pg{grid-area:1/2;align-self:stretch;display:flex;flex-direction:column;justify-content:flex-end;gap:4px;min-width:0;
+                 transition:opacity .45s ease}
+  .live .cyc[data-page="0"] .pg:nth-child(2),.live .cyc[data-page="1"] .pg:nth-child(1),
+  .live .cyc:not([data-page]) .pg:nth-child(2){opacity:0;pointer-events:none}
+  .live .cyc .pg>.lk{margin-bottom:auto}
+  /* page dots: stacked one above the other at the left of the content,
+     centred on it; the accent dot slides down to the second in time with the fade */
+  .live .crail{grid-area:1/1;align-self:center;position:relative;display:flex;flex-direction:column;gap:6px}
+  .live .crail i{width:6px;height:6px;border-radius:50%;background:var(--brd)}
+  .live .crail b{position:absolute;left:0;top:0;width:6px;height:6px;border-radius:50%;background:var(--accent);
+                 transition:top .45s ease}
+  .live .cyc[data-page="1"] .crail b{top:12px}
+  @media (prefers-reduced-motion:reduce){ .live .cyc .pg,.live .crail b{transition:none} }
   .live .bars{display:flex;align-items:flex-end;gap:6px;height:76px;margin-top:2px}
   .apptile.tall .live .bars{height:44px;gap:4px}
   .apptile.tall .live .b u{display:none}
@@ -3352,7 +3377,76 @@ PAGE = """<!doctype html>
   .anote{margin:-4px 20px 12px;font-size:11.5px;color:var(--muted)}
   /* the tile's live view, reused: drop the tile's grid, frame and press states,
      keep every class-scoped rule that draws its contents */
-  .abox.alivebox{padding:0;overflow:hidden}
+  .vmshot{margin:4px 16px 12px;border-radius:16px;overflow:hidden;background:#000;aspect-ratio:16/10}.vmshot img{display:block;width:100%;height:100%;object-fit:contain;opacity:0;transition:opacity .25s}.vmshot img.on{opacity:1}
+.abox.alivebox{padding:0;overflow:hidden}
+  /* vitals sheets (2.2): headline, verdict, a chart with a real scale */
+  .vhero{padding:4px 16px 14px}
+  .vh-top{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .vh-n{font-size:42px;font-weight:700;letter-spacing:-.03em;line-height:1;font-variant-numeric:tabular-nums}
+  .vh-n small{font-size:19px;font-weight:650;color:var(--muted);margin-left:3px;letter-spacing:0}
+  .vh-w{display:inline-block;padding:4px 11px;border-radius:var(--r-full);font-size:13px;font-weight:700;
+        color:var(--ok);background:color-mix(in srgb,var(--ok) 15%,transparent)}
+  .vh-w.sm{padding:2px 9px;font-size:11.5px;letter-spacing:0;text-transform:none}
+  .vh-w[data-level="warn"]{color:var(--warn);background:color-mix(in srgb,var(--warn) 17%,transparent)}
+  .vh-w[data-level="bad"]{color:var(--bad);background:color-mix(in srgb,var(--bad) 15%,transparent)}
+  .vh-s{margin:9px 0 0;color:var(--muted);font-size:13.5px;line-height:1.45}
+  .vchart{margin:0 16px 14px}
+  .abox .vchart{margin:2px 2px 4px}
+  .vc-plot{position:relative;height:150px;margin:10px 0 0 46px}
+  .vc-plot svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+  .vc-t{position:absolute;right:calc(100% + 8px);transform:translateY(-50%);font-size:10.5px;white-space:nowrap;
+        color:var(--muted);font-variant-numeric:tabular-nums;pointer-events:none}
+  .vc-l{right:0;transform:translateY(-100%);padding-bottom:2px;font-weight:650}
+  .vc-x{margin-left:46px}
+  .ah .pn{text-transform:none;letter-spacing:0;font-size:15px;font-weight:650;color:var(--ink)}
+  .vc-l[data-level="warn"]{color:var(--warn)} .vc-l[data-level="bad"]{color:var(--bad)}
+  .vc-x{display:flex;justify-content:space-between;margin-top:6px;font-size:11px;color:var(--muted)}
+  .vc-k{display:flex;gap:16px;margin-top:8px;font-size:12px;color:var(--muted)}
+  .vc-k u,.acell .al u.key{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;vertical-align:-1px;background:var(--faint)}
+  .vc-k u.dash{height:3px;width:14px;border-radius:2px;vertical-align:3px}
+  .agrid.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .vpanel{background:var(--panel);border-radius:11px;padding:0 12px}
+  .vl-r{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 10px;padding:10px 0;border-bottom:1px solid var(--faint)}
+  .vl-r:last-child{border-bottom:0}
+  .vl-n{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .vl-v{font-size:14px;font-weight:650;font-variant-numeric:tabular-nums}
+  .vl-v.sm{font-size:12.5px;font-weight:600;color:var(--muted)}
+  .vl-b{grid-column:1/-1;height:6px;border-radius:var(--r-full);background:var(--faint);overflow:hidden}
+  .vl-b i{display:block;height:100%;border-radius:inherit;background:var(--accent)}
+  .vl-b i[data-level="warn"],.vthreads i[data-level="warn"]{background:var(--warn)}
+  .vl-b i[data-level="bad"],.vthreads i[data-level="bad"]{background:var(--bad)}
+  .vthreads{display:flex;gap:4px;height:78px;background:var(--panel);border-radius:11px;padding:8px}
+  .vthreads span{flex:1;display:flex;flex-direction:column;gap:4px;min-width:0}
+  .vthreads em{flex:1;display:flex;align-items:flex-end;border-radius:4px;background:var(--faint);overflow:hidden}
+  .vthreads b{font-size:10.5px;font-weight:600;color:var(--muted);text-align:center;font-variant-numeric:tabular-nums}
+  .vthreads i{display:block;width:100%;background:var(--accent)}
+  .vstack{display:flex;height:14px;border-radius:var(--r-full);background:var(--panel);overflow:hidden;margin:2px 0 10px}
+  .vstack i{display:block;height:100%}
+  .vnote{margin:10px 2px 2px;font-size:12.5px;line-height:1.45;color:var(--muted)}
+  .vdot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;vertical-align:2px;background:var(--ok)}
+  .vdot[data-level="warn"]{background:var(--warn)} .vdot[data-level="bad"]{background:var(--bad)}
+  .vd{display:grid;grid-template-columns:58px minmax(0,1fr) auto;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid var(--faint)}
+  .vd:last-child{border-bottom:0}
+  .vd-t{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--ok)}
+  .vd-t[data-level="warn"]{color:var(--warn)} .vd-t[data-level="bad"]{color:var(--bad)}
+  .vd-l{min-width:0;display:flex;flex-direction:column;gap:2px}
+  .vd-l b{font-size:14px;font-weight:600}
+  .vd-l>span:not(.vd-bar){font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .vd-bar{position:relative;height:5px;margin-top:5px;border-radius:var(--r-full);background:var(--faint)}
+  .vd-bar i{position:absolute;left:0;top:0;bottom:0;border-radius:inherit;background:var(--ok)}
+  .vd-bar i[data-level="warn"]{background:var(--warn)} .vd-bar i[data-level="bad"]{background:var(--bad)}
+  .vd-bar s{position:absolute;top:-3px;bottom:-3px;width:2px;border-radius:1px;background:var(--warn);opacity:.7}
+  .vd-h{font-size:12px;font-weight:650;color:var(--muted)}
+  .vd-h[data-level="ok"]{color:var(--ok)} .vd-h[data-level="bad"]{color:var(--bad)}
+  .vd-h[data-level="ok"]::before{content:"✓ "}
+  .vpool{padding:2px 2px 4px}
+  .vp-n{display:flex;align-items:baseline;gap:4px}
+  .vp-n b{font-size:30px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+  .vp-n small{font-size:15px;font-weight:650;color:var(--muted)}
+  .vp-n span{font-size:14px;color:var(--muted);margin-left:4px}
+  .vpool .vstack{margin:10px 0 8px}
+  .vp-s{font-size:13px;color:var(--muted);margin-bottom:10px}
+  .vp-s b{color:var(--ink);font-weight:650}
   .abox .apptile.alive{display:flex;flex-direction:column;min-height:0;padding:14px 16px;cursor:default;
                        border:none;box-shadow:none;border-radius:16px;background-color:var(--panel);transform:none}
   .abox .apptile.alive:hover{border-color:transparent}
@@ -4588,7 +4682,27 @@ function vmSheet(id){
     'hypervisor, so this is queued for the root job and runs within a '+
     'minute.</span></div>';
 
-  return [vmName(v), rows+controls];
+  // The frame's timestamp is left out of the markup: a new frame every 10s
+  // would rebuild the sheet each time. paintVmShot swaps the image in place.
+  const preview = run && v.shot
+    ? '<div class="vmshot"><img alt="Console of '+esc(vmName(v))+'" data-vmshot="'+v.id+'"></div>'
+    : '';
+
+  return [vmName(v), preview+rows+controls];
+}
+
+function paintVmShot(){
+  const img=document.querySelector('#sh-b img[data-vmshot]');
+  if(!img) return;
+  const v=((data&&data.vms)||[]).find(x=>String(x.id)===img.dataset.vmshot);
+  if(!v||!v.shot) return;
+  const src='/api/vm/shot?id='+v.id+'&t='+v.shot;
+  if(img.dataset.want===src) return;
+  img.dataset.want=src;
+  // load off-screen first so the old frame stays up until the new one is ready
+  const pre=new Image();
+  pre.onload=()=>{ if(img.dataset.want===src){ img.src=src; img.classList.add('on'); } };
+  pre.src=src;
 }
 
 function appsSection(){
@@ -4607,7 +4721,7 @@ function applyWidths(){
 // real history appear here; the rest simply have no sparkline.
 const SPARKS={
   cpu:   d=>[(d.cpu_hist||[]).map(r=>[r[0],r[1]]), 'var(--accent)', 100],
-  ctemp: d=>[(d.ctemp_hist||[]).map(r=>[r[0],r[1]]), 'var(--warn)', null],
+  ctemp: d=>[(d.ctemp_hist||[]).map(r=>[r[0],r[1]]), 'var(--accent)', null],
   // apps only, the same figure as the big number, in the Apps legend colour
   mem:   d=>[(d.mem_hist||[]).map(r=>[r[0],r[1]]), 'var(--accent)', null],
   store: d=>[(d.store_hist||[]).map(r=>[r[0],r[1]]), 'var(--warn)', 100],
@@ -4924,12 +5038,29 @@ function paintLive(){
     else{
       const w=sizeLive(st,2,'temps');
       const lo=25, top=Math.max(55,...dr.map(x=>x.temp));
-      liveBox(st).innerHTML=(w?'<span class="lk">Temperatures</span>':'')+'<span class="bars">'+dr.map(x=>{
+      const temps=(w?'<span class="lk">Temperatures</span>':'')+'<span class="bars">'+dr.map(x=>{
         const h=Math.round((w?8:4)+(w?38:20)*Math.max(0,x.temp-lo)/(top-lo));
         const nm=String(x.dev||'').replace(/^nvme(\\d+)n\\d+$/,'nv$1');
         return '<span class="b" title="'+esc(x.dev)+' · '+x.temp+'°C"><em>'+x.temp+'</em>'+
                '<i data-level="'+esc(x.level||'ok')+'" style="height:'+h+'px"></i><u>'+esc(nm)+'</u></span>';
       }).join('')+'</span>';
+      // the second page: SMART health. A failing drive stops the cycling on
+      // this page, so the one thing that matters cannot scroll out of view.
+      const all=data.drives||[], sick=all.filter(x=>x.ok===false), known=all.filter(x=>x.ok!==undefined&&x.ok!==null);
+      const old=all.filter(x=>x.hours).sort((a,b)=>b.hours-a.hours)[0];
+      const pass=[(known.length-sick.length)+'/'+known.length, sick.length?'Passing':'All passing'];
+      const age=[old?(old.hours/8766).toFixed(1)+' yrs':'–', old?'Oldest, '+old.dev:'Oldest'];
+      const fail=[String(sick.length), 'Failing'];
+      const stats=w?[pass,age,fail]:[pass, sick.length?fail:age];
+      const health=(w?'<span class="lk">Disk health</span>':'')+
+        '<span class="nums">'+stats.map(v=>
+          '<span><b style="color:'+(v===fail&&sick.length?'var(--bad)':'inherit')+'">'+esc(v[0])+'</b><u>'+esc(v[1])+'</u></span>').join('')+'</span>'+
+        (w?'<span class="lm"><span'+(sick.length?' style="color:var(--bad);font-weight:650"':'')+'>'+
+          (sick.length?esc(sick.map(x=>x.dev).join(', '))+(sick.length===1?' is failing':' are failing'):'SMART checks all pass')+'</span></span>':'');
+      st.dataset.pin=sick.length?'1':'';
+      liveBox(st).innerHTML='<span class="cyc"><span class="pg">'+temps+'</span><span class="pg">'+health+'</span>'+
+        '<span class="crail" aria-hidden="true"><i></i><i></i><b></b></span></span>';
+      cyclePages();
     }
   }
   // Ollama: only while a model is loaded, with the time until it unloads ticking down
@@ -5159,7 +5290,17 @@ function kNum(n){
   if(n<1e6) return (n/1000).toFixed(n<1e5?1:0)+'k';
   return (n/1e6).toFixed(1)+'M';
 }
+// Tiles with two pages (Scrutiny) turn over every six seconds, all in step.
+// The page comes from the clock, so a repaint mid-cycle lands on the same one.
+function cyclePages(){
+  const pg=Math.floor(Date.now()/6000)%2;
+  document.querySelectorAll('.apptile .cyc').forEach(c=>{
+    const t=c.closest('.apptile'), n=t.dataset.pin==='1'?1:pg;
+    if(c.dataset.page!==String(n)){ c.dataset.page=n; t.dataset.page=n; }
+  });
+}
 function tickLive(){
+  cyclePages();
   const mt=document.querySelector('.apptile.maart');
   if(mt){
     const d=+mt.dataset.mdur||0, o=Math.min(d||Infinity, Date.now()-(+mt.dataset.mstart||Date.now()));
@@ -5527,137 +5668,14 @@ function hardwareLine(sys){
   if(board) bits.push(board);
   return bits.join(' \u00b7 ');
 }
-function cpuModelRow(){
-  const sys=(data&&data.system)||{};
-  if(!sys.cpu) return '';
-  return '<div class="row"><span class="l"><span class="t1">'+esc(sys.cpu)+'</span>'+
-    '<span class="t2">'+esc(hardwareLine(sys))+'</span></span></div>';
-}
 
-function rowsCores(){
-  const list=data.cpu_cores||[];
-  if(!list.length) return '<div class="row"><span class="t2">No per-thread data yet.</span></div>';
-  return list.map(c=>
-    '<div class="row"><span class="tag">'+esc(String(c.name).trim())+'</span>'+
-      '<div class="bar"><i style="width:'+c.pct+'%" data-level="'+level(c.pct)+'"></i></div>'+
-      '<span class="val" data-level="'+level(c.pct)+'">'+c.pct.toFixed(0)+'%</span></div>').join('');
-}
 
-function rowsCoreTemps(){
-  const list=data.core_temps||[];
-  if(!list.length) return '<div class="row"><span class="t2">No per-core sensors.</span></div>';
-  return list.map(c=>{
-    const lv=c.temp>=85?'bad':c.temp>=75?'warn':'ok';
-    const w=Math.max(4,Math.min(100,(c.temp-25)/70*100));
-    return '<div class="row"><span class="tag">'+esc(c.name)+'</span>'+
-      '<div class="bar"><i style="width:'+w+'%" data-level="'+lv+'"></i></div>'+
-      '<span class="val" data-level="'+lv+'">'+c.temp.toFixed(0)+'\\u00b0</span></div>';
-  }).join('');
-}
 
-function memBreakdown(){
-  const m=data.mem; if(!m) return '<div class="row"><span class="t2">No memory data.</span></div>';
-  const apps=(m.apps!==undefined)?m.apps:m.used, arc=m.arc||0;
-  const free=Math.max(0, m.total-apps-arc), pc=n=>(n/m.total*100);
-  return '<div class="stackbar">'+
-      '<i style="width:'+pc(apps)+'%;background:var(--accent)"></i>'+
-      '<i style="width:'+pc(arc)+'%;background:var(--mem-cache)"></i>'+
-      '<i style="width:'+pc(free)+'%;background:transparent"></i></div>'+
-    '<div class="legend">'+
-      '<span><u style="background:var(--accent)"></u>Apps '+ram(apps)+'</span>'+
-      '<span><u style="background:var(--mem-cache)"></u>ZFS cache '+ram(arc)+'</span>'+
-      '<span><u style="background:var(--faint)"></u>Free '+ram(free)+'</span></div>'+
-    '<div class="row"><span class="l"><span class="t1">Installed</span></span>'+
-      '<span class="val">'+ram(m.total)+'</span></div>'+
-    '<div class="row"><span class="l"><span class="t1">Reclaimable</span>'+
-      '<span class="t2">cache ZFS gives back on demand</span></span>'+
-      '<span class="val">'+ram(arc)+'</span></div>'+
-    '<div class="row"><span class="l"><span class="t1">Available to apps</span>'+
-      '<span class="t2">free plus reclaimable cache</span></span>'+
-      '<span class="val">'+ram(m.total-apps)+'</span></div>';
-}
 
-// zpool list says ONLINE and nothing else. The counters below it are where
-// a disk on its way out shows up first.
-function poolNote(name){
-  const st = (data.poolstatus || {})[name];
-  if (!st) return '';
-  const bits = [];
-  const sw = scrubWord(st);
-  if (sw) bits.push(sw);
-  if (st.frag !== null && st.frag !== undefined) bits.push(st.frag + '% fragmented');
-  const errs = (st.read||0) + (st.write||0) + (st.cksum||0);
-  const bad = errs > 0 || (st.errors && st.errors !== 'No known data errors');
-  if (errs) bits.push(st.read + ' read / ' + st.write + ' write / ' + st.cksum + ' checksum errors');
-  else if (st.errors) bits.push(String(st.errors).toLowerCase());
-  if (!bits.length) return '';
-  return '<p class="pnote'+(bad ? ' bad' : '')+'">'+esc(bits.join('  \u00b7  '))+'</p>';
-}
 
-function rowsPools(){
-  return (data.pools||[]).map(p=>{
-    const ok=(p.health||'').toUpperCase()==='ONLINE', lv=level(p.pct);
-    const col = lv==='ok' ? 'var(--accent)' : lv==='warn' ? 'var(--warn)' : 'var(--bad)';
-    return '<div class="row"><span class="l"><span class="t1">'+esc(p.name)+'</span>'+
-      '<span class="t2">'+disk(p.used)+' used \\u00b7 '+disk(p.free)+' free of '+disk(p.size)+'</span></span>'+
-      '<span class="smart '+(ok?'ok':'bad')+'">'+esc(p.health||'?')+'</span>'+
-      '<span class="val" data-level="'+lv+'">'+p.pct.toFixed(0)+'%</span></div>'+
-      '<div class="stackbar" style="height:10px;margin:0 16px 8px">'+
-        '<i style="width:'+p.pct+'%;background:'+col+'"></i></div>'+
-      poolNote(p.name);
-  }).join('') || '<div class="row"><span class="t2">No pool data.</span></div>';
-}
 
-function rowsDrives(){
-  return (data.drives||[]).map(x=>{
-    const sm=x.ok===true?'ok':x.ok===false?'bad':'unk';
-    const smt=x.ok===true?'SMART OK':x.ok===false?'SMART FAIL':'SMART ?';
-    const yrs=x.hours?' \\u00b7 '+(x.hours/8766).toFixed(1)+' yrs on':'';
-    return '<div class="row"><span class="tag">'+x.kind+'</span>'+
-      '<span class="l"><span class="t1">'+esc(x.dev)+'</span>'+
-      '<span class="t2">'+(x.size?disk(x.size):'')+(x.model?' \\u00b7 '+esc(x.model):'')+yrs+'</span></span>'+
-      '<span class="smart '+sm+'">'+smt+'</span>'+
-      '<span class="val"'+(x.level?' data-level="'+x.level+'"':'')+'>'+
-        (typeof x.temp==='number'?x.temp+'\\u00b0':'\\u2013')+'</span></div>';
-  }).join('') || '<div class="row"><span class="t2">No drive data.</span></div>';
-}
 
-// Sampled on the host by the cron job: the container has its own pid
-// namespace and can see nothing but itself.
-// Load is the one number that says whether the machine is keeping up: it
-// counts what is waiting, not what is busy. Against the core count it reads
-// as a ratio rather than a bare figure.
-function loadRow(){
-  const l = data.load || [];
-  if (!l.length) return '';
-  const n = (data.procs && data.procs.ncpu) || data.cores || 0;
-  const lv = n ? (l[0] >= n ? 'bad' : l[0] >= n * .7 ? 'warn' : 'ok') : '';
-  return '<div class="row"><span class="l"><span class="t1">Load average</span>'+
-    '<span class="t2">'+l.map(x=>x.toFixed(2)).join('  \u00b7  ')+
-    '  over 1, 5 and 15 min'+(n ? ' \u00b7 '+n+' cores' : '')+'</span></span>'+
-    '<span class="val"'+(lv ? ' data-level="'+lv+'"' : '')+'>'+l[0].toFixed(2)+'</span></div>';
-}
 
-function rowsProcs(kind){
-  const pr = data.procs || {};
-  const list = (kind === 'cpu' ? pr.cpu : pr.mem) || [];
-  if (!list.length)
-    return '<div class="row"><span class="t2">No process data yet — '+
-           'the collector writes it once a minute.</span></div>';
-  const age = pr.at ? Math.max(0, Math.round(Date.now()/1000 - pr.at)) : null;
-  const head = '<p class="shead">Using the most '+
-    (kind === 'cpu' ? 'CPU <span class="t2">% of one core</span>' : 'memory')+
-    (age !== null ? ' <span class="t2">'+(age < 90 ? 'just now' : agoWord(age))+'</span>' : '')+'</p>';
-  return head + list.map(r => {
-    const val = kind === 'cpu' ? r.cpu.toFixed(0)+'%' : ram(r.rss);
-    const side = kind === 'cpu' ? ram(r.rss)+' resident' : r.cpu.toFixed(0)+'% CPU';
-    return '<div class="row">'+
-      (r.app ? '<span class="tag">'+esc(r.app)+'</span>' : '')+
-      '<span class="l"><span class="t1">'+esc(r.comm)+'</span>'+
-      '<span class="t2">pid '+r.pid+' · '+side+'</span></span>'+
-      '<span class="val">'+val+'</span></div>';
-  }).join('');
-}
 
 function agoWord(sec){
   if (sec < 90) return 'just now';
@@ -6294,29 +6312,247 @@ function netChart(name){
   return chart((data.net_hist||{})[name]||[],
     [{key:1,colour:'var(--accent)',label:'down'},{key:2,colour:'var(--brand)',label:'up'}], rate);
 }
-function ioChart(){
-  return chart(data.io_hist||[],
-    [{key:1,colour:'var(--accent)',label:'read'},{key:2,colour:'var(--brand)',label:'write'}], rate);
+
+/* ---------- vitals sheets (2.2) --------------------------------------------
+   CPU, memory, CPU temperature, drive temperatures and storage share one
+   shape: a headline number with a verdict in plain words, a chart with a
+   real scale, then the few facts that explain it. Data is drawn in the
+   accent; the status colours appear only where something is fine, warm or
+   wrong, so amber always means "look at this".                            */
+const LV_COL={ok:'var(--ok)', warn:'var(--warn)', bad:'var(--bad)'};
+function vHero(num, unit, sub){
+  return '<div class="vhero"><div class="vh-top"><span class="vh-n">'+num+
+      (unit?'<small>'+unit+'</small>':'')+'</span></div>'+
+    (sub?'<p class="vh-s">'+sub+'</p>':'')+'</div>';
 }
-function memChart(){
-  return chart(data.mem_hist||[],
-    [{key:1,colour:'var(--accent)',label:'apps'},{key:2,colour:'var(--mem-cache)',label:'ZFS cache'}], ram);
+function vBox(title, inner, aside){
+  return '<div class="abox"><div class="ah">'+title+(aside?'<span>'+aside+'</span>':'')+'</div>'+inner+'</div>';
 }
-function powerChart(){
-  return chart(data.power_hist||[],
-    [{key:1,colour:'var(--warn)',label:'package watts'}], v=>v.toFixed(0)+' W');
+function niceMax(v){
+  if(!(v>0)) return 1;
+  const p=Math.pow(10, Math.floor(Math.log10(v)));
+  for(const m of [1,2,2.5,5,10]) if(m*p>=v) return m*p;
+  return 10*p;
+}
+// A chart with a linear scale and labelled gridlines.
+// o: {min, max, ticks, fmt, series:[{v:row=>number, colour, label, dash}], lines:[{v, label, level}]}
+// Series are drawn in order, so for a stack list the total first.
+function vChart(rows, o){
+  if(!rows || rows.length<2) return '';
+  const W=430, H=150, n=rows.length, lo=o.min||0;
+  let hi=o.max;
+  if(hi===undefined || hi===null){
+    let pk=0; rows.forEach(r=>o.series.forEach(s=>{ pk=Math.max(pk, s.v(r)||0); }));
+    hi=niceMax(pk);
+  }
+  const ticks=o.ticks || [lo, lo+(hi-lo)/2, hi];
+  const y=v=>H-(Math.min(hi, Math.max(lo, v))-lo)/(hi-lo)*H;
+  const x=i=>i/(n-1)*W;
+  const pts=s=>rows.map((r,i)=>x(i).toFixed(1)+' '+y(s.v(r)||0).toFixed(1));
+  const grid=ticks.map(t=>'<line x1="0" x2="'+W+'" y1="'+y(t).toFixed(1)+'" y2="'+y(t).toFixed(1)+
+    '" stroke="var(--brd)" stroke-width="1" vector-effect="non-scaling-stroke"/>').join('');
+  const marks=(o.lines||[]).map(l=>'<line x1="0" x2="'+W+'" y1="'+y(l.v).toFixed(1)+'" y2="'+y(l.v).toFixed(1)+
+    '" stroke="'+LV_COL[l.level]+'" stroke-width="1.5" stroke-dasharray="5 4" vector-effect="non-scaling-stroke"/>').join('');
+  const paths=o.series.map(s=>{
+    const p=pts(s);
+    return (s.dash?'':'<path d="M0 '+H+' L'+p.join(' L')+' L'+W+' '+H+' Z" fill="'+s.colour+'" opacity=".16"/>')+
+      '<path d="M'+p.join(' L')+'" fill="none" stroke="'+s.colour+'" stroke-width="2.4"'+
+      (s.dash?' stroke-dasharray="6 4"':'')+' stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>';
+  }).join('');
+  const pct=v=>((y(v)/H)*100).toFixed(2)+'%';
+  const labels=ticks.map(t=>'<span class="vc-t" style="top:'+pct(t)+'">'+o.fmt(t)+'</span>').join('')+
+    (o.lines||[]).map(l=>'<span class="vc-t vc-l" data-level="'+l.level+'" style="top:'+pct(l.v)+'">'+l.label+'</span>').join('');
+  const mins=Math.max(1, Math.round((rows[n-1][0]-rows[0][0])/60));
+  return '<div class="vchart"><div class="vc-plot"><svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none" aria-hidden="true">'+
+      grid+marks+paths+'</svg>'+labels+'</div>'+
+    '<div class="vc-x"><span>'+mins+' min ago</span><span>now</span></div>'+
+    (o.series.length>1 ? '<div class="vc-k">'+o.series.map(s=>
+      '<span><u style="background:'+s.colour+'"'+(s.dash?' class="dash"':'')+'></u>'+s.label+'</span>').join('')+'</div>' : '')+
+    '</div>';
+}
+// One line per app with a bar; rows: [{label, val, pct, lv}]
+function vList(rows){
+  return '<div class="vpanel">'+rows.map(r=>
+    '<div class="vl-r"><span class="vl-n">'+esc(r.label)+'</span><span class="vl-v">'+r.val+'</span>'+
+    '<span class="vl-b"><i style="width:'+Math.max(2, Math.min(100, r.pct)).toFixed(1)+'%"'+
+      (r.lv && r.lv!=='ok'?' data-level="'+r.lv+'"':'')+'></i></span></div>').join('')+'</div>';
+}
+// The collector lists the busiest processes; added up by app they say which
+// app is using it. A VM is one qemu process, so it is named after the VM.
+function topApps(kind){
+  const pr=data.procs||{}, list=(kind==='cpu'?pr.cpu:pr.mem)||[];
+  const names={}, by={};
+  (data.services||[]).forEach(s=>{ names[s.app]=s.name; });
+  const vms=(data.vms||[]).filter(v=>v.state==='RUNNING');
+  list.forEach(r=>{
+    let k=r.app, label=names[r.app]||r.app;
+    if(!k){
+      if(/^qemu/.test(r.comm||'')){ k='_vm'; label=vms.length===1?vmName(vms[0]):'Virtual machines'; }
+      else { k='_sys'; label='TrueNAS itself'; }
+    }
+    by[k]=by[k]||{label, cpu:0, rss:0};
+    by[k].cpu+=r.cpu||0; by[k].rss+=r.rss||0;
+  });
+  return Object.keys(by).map(k=>by[k])
+    .sort((a,b)=>kind==='cpu' ? b.cpu-a.cpu : b.rss-a.rss).slice(0,5);
+}
+function procAge(){
+  const at=(data.procs||{}).at;
+  return at ? agoWord(Math.max(0, Math.round(Date.now()/1000-at))) : '';
 }
 
-function rowsIo(){
-  const list=(data.io||[]).filter(x=>x.read!==null&&x.read!==undefined&&(x.read||x.write));
-  if(!list.length) return '';
-  return list.map(x=>
-    '<div class="row"><span class="l"><span class="t1">'+esc(x.name)+'</span>'+
-      '<span class="t2">live disk activity</span></span>'+
-      '<span class="val" style="min-width:92px">'+rate(x.read)+'<br>'+
-      '<span style="font-size:11px;color:var(--muted);font-weight:600">'+rate(x.write)+' write</span>'+
-      '</span></div>').join('');
+function cpuSheet(){
+  const sys=data.system||{}, pct=data.cpu||0;
+  const thr=sys.threads||data.cores||(data.cpu_cores||[]).length||1;
+  let h=vHero(pct.toFixed(0), '%',
+      esc(sys.cpu||'Processor')+(sys.cores?' · '+sys.cores+' cores, '+thr+' threads':''))+
+    // scaled to what it has actually done lately, so a quiet CPU is not a flat line on the floor
+    vChart(data.cpu_hist, {min:0, max:Math.min(100, niceMax(Math.max(5, (data.cpu_hist||[]).reduce((m,r)=>Math.max(m,r[1]||0),0)))),
+      fmt:v=>(+v.toFixed(1))+'%', series:[{v:r=>r[1], colour:'var(--accent)', label:'in use'}]});
+  const cells=[], l=data.load||[];
+  if(l.length){
+    const ll=l[0]>=thr?'bad':l[0]>=thr*.7?'warn':'ok';
+    cells.push(cell('Load', '<span'+(ll!=='ok'?' style="color:'+LV_COL[ll]+'"':'')+'>'+l[0].toFixed(2)+'</span>',
+      '<span class="as">'+(ll==='ok'?'Keeping up':ll==='warn'?'Nearly at its limit':'More work than it can do')+
+      ' (its limit is '+thr+')</span>'));
+  }
+  if(data.power!==null && data.power!==undefined){
+    const pk=(data.power_hist||[]).reduce((m,r)=>Math.max(m,r[1]||0),0);
+    cells.push(cell('Power', data.power+'<small>W</small>', '<span class="as">'+(pk?'Peak '+pk+' W lately':'Whole chip')+'</span>'));
+  }
+  if(cells.length) h+=vBox('Right now', '<div class="agrid">'+cells.join('')+'</div>');
+  const top=topApps('cpu');
+  if(top.length){
+    const share=a=>a.cpu/thr, big=Math.max.apply(null, top.map(share))||1;
+    h+=vBox('Using the most', vList(top.map(a=>({label:a.label,
+      val:(share(a)<1?share(a).toFixed(1):share(a).toFixed(0))+'%', pct:share(a)/big*100}))),
+      'of the whole CPU · '+procAge());
+  }
+  const cores=data.cpu_cores||[];
+  if(cores.length){
+    const busiest=Math.max.apply(null, cores.map(c=>c.pct)), top=Math.min(100, niceMax(Math.max(10, busiest)));
+    h+=vBox('Each thread', '<div class="vthreads">'+cores.map(c=>
+      '<span title="'+esc(String(c.name).trim())+' · '+c.pct.toFixed(0)+'%"><em><i style="height:'+
+        Math.max(3, Math.min(100, c.pct/top*100)).toFixed(1)+'%"'+(level(c.pct)!=='ok'?' data-level="'+level(c.pct)+'"':'')+
+      '></i></em><b>'+c.pct.toFixed(0)+'</b></span>').join('')+'</div>', 'bars go up to '+top+'%');
+  }
+  return h;
 }
+
+function memSheet(){
+  const m=data.mem;
+  if(!m) return '<div class="row"><span class="t2">No memory data.</span></div>';
+  const apps=(m.apps!==undefined)?m.apps:m.used, arc=m.arc||0;
+  const free=Math.max(0, m.total-apps-arc), ap=apps/m.total*100;
+  const parts=ram(apps).split(' ');
+  let h=vHero(parts[0], parts[1]||'', 'used by apps, out of '+ram(m.total));
+  const pc=n=>(n/m.total*100).toFixed(2);
+  h+=vBox('Where it goes',
+    '<div class="vstack"><i style="width:'+pc(apps)+'%;background:var(--accent)"></i>'+
+      '<i style="width:'+pc(arc)+'%;background:var(--mem-cache)"></i></div>'+
+    '<div class="agrid three">'+
+      cell('<u class="key" style="background:var(--accent)"></u>Apps', ram(apps))+
+      cell('<u class="key" style="background:var(--mem-cache)"></u>ZFS cache', ram(arc))+
+      cell('<u class="key"></u>Free', ram(free))+'</div>'+
+    '<p class="vnote">ZFS borrows memory nothing else is using to keep recent files close at hand, '+
+      'and hands it back as soon as an app needs it. Apps can have up to '+ram(m.total-apps)+' more.</p>');
+  h+=vBox('Last few minutes', vChart(data.mem_hist, {min:0, max:m.total, ticks:[0, m.total/2, m.total], fmt:v=>v?ram(v):'0',
+    series:[{v:r=>(r[1]||0)+(r[2]||0), colour:'var(--mem-cache)', label:'ZFS cache'},
+            {v:r=>r[1]||0, colour:'var(--accent)', label:'Apps'}]}));
+  const top=topApps('mem');
+  if(top.length){
+    const big=top[0].rss||1;
+    h+=vBox('Using the most', vList(top.map(a=>({label:a.label, val:ram(a.rss), pct:a.rss/big*100}))), procAge());
+  }
+  return h;
+}
+
+function ctempLevel(t){ return t>=85?'bad':t>=75?'warn':'ok'; }
+function ctempSheet(){
+  const t=data.cpu_temp, cores=data.core_temps||[];
+  if(typeof t!=='number') return '<div class="row"><span class="t2">This CPU reports no temperature.</span></div>';
+  const hot=cores.length?Math.max.apply(null, cores.map(c=>c.temp)):null;
+  let h=vHero(t.toFixed(0), '°C',
+    (hot!==null?'Hottest core '+hot.toFixed(0)+'°. ':'')+'Warm from 75°, too hot from 85°.');
+  h+=vChart(data.ctemp_hist, {min:20, max:100, ticks:[20,60,100], fmt:v=>v+'°',
+    lines:[{v:75, label:'warm', level:'warn'}, {v:85, label:'hot', level:'bad'}],
+    series:[{v:r=>r[1], colour:'var(--accent)', label:'temperature'}]});
+  if(cores.length)
+    h+=vBox('Each core', '<div class="agrid three">'+cores.map(c=>{
+      const cl=ctempLevel(c.temp);
+      return cell(esc(c.name), '<i class="vdot" data-level="'+cl+'"></i>'+c.temp.toFixed(0)+'°');
+    }).join('')+'</div>');
+  return h;
+}
+
+function driveLimits(d){ return d.kind==='HDD' ? [55,60] : [60,70]; }
+function driveRow(d){
+  const lv=d.level||'ok', lim=driveLimits(d);
+  const t=typeof d.temp==='number'?d.temp:null;
+  const health=d.ok===true?['ok','Healthy']:d.ok===false?['bad','Failing']:['unk','No SMART data'];
+  const age=d.hours?(d.hours/8766).toFixed(1)+' years old':'';
+  const pos=t===null?0:Math.max(3, Math.min(100, (t-20)/(lim[1]+5-20)*100));
+  return '<div class="vd"'+(d.model?' title="'+esc(d.model)+'"':'')+'>'+
+    '<span class="vd-t" data-level="'+lv+'">'+(t===null?'–':t+'°')+'</span>'+
+    '<span class="vd-l"><b>'+esc(d.dev)+'</b><span>'+[d.size?disk(d.size):'', age].filter(Boolean).join(' · ')+'</span>'+
+      '<span class="vd-bar"><i style="width:'+pos.toFixed(1)+'%" data-level="'+lv+'"></i>'+
+        '<s style="left:'+((lim[0]-20)/(lim[1]+5-20)*100).toFixed(1)+'%"></s></span></span>'+
+    '<span class="vd-h" data-level="'+health[0]+'">'+health[1]+'</span></div>';
+}
+function dtempSheet(){
+  const ds=data.drives||[];
+  if(!ds.length) return '<div class="row"><span class="t2">No drive data.</span></div>';
+  const temps=ds.map(d=>d.temp).filter(v=>typeof v==='number');
+  const lo=Math.min.apply(null, temps), hi=Math.max.apply(null, temps);
+  let h=vHero(temps.length?(lo===hi?lo:lo+'–'+hi):'–', '°C',
+    'Hard drives are warm from 55° and too hot from 60°. SSDs from 60° and 70°.');
+  const hdd=ds.filter(d=>d.kind==='HDD'), ssd=ds.filter(d=>d.kind!=='HDD');
+  if(hdd.length) h+=vBox('Hard drives', '<div class="vpanel">'+hdd.map(driveRow).join('')+'</div>');
+  if(ssd.length) h+=vBox('SSDs', '<div class="vpanel">'+ssd.map(driveRow).join('')+'</div>');
+  return h;
+}
+
+let storeFocus='';      // the pool card that was tapped goes first
+function poolBox(p){
+  // the bar stays the accent colour until the pool is genuinely filling up
+  const lv=p.pct>=90?'bad':p.pct>=80?'warn':'ok', ok=(p.health||'').toUpperCase()==='ONLINE';
+  const st=(data.poolstatus||{})[p.name]||{};
+  const sw=scrubWord(st), m=sw.match(/^Last scrub (clean|found .+) · (.+)$/);
+  const errs=(st.read||0)+(st.write||0)+(st.cksum||0);
+  const cells=[
+    cell('Last check', m?esc(m[2]):(sw?esc(sw):'–'), m?'<span class="as">'+(m[1]==='clean'?'Found nothing wrong':'Found '+esc(m[1].slice(6)))+'</span>':''),
+    cell('Errors', errs?'<span style="color:var(--bad)">'+errs+'</span>':'None',
+      '<span class="as">'+(errs?st.read+' read, '+st.write+' write, '+st.cksum+' checksum':'Reading and writing cleanly')+'</span>')];
+  const fp=disk(p.free).split(' ');
+  return vBox('<span class="pn">'+esc(p.name)+'</span>',
+    '<div class="vpool"><div class="vp-n"><b>'+fp[0]+'</b><small>'+(fp[1]||'')+'</small><span>free</span></div>'+
+      '<div class="vstack"><i style="width:'+p.pct+'%;background:'+(lv==='ok'?'var(--accent)':LV_COL[lv])+'"></i></div>'+
+      '<div class="vp-s">'+disk(p.used)+' used of '+disk(p.size)+' · '+
+        '<b'+(lv!=='ok'?' style="color:'+LV_COL[lv]+'"':'')+'>'+p.pct.toFixed(0)+'% full</b></div></div>'+
+    '<div class="agrid">'+cells.join('')+'</div>',
+    '<span class="vh-w sm" data-level="'+(ok?'ok':'bad')+'">'+(ok?'Healthy':esc(p.health||'Unknown'))+'</span>');
+}
+function storeSheet(){
+  const pools=(data.pools||[]).slice().sort((a,b)=>(poolKey(b.name)===storeFocus)-(poolKey(a.name)===storeFocus));
+  let h=pools.map(poolBox).join('') || '<div class="row"><span class="t2">No pool data.</span></div>';
+  const busy=(data.io||[]).filter(x=>(x.read||0)+(x.write||0)>0);
+  // two-second samples of disk traffic are all spikes; a short running
+  // average shows the shape without hiding a real burst
+  const raw=data.io_hist||[], sm=raw.map((r,i)=>{
+    const w=raw.slice(Math.max(0,i-2), i+3), avg=k=>w.reduce((a,x)=>a+(x[k]||0),0)/w.length;
+    return [r[0], avg(1), avg(2)];
+  });
+  const io=vChart(sm, {min:0, fmt:v=>v?rate(v):'0',
+    series:[{v:r=>r[2], colour:'var(--mem-cache)', label:'Writing'},
+            {v:r=>r[1], colour:'var(--accent)', label:'Reading'}]});
+  if(io || busy.length)
+    h+=vBox('Disk activity', io+(busy.length?'<div class="vpanel">'+busy.map(x=>
+      '<div class="vl-r"><span class="vl-n">'+esc(x.name)+'</span><span class="vl-v sm">'+
+        [x.read?'reading '+rate(x.read):'', x.write?'writing '+rate(x.write):''].filter(Boolean).join(' · ')+
+      '</span></div>').join('')+'</div>':'<p class="vnote">All disks are idle.</p>'));
+  return h;
+}
+
 
 function rowsNet(){
   const list=data.net||[];
@@ -6406,16 +6642,11 @@ function maybeWhatsNew(){
 const POPS={
   whatsnew:whatsNew,
   system:()=>['System', rowsSystem()],
-  cpu:   ()=>['CPU', cpuModelRow()+loadRow()+powerChart()+
-            (data.power!==null&&data.power!==undefined
-              ? '<div class="row"><span class="l"><span class="t1">Package power</span>'+
-                '<span class="t2">whole chip \\u2014 this CPU reports no per-core figure</span></span>'+
-                '<span class="val">'+data.power+' W</span></div>' : '')+
-            rowsProcs('cpu')+rowsCores()],
-  mem:   ()=>['Memory', memChart()+memBreakdown()+rowsProcs('mem')],
-  ctemp: ()=>['Temperature by core',  rowsCoreTemps()],
-  dtemp: ()=>['Drive temperatures',   rowsDrives()],
-  store: ()=>['Storage', ioChart()+rowsIo()+rowsPools()],
+  cpu:   ()=>['CPU',                  cpuSheet()],
+  mem:   ()=>['Memory',               memSheet()],
+  ctemp: ()=>['CPU temperature',      ctempSheet()],
+  dtemp: ()=>['Drive temperatures',   dtempSheet()],
+  store: ()=>['Storage',              storeSheet()],
   net:   ()=>['Network', (function(){
             const l=data.net||[];
             const p=l.slice().sort((a,b)=>(b.rx+b.tx)-(a.rx+a.tx))[0];
@@ -6432,6 +6663,7 @@ function renderPop(opening){
           : openKey.indexOf('app-')===0 ? appSheet(openKey.slice(4))
           : (POPS[openKey] ? POPS[openKey]() : null);
   if(!r) return;
+  setTimeout(paintVmShot, 0);
   const b=$('sh-b');
 
   if($('sh-t').textContent!==r[0]) $('sh-t').textContent=r[0];
@@ -6936,7 +7168,7 @@ document.addEventListener('click',ev=>{
   if(document.body.classList.contains('editing')) return;   // cards are inert while editing
 
   const b=ev.target.closest('button[data-pop]');
-  if(b){ openPop(b.dataset.pop); return; }
+  if(b){ const w=b.closest('.cardwrap'); storeFocus=(w&&w.dataset.k)||''; openPop(b.dataset.pop); return; }
   if(ev.target.id==='sh-x' || ev.target.id==='scrim') closePop();
 });
 document.addEventListener('keydown',ev=>{ if(ev.key==='Escape') closePop(); });
@@ -7130,6 +7362,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, blob, "image/jpeg", cache="public, max-age=86400")
             else:
                 self._send(404, b"", "image/jpeg")
+        elif path == "/api/vm/shot":
+            q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            try:
+                with open(os.path.join(DATA, "vmshot-%d.png" % int((q.get("id") or [""])[0])), "rb") as fh:
+                    blob = fh.read()
+                self._send(200, blob, "image/png", cache="private, max-age=60")
+            except (OSError, ValueError):
+                self._send(404, b"", "image/png")
         elif path == "/figtree.woff2":
             self._send_icon("figtree.woff2", "font/woff2")
         elif path == "/manifest.webmanifest":

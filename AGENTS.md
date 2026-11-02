@@ -164,3 +164,24 @@ CDP and click things; a screenshot alone has missed real bugs here.
   browser add implicit columns, and `gridTemplateColumns` then reports those too.
 - In headless Chrome, `captureScreenshot` with `captureBeyondViewport` resizes the viewport,
   which fires `resize` and re-packs. Scroll to the grid and capture inside the viewport.
+
+## Vitals sheets, VM preview, two-page tiles (2.2.0)
+
+- The CPU, memory, CPU temperature, drive temperature and storage sheets are built from
+  `vHero` (one big number, no status word), `vChart` (linear, labelled gridlines, optional
+  dashed threshold lines), `vBox`, `vList` and `topApps`. The status words were tried and
+  rejected; keep the hero to the number.
+- The storage sheet's pool bar stays the accent colour below 80% full, amber from 80%,
+  red from 90%. It does not use `level()`, which warns from 75%.
+- VM previews: collect.sh forks a background loop (own lock on fd 8, fd 9 closed) that runs
+  `virsh screenshot` every 10s for each running VM, converts the PPM to PNG with stdlib
+  Python, and writes `data/vmshot-<id>.png`. The libvirt domain is matched by the
+  `<id>_` prefix, not the name. `vms_now()` adds `shot` (the file's mtime) when it is
+  under 90s old. The sheet markup leaves the timestamp out; `paintVmShot()` preloads
+  the new frame and swaps `src` in place, so a frame never rebuilds the sheet.
+- Two-page live tiles (Scrutiny): `.cyc` holds two `.pg` pages in one grid cell plus a
+  `.crail` of two dots stacked on the left. The page comes from the clock in
+  `cyclePages()` (6s), so a repaint lands on the same page. `data-pin="1"` on the tile holds
+  page two (a failing drive). The pages are `nth-child(1)` and `(2)`, so keep the rail last.
+- Audiobookshelf: an open session with no `updatedAt` in 3 minutes is stale. ABS leaves
+  sessions open after playback stops.
