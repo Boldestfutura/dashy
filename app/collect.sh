@@ -784,7 +784,7 @@ def shoot():
         doms = virsh("list", "--name").stdout.decode().split()
     except Exception:
         doms = []
-    keep = set()
+    keep, errs = set(), []
     for v in vms:
         if (v.get("state") or "").upper() != "RUNNING":
             continue
@@ -792,14 +792,23 @@ def shoot():
         # the name, which TrueNAS may have mangled
         dom = next((d for d in doms if d.split("_", 1)[0] == str(v.get("id"))), None)
         if not dom:
+            errs.append("%s: no libvirt domain among %s" % (v.get("id"), doms))
             continue
         ppm = D + "/.vmshot.ppm"
+        png = None
         try:
-            if virsh("screenshot", dom, ppm).returncode != 0:
+            r = virsh("screenshot", dom, ppm)
+            if r.returncode != 0:
+                errs.append("%s: %s" % (dom, r.stderr.decode(errors="replace").strip()))
                 continue
-            png = ppm_png(open(ppm, "rb").read())
-        except Exception:
-            png = None
+            raw = open(ppm, "rb").read()
+            # libvirt 9+ with a recent QEMU hands back PNG already; older
+            # ones give PPM, which is converted (and scaled down) here
+            png = raw if raw[:8] == b"\x89PNG\r\n\x1a\n" else ppm_png(raw)
+            if not png:
+                errs.append("%s: unknown screenshot format %r" % (dom, raw[:8]))
+        except Exception as e:
+            errs.append("%s: %s" % (dom, e))
         finally:
             try:
                 os.unlink(ppm)
@@ -813,6 +822,14 @@ def shoot():
         os.chmod(out + ".tmp", 0o644)
         os.replace(out + ".tmp", out)
         keep.add(os.path.basename(out))
+    # why there is no preview, for whoever goes looking; gone once it works
+    try:
+        if errs:
+            open(D + "/vmshot.err", "w").write("\n".join(errs) + "\n")
+        elif os.path.exists(D + "/vmshot.err"):
+            os.unlink(D + "/vmshot.err")
+    except OSError:
+        pass
     # a stopped VM's last frame is not a preview of anything
     for n in os.listdir(D):
         if n.startswith("vmshot-") and n.endswith(".png") and n not in keep:

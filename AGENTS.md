@@ -174,8 +174,9 @@ CDP and click things; a screenshot alone has missed real bugs here.
 - The storage sheet's pool bar stays the accent colour below 80% full, amber from 80%,
   red from 90%. It does not use `level()`, which warns from 75%.
 - VM previews: collect.sh forks a background loop (own lock on fd 8, fd 9 closed) that runs
-  `virsh screenshot` every 10s for each running VM, converts the PPM to PNG with stdlib
-  Python, and writes `data/vmshot-<id>.png`. The libvirt domain is matched by the
+  `virsh screenshot` every 10s for each running VM. libvirt 9+ with a recent QEMU writes
+  PNG (TrueNAS 25.10 has libvirt 11.3), older ones PPM, which is converted with stdlib
+  Python. A failure is written to `data/vmshot.err`; 2.2.0 dropped PNG frames silently, and writes `data/vmshot-<id>.png`. The libvirt domain is matched by the
   `<id>_` prefix, not the name. `vms_now()` adds `shot` (the file's mtime) when it is
   under 90s old. The sheet markup leaves the timestamp out; `paintVmShot()` preloads
   the new frame and swaps `src` in place, so a frame never rebuilds the sheet.
