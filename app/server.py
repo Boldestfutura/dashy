@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "2.6.0"
+APP_VERSION = "2.6.1"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -3615,6 +3615,11 @@ PAGE = """<!doctype html>
                 padding-bottom:10px}
   .apptile.tall .aico{grid-row:1/3;align-self:center}
   .apptile.tall .sdot{top:24px}
+  /* the update tag and bar sit in the header, where the dot is, never over the live numbers */
+  .apptile.tall .ust{top:20px}
+  .apptile.tall[data-ust] .live{margin-right:-60px}
+  .apptile.tall .uprog{bottom:auto;top:40px;left:auto;right:10px;width:56px}
+  .apptile.wide .uprog{bottom:auto;top:5px;left:14px}
   .apptile.tall .live{grid-column:1/-1;grid-row:3;margin-right:-26px;padding-right:0;padding-left:2px}
   .apptile.tall .live{justify-content:flex-end;gap:4px}
   .apptile.tall .live .lt{-webkit-line-clamp:1}
@@ -7816,6 +7821,9 @@ ICONS = {
 # Settings > General > Release notes shows it, and the "Dashy updated"
 # notification quotes the first line. Every version bump adds an entry here.
 RELEASES = [
+    ("2.6.1", "2026-11-03", [
+        "The Updated, Queued and percent tags sit in the tile's header, not over a live tile's numbers.",
+    ]),
     ("2.6.0", "2026-11-03", [
         "Update all: when several apps have updates, Health has one button that queues them all.",
         "They run one at a time, with Pi-hole and Tailscale last so DNS and remote access only drop once.",
