@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "2.5.1"
+APP_VERSION = "2.6.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -449,6 +449,25 @@ def request_upgrade(app):
     except OSError as e:
         return False, str(e)
     return True, "queued"
+
+
+def request_upgrade_all():
+    """Queue every app TrueNAS says has an update, except Dashy (which updates
+    itself from its image) and anything already waiting. The worker runs them
+    one at a time and orders them itself (see worker.sh), so this only drops
+    the same request files a single Update tap would."""
+    waiting = set(queued())
+    apps = [x["app"] for x in discover()
+            if x.get("update") and x.get("app") and not is_self(x["app"]) and x["app"] not in waiting]
+    if not apps:
+        return False, "nothing to update", []
+    done = []
+    for a in apps:
+        ok, msg = request_upgrade(a)
+        if not ok:
+            return False, "%s: %s" % (a, msg), done
+        done.append(a)
+    return True, "%d queued" % len(done), done
 
 
 def core_temps():
@@ -3510,6 +3529,11 @@ PAGE = """<!doctype html>
   .ubtn.no{background:var(--faint);color:var(--ink)}
   .ubtn.yes{background:var(--warn);color:#2a1c00;border-color:transparent}
   .ubtn:disabled{opacity:.6;cursor:default}
+  .srow-act{display:flex;padding:0 16px 12px 33px;border-bottom:1px solid var(--faint)}
+  .srow:has(+ .srow-act){border-bottom:none}
+  .srow-act:last-child{border-bottom:none}
+  .srow-act .ubtn{flex:none;padding:9px 18px;font-size:13px}
+  .ualist .acell .av{font-size:15px}
 
   /* every row the same height, so one long name or version can never stretch
      its neighbours and drop their text out of line */
@@ -6187,10 +6211,15 @@ function rowsSystem(){
                   'You are on ' + (su.current || data.version) +
                   '. Install it from the settings pane.'));
 
-  if (upd.length)
+  if (upd.length){
+    // apps not already queued or running are what "Update all" would send
+    const todo = upd.filter(s => { const u = updState(s.app); return !u || u.k === 'failed'; });
     out.push(srow('warn', upd.length === 1 ? upd[0].name + ' has an update'
                                            : upd.length + ' apps have updates',
-                  upd.map(s => s.name).join(', ')));
+                  upd.map(s => s.name).join(', ')) +
+      (todo.length > 1 ? '<div class="srow-act"><button type="button" class="ubtn yes" id="ua-ask">' +
+                         'Update all ' + todo.length + '</button></div>' : ''));
+  }
 
   if (down.length)
     out.push(srow('bad', down.length === 1 ? down[0].name + ' is not responding'
@@ -7262,6 +7291,35 @@ async function askSelfUpdate(){
   $('scrim').hidden=false;
 }
 
+// Every app with an update, one confirm. The worker runs them one after another
+// and puts DNS and VPN apps last: pulling an image needs DNS, so a Pi-hole that
+// restarted halfway through would fail every update after it.
+const NET_LAST=/pi-?hole|adguard|unbound|tailscale|wireguard|headscale|netbird/i;
+function askUpdateAll(){
+  const svc=((data && data.services)||[]).filter(s=>s.update && (()=>{ const u=updState(s.app); return !u || u.k==='failed'; })());
+  if(!svc.length){ closePop(); return; }
+  const net=svc.filter(s=>NET_LAST.test(s.app)||NET_LAST.test(s.name));
+  const ordered=svc.filter(s=>net.indexOf(s)<0).concat(net);
+  const rows=ordered.map(s=>{
+    const newer=typeof s.update==='string' ? s.update.trim() : '';
+    const now=niceVer(s).replace(/^Version /,'');
+    return cell(esc(s.name), newer?esc(newer):'Newer release', now?'<span class="as">from '+esc(now)+'</span>':'');
+  }).join('');
+  const last=net.length ? ' '+net.map(s=>esc(s.name)).join(' and ')+(net.length===1?' goes':' go')+
+    ' last, so DNS and remote access only drop once, at the end.' : '';
+  $('sh-t').textContent='Update all apps';
+  $('sh-s').textContent='';
+  sheetIcon(null);
+  $('sh-b').innerHTML='<div class="appsheet ualist">'+
+    abox(ordered.length+' apps', rows)+
+    '<p class="appdesc">They update one at a time, starting within a minute. Each app restarts while it upgrades, '+
+      'and a ZFS snapshot of its data is taken first.'+last+'</p>'+
+    '<div class="appacts"><button class="ubtn no" id="u-no">Cancel</button>'+
+      '<button class="ubtn yes" id="ua-yes">Update '+ordered.length+' apps</button></div></div>';
+  $('sh-b')._html=null;
+  $('scrim').hidden=false; openKey=null;
+}
+
 async function askUpdate(app,name,ver){
   const svc=((data && data.services)||[]).find(s=>s.app===app);
   const newer=svc && typeof svc.update==='string' ? svc.update.trim() : '';
@@ -7489,6 +7547,24 @@ document.addEventListener('click',ev=>{
     $('sh-b')._html=null; renderPop(false);
     return; }
   if(ev.target.id==='u-no'){ closePop(); return; }
+  if(ev.target.id==='ua-ask'){ askUpdateAll(); return; }
+  if(ev.target.id==='ua-yes'){
+    const btn=ev.target;
+    btn.disabled=true; btn.textContent='Queued\u2026';
+    const fail=(msg)=>{ btn.textContent=msg; btn.disabled=false; };
+    fetch('/api/update-all',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})
+      .then(r=>r.json())
+      .then(r=>{
+        if(!r || !r.ok) return fail((r && r.msg) || 'that did not work');
+        (r.apps||[]).forEach(a=>{ localQueued[a]=Date.now(); });
+        closePop();
+        if(data) paintHealth(data);
+        paintAppStates(); paintBanner();
+        window.scrollTo({top:0, behavior:'smooth'});
+      })
+      .catch(()=>fail('could not reach the NAS'));
+    return;
+  }
   const vb=ev.target.closest('button[data-vmact]');
   if(vb){
     const id=vb.dataset.vm, act=vb.dataset.vmact;
@@ -7740,6 +7816,10 @@ ICONS = {
 # Settings > General > Release notes shows it, and the "Dashy updated"
 # notification quotes the first line. Every version bump adds an entry here.
 RELEASES = [
+    ("2.6.0", "2026-11-03", [
+        "Update all: when several apps have updates, Health has one button that queues them all.",
+        "They run one at a time, with Pi-hole and Tailscale last so DNS and remote access only drop once.",
+    ]),
     ("2.5.1", "2026-11-02", [
         "The \u201cupdate is out\u201d and \u201cDashy updated\u201d notifications both show. "
         "The second used to replace the first silently.",
@@ -8051,7 +8131,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         limits = {"/api/layout": 65536, "/api/check": 1024, "/api/vm": 4096,
                   "/api/serve": 8192, "/api/update": 4096, "/api/keys": 4096,
-                  "/api/push": 4096}
+                  "/api/push": 4096, "/api/update-all": 1024}
         if path not in limits:
             return self._fail(404, "not found")
         body = self._json_body(limits[path])
@@ -8072,6 +8152,10 @@ class Handler(BaseHTTPRequestHandler):
             ok, msg = save_keys(body)
         elif path == "/api/push":
             ok, msg = push_request(body)
+        elif path == "/api/update-all":
+            ok, msg, apps = request_upgrade_all()
+            return self._send(200 if ok else 400, json.dumps({"ok": ok, "msg": msg, "apps": apps}),
+                              "application/json; charset=utf-8")
         else:
             ok, msg = request_upgrade(str(body.get("app", "")))
         # /api/check reports a failed lookup in its message, not its status

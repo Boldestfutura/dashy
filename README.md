@@ -44,7 +44,8 @@ add and remove things.
   shown grey, and one you deleted drops off with a note in Health for an hour.
 - **Updates from the dashboard.** An app with an update is outlined in amber;
   its sheet has an Update button, which queues the upgrade and a recursive ZFS snapshot is taken first; the newest
-  five per app are kept. Dashy updates itself the same way, from the image CI
+  five per app are kept. When several have updates, Health has an **Update all**
+  button: they run one at a time, with DNS and VPN apps (Pi-hole, Tailscale) last. Dashy updates itself the same way, from the image CI
   publishes, and only offers a version once that image exists.
 - **Virtual machines.** Every VM on the box, whether it is running, and what
   it has been given. A running VM's sheet opens with a preview of its console,

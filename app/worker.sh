@@ -313,7 +313,23 @@ fi
 set -- "$Q"/*.req
 [ -e "$1" ] || exit 0
 
-for f in "$Q"/*.req; do
+# DNS and VPN apps go last. Every upgrade pulls an image, which needs DNS, so a
+# Pi-hole restarting halfway through an "Update all" failed every app after it;
+# Tailscale last means a remote session drops once, at the end.
+order=$(for f in "$Q"/*.req; do
+  [ -e "$f" ] || continue
+  case $(basename "$f" .req) in
+    *pihole*|*pi-hole*|*adguard*|*unbound*|*tailscale*|*wireguard*|*headscale*|*netbird*) echo "2 $f" ;;
+    *) echo "1 $f" ;;
+  esac
+done | sort | cut -d' ' -f2-)
+
+# one path per line, so a dataset path with a space in it still splits right
+oldifs=$IFS; IFS='
+'
+set -f
+for f in $order; do
+  IFS=$oldifs
   [ -e "$f" ] || continue
   app=$(basename "$f" .req)
   rm -f "$f"
@@ -360,3 +376,4 @@ for f in "$Q"/*.req; do
   fi
   status "$app" "$res" "$msg"
 done
+set +f
