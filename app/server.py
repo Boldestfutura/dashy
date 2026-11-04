@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "2.7.1"
+APP_VERSION = "2.7.2"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -3423,7 +3423,7 @@ PAGE = """<!doctype html>
   .dir{font-weight:700;margin-right:3px}
   .dir.dn{color:var(--accent)}
   .dir.up{color:var(--brand)}
-  #s-net .dir{font-size:13px}
+  #s-net .dir{font-size:13px;line-height:1}   /* bigger arrow, same line height as every .sub */
 
   .prow{margin-top:9px;overflow:hidden}
   .prow:first-child{margin-top:2px}
@@ -7875,6 +7875,9 @@ ICONS = {
 # Settings > General > Release notes shows it, and the "Dashy updated"
 # notification quotes the first line. Every version bump adds an entry here.
 RELEASES = [
+    ("2.7.2", "2026-11-04", [
+        "The Network tile is the same height as Processor and Temperature (its upload arrow made it a few pixels taller).",
+    ]),
     ("2.7.1", "2026-11-04", [
         "The Scrutiny tile's temperatures have a degree sign, and its pages turn every 10 seconds.",
     ]),
