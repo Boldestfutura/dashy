@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "2.6.1"
+APP_VERSION = "2.7.0"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -2137,6 +2137,9 @@ def _clean_prefs(d):
         # whether a tile opens its tailnet address or its address on the LAN
         if su.get("links") in ("ts", "lan"):
             clean["links"] = su["links"]
+        # what the Temperature tile shows, picked in its sheet
+        if su.get("temp") in ("cpu", "drives"):
+            clean["temp"] = su["temp"]
         url = su.get("truenas")
         if isinstance(url, str) and len(url) <= 200:
             url = url.strip()
@@ -3130,6 +3133,7 @@ PAGE = """<!doctype html>
               transition:background .15s ease,color .15s ease}
   .seg button[aria-pressed="true"]{background:var(--panel);color:var(--ink);
                                    box-shadow:0 1px 3px rgba(0,0,0,.12)}
+  .seg.tsel{margin:4px 16px 12px}
 
   /* Four named colours rather than seven anonymous dots: the name is what
      makes a choice repeatable when you come back to it a month later. */
@@ -4252,10 +4256,30 @@ const CARDS=[
   {k:'health',label:'Health', sec:'system', kind:'health'},
   {k:'cpu',   label:'Processor', sec:'system', trend:1},
   {k:'mem',   label:'Memory',    sec:'system'},
-  {k:'ctemp', label:'CPU temp',  sec:'system', trend:1},
-  {k:'net',   label:'Network',   sec:'system', trend:1},
-  {k:'dtemp', label:'Drive temps', sec:'storage'}
+  {k:'temp',  label:'Temperature', sec:'system', trend:1},
+  {k:'net',   label:'Network',   sec:'system', trend:1}
 ];
+/* 2.7 merged the CPU temp and Drive temps cards into one Temperature card that
+   shows either (tempShows). Saved layouts keep their place: the CPU card's slot
+   and size go to the new card, the drive card's only if there was no CPU card. */
+function migrateKeys(list, hidden){
+  const out=[];
+  (list||[]).forEach(k=>{
+    if(hidden && k==='dtemp') return;
+    const n=(k==='ctemp'||k==='dtemp')?'temp':k;
+    if(out.indexOf(n)<0) out.push(n);
+  });
+  return out;
+}
+function migrateSizeKeys(o){
+  if(!o || typeof o!=='object') return o;
+  const out=Object.assign({}, o);
+  if(out.temp===undefined && (out.ctemp!==undefined || out.dtemp!==undefined))
+    out.temp = out.ctemp!==undefined ? out.ctemp : out.dtemp;
+  delete out.ctemp; delete out.dtemp;
+  return out;
+}
+function tempShows(){ return prefs.setup && prefs.setup.temp==='drives' ? 'drives' : 'cpu'; }
 const SECTIONS=[['system','System'],['storage','Storage'],['apps','Apps'],['vms','Virtual machines']];
 const CARDK=CARDS.map(c=>c.k);
 /* Pool cards are made from the data, so their keys are not in CARDK. They are
@@ -4308,9 +4332,9 @@ function loadPrefs(){
       const d=JSON.parse(raw)||{};
       if(['system','light','dark'].indexOf(d.theme)>=0) prefs.theme=d.theme;
       if(d.accent) prefs.accent=migrateAccent(d.accent);
-      if(Array.isArray(d.hidden)) prefs.hidden=d.hidden.filter(knownKey);
-      if(Array.isArray(d.wide)) prefs.wide=d.wide.filter(knownKey);
-      if(d.size && typeof d.size==='object') prefs.size=cleanSize(d.size);
+      if(Array.isArray(d.hidden)) prefs.hidden=migrateKeys(d.hidden, true).filter(knownKey);
+      if(Array.isArray(d.wide)) prefs.wide=migrateKeys(d.wide).filter(knownKey);
+      if(d.size && typeof d.size==='object') prefs.size=cleanSize(migrateSizeKeys(d.size));
       migrateSizes();
       if(d.setup && typeof d.setup==='object') prefs.setup=d.setup;
       if(d.urls && typeof d.urls==='object') prefs.urls=cleanUrls(d.urls);
@@ -4319,7 +4343,7 @@ function loadPrefs(){
       if(Array.isArray(d.hiddenapps)) prefs.hiddenapps=cleanNolive(d.hiddenapps);
       if(Array.isArray(d.order)){
         // keep only known cards, then append any card added since this was saved
-        const keep=d.order.filter(knownKey);
+        const keep=migrateKeys(d.order).filter(knownKey);
         prefs.order=keep.concat(CARDK.filter(k=>keep.indexOf(k)<0));
       }
     }catch(e){}
@@ -4366,16 +4390,16 @@ function adoptPrefs(P){
   const same=(a,b)=>a.length===b.length && a.every((v,i)=>v===b[i]);
 
   if(Array.isArray(P.order)){
-    const keep=P.order.filter(knownKey);
+    const keep=migrateKeys(P.order).filter(knownKey);
     const next=keep.concat(CARDK.filter(k=>keep.indexOf(k)<0));
     if(!same(next, prefs.order)){ prefs.order=next; layoutChanged=true; }
   }
   if(Array.isArray(P.hidden)){
-    const next=P.hidden.filter(knownKey);
+    const next=migrateKeys(P.hidden, true).filter(knownKey);
     if(!same(next, prefs.hidden)){ prefs.hidden=next; layoutChanged=true; }
   }
   if(P.size && typeof P.size==='object'){
-    const ns=cleanSize(P.size);
+    const ns=cleanSize(migrateSizeKeys(P.size));
     if(JSON.stringify(ns)!==JSON.stringify(prefs.size)){ prefs.size=ns; layoutChanged=true; }
   }
   if(Array.isArray(P.wide) && !(P.size && Object.keys(P.size).length)){
@@ -4384,7 +4408,7 @@ function adoptPrefs(P){
     if(JSON.stringify(prefs.size)!==had) layoutChanged=true;
   }
   if(Array.isArray(P.wide)){
-    const next=P.wide.filter(knownKey);
+    const next=migrateKeys(P.wide).filter(knownKey);
     if(!same(next, prefs.wide)){ prefs.wide=next; layoutChanged=true; }
   }
   if(P.setup && typeof P.setup==='object') prefs.setup=P.setup;
@@ -5003,7 +5027,7 @@ function cardHTML(c){
   return '<div class="cardwrap" data-k="'+c.k+'">'+
            '<div class="jig">'+
              '<button class="card" data-pop="'+(c.pop||c.k)+'">'+
-               '<p class="lbl">'+c.label+'</p>'+body+spark+
+               '<p class="lbl" id="l-'+c.k+'">'+c.label+'</p>'+body+spark+
              '</button>'+tools+
            '</div>'+
          '</div>';
@@ -5236,7 +5260,7 @@ function applyWidths(){
 // real history appear here; the rest simply have no sparkline.
 const SPARKS={
   cpu:   d=>[(d.cpu_hist||[]).map(r=>[r[0],r[1]]), 'var(--accent)', 100],
-  ctemp: d=>[(d.ctemp_hist||[]).map(r=>[r[0],r[1]]), 'var(--accent)', null],
+  temp:  d=>[tempShows()==='cpu' ? (d.ctemp_hist||[]).map(r=>[r[0],r[1]]) : [], 'var(--accent)', null],
   // apps only, the same figure as the big number, in the Apps legend colour
   mem:   d=>[(d.mem_hist||[]).map(r=>[r[0],r[1]]), 'var(--accent)', null],
   store: d=>[(d.store_hist||[]).map(r=>[r[0],r[1]]), 'var(--warn)', 100],
@@ -5337,21 +5361,7 @@ function paint(d){
     paintMemDonut(d.mem);
   }
 
-  if(d.cpu_temp!==null && d.cpu_temp!==undefined){
-    $('v-ctemp').innerHTML=d.cpu_temp.toFixed(0)+'<small>\\u00b0C</small>';
-    $('v-ctemp').style.color=d.cpu_temp>=85?'var(--bad)':d.cpu_temp>=75?'var(--warn)':'';
-  }
-  const ct=d.core_temps||[];
-  $('s-ctemp').textContent=ct.length? ct.length+' cores' : 'package sensor';
-
-  const dr=(d.drives||[]).filter(x=>typeof x.temp==='number');
-  if(dr.length){
-    const lo=Math.min(...dr.map(x=>x.temp)), hi=Math.max(...dr.map(x=>x.temp));
-    const worst=dr.some(x=>x.level==='bad')?'bad':dr.some(x=>x.level==='warn')?'warn':'ok';
-    $('v-dtemp').innerHTML=(lo===hi?lo:lo+'\\u2013'+hi)+'<small>\\u00b0C</small>';
-    $('v-dtemp').style.color=worst==='bad'?'var(--bad)':worst==='warn'?'var(--warn)':'';
-    $('s-dtemp').textContent=dr.length+' drives';
-  }
+  paintTemp(d);
 
   (d.pools||[]).forEach(p=>{
     const k=poolKey(p.name);
@@ -6980,6 +6990,42 @@ function memSheet(){
 }
 
 function ctempLevel(t){ return t>=85?'bad':t>=75?'warn':'ok'; }
+
+// The Temperature card: the CPU, or the drives' range, whichever its sheet picked
+function paintTemp(d){
+  const v=$('v-temp'), sub=$('s-temp'), lbl=$('l-temp');
+  if(!v) return;
+  const cpu=tempShows()==='cpu';
+  lbl.textContent=cpu?'CPU temp':'Drive temps';
+  const sp=$('k-temp'), wrap=sp && sp.closest('.sparkwrap');
+  if(wrap) wrap.hidden=!cpu;
+  if(cpu){
+    const t=d.cpu_temp;
+    if(typeof t==='number'){
+      v.innerHTML=t.toFixed(0)+'<small>\\u00b0C</small>';
+      v.style.color=t>=85?'var(--bad)':t>=75?'var(--warn)':'';
+    } else { v.textContent='\\u2013'; v.style.color=''; }
+    const ct=d.core_temps||[];
+    sub.textContent=ct.length? ct.length+' cores' : 'package sensor';
+    return;
+  }
+  const dr=(d.drives||[]).filter(x=>typeof x.temp==='number');
+  if(!dr.length){ v.textContent='\\u2013'; v.style.color=''; sub.textContent='no drive data'; return; }
+  const lo=Math.min(...dr.map(x=>x.temp)), hi=Math.max(...dr.map(x=>x.temp));
+  const worst=dr.some(x=>x.level==='bad')?'bad':dr.some(x=>x.level==='warn')?'warn':'ok';
+  v.innerHTML=(lo===hi?lo:lo+'\\u2013'+hi)+'<small>\\u00b0C</small>';
+  v.style.color=worst==='bad'?'var(--bad)':worst==='warn'?'var(--warn)':'';
+  sub.textContent=dr.length+' drives';
+}
+// the switch at the top of the Temperature sheet: it picks the sheet and the card
+function tempSheet(){
+  const cpu=tempShows()==='cpu';
+  const seg='<div class="seg tsel" role="group" aria-label="The tile shows">'+
+    [['cpu','CPU'],['drives','Drives']].map(([k,n])=>
+      '<button type="button" data-tsel="'+k+'" aria-pressed="'+((k==='cpu')===cpu)+'">'+n+'</button>').join('')+
+    '</div>';
+  return [cpu?'CPU temperature':'Drive temperatures', seg+(cpu?ctempSheet():dtempSheet())];
+}
 function ctempSheet(){
   const t=data.cpu_temp, cores=data.core_temps||[];
   if(typeof t!=='number') return vEmpty('This CPU reports no temperature.');
@@ -7150,8 +7196,7 @@ const POPS={
   system:()=>['Health',               rowsSystem()],
   cpu:   ()=>['CPU',                  cpuSheet()],
   mem:   ()=>['Memory',               memSheet()],
-  ctemp: ()=>['CPU temperature',      ctempSheet()],
-  dtemp: ()=>['Drive temperatures',   dtempSheet()],
+  temp:  tempSheet,
   store: ()=>['Storage',              storeSheet()],
   net:   ()=>['Network',              netSheet()],
   up:    ()=>['Uptime record',        uptimeChart()],
@@ -7495,6 +7540,15 @@ document.addEventListener('click',ev=>{
   const tb=ev.target.closest('[data-atab]');
   if(tb){ if(appTab!==tb.dataset.atab){ appTab=tb.dataset.atab; $('sh-b')._html=null; renderPop(false);
                                          $('sh-b').scrollTop=0; } return; }
+  const ts=ev.target.closest('[data-tsel]');
+  if(ts){
+    if(tempShows()===ts.dataset.tsel) return;
+    prefs.setup=Object.assign({}, prefs.setup, {temp:ts.dataset.tsel});
+    savePrefs();
+    if(data){ paintTemp(data); drawSparks(data); }
+    $('sh-b')._html=null; renderPop(false); $('sh-b').scrollTop=0;
+    return;
+  }
   const lz=ev.target.closest('[data-lsz]');
   if(lz){
     const s=((data&&data.services)||[]).find(x=>x.id===openKey.slice(4));
@@ -7821,6 +7875,9 @@ ICONS = {
 # Settings > General > Release notes shows it, and the "Dashy updated"
 # notification quotes the first line. Every version bump adds an entry here.
 RELEASES = [
+    ("2.7.0", "2026-11-04", [
+        "CPU temp and Drive temps are one Temperature tile. The switch at the top of its sheet picks which it shows.",
+    ]),
     ("2.6.1", "2026-11-03", [
         "The Updated, Queued and percent tags sit in the tile's header, not over a live tile's numbers.",
     ]),
