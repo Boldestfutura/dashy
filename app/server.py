@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "2.7.0"
+APP_VERSION = "2.7.1"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -5572,7 +5572,7 @@ function paintLive(){
       const temps=(w?'<span class="lk">Temperatures</span>':'')+'<span class="bars">'+dr.map(x=>{
         const h=Math.round((w?8:4)+(w?38:20)*Math.max(0,x.temp-lo)/(top-lo));
         const nm=String(x.dev||'').replace(/^nvme(\\d+)n\\d+$/,'nv$1');
-        return '<span class="b" title="'+esc(x.dev)+' · '+x.temp+'°C"><em>'+x.temp+'</em>'+
+        return '<span class="b" title="'+esc(x.dev)+' · '+x.temp+'°C"><em>'+x.temp+'°</em>'+
                '<i data-level="'+esc(x.level||'ok')+'" style="height:'+h+'px"></i><u>'+esc(nm)+'</u></span>';
       }).join('')+'</span>';
       // the second page: SMART health. A failing drive stops the cycling on
@@ -5821,10 +5821,10 @@ function kNum(n){
   if(n<1e6) return (n/1000).toFixed(n<1e5?1:0)+'k';
   return (n/1e6).toFixed(1)+'M';
 }
-// Tiles with two pages (Scrutiny) turn over every six seconds, all in step.
+// Tiles with two pages (Scrutiny) turn over every ten seconds, all in step.
 // The page comes from the clock, so a repaint mid-cycle lands on the same one.
 function cyclePages(){
-  const pg=Math.floor(Date.now()/6000)%2;
+  const pg=Math.floor(Date.now()/10000)%2;
   document.querySelectorAll('.apptile .cyc').forEach(c=>{
     const t=c.closest('.apptile'), n=t.dataset.pin==='1'?1:pg;
     if(c.dataset.page!==String(n)){ c.dataset.page=n; t.dataset.page=n; }
@@ -7875,6 +7875,9 @@ ICONS = {
 # Settings > General > Release notes shows it, and the "Dashy updated"
 # notification quotes the first line. Every version bump adds an entry here.
 RELEASES = [
+    ("2.7.1", "2026-11-04", [
+        "The Scrutiny tile's temperatures have a degree sign, and its pages turn every 10 seconds.",
+    ]),
     ("2.7.0", "2026-11-04", [
         "CPU temp and Drive temps are one Temperature tile. The switch at the top of its sheet picks which it shows.",
     ]),
