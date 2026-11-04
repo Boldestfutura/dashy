@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "2.7.2"
+APP_VERSION = "2.7.3"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -5268,6 +5268,19 @@ const SPARKS={
              return [(h[k]||[]).map(r=>[r[0],(r[1]||0)+(r[2]||0)]), 'var(--accent)', null];}
 };
 
+// The small System tiles all take the tallest one's height (CPU temp beside
+// Health on a wide screen). Their second lines differ by a pixel or two per
+// font - Network's arrow line on an iPhone - so they are measured, not styled.
+function equalTiles(){
+  const cards=[...document.querySelectorAll('#vitals .sec[data-sec="system"] .cardwrap[data-w="1"] > .jig > .card')];
+  if(!cards.length) return;
+  cards.forEach(c=>{ c.style.minHeight=''; });
+  const h=Math.max(...cards.map(c=>c.offsetHeight));
+  if(h>0) cards.forEach(c=>{ c.style.minHeight=h+'px'; });
+}
+addEventListener('resize', ()=>requestAnimationFrame(equalTiles));
+if(document.fonts && document.fonts.ready) document.fonts.ready.then(()=>equalTiles());
+
 function drawSparks(d){
   for(const k in SPARKS){
     const el=$('k-'+k);
@@ -5430,6 +5443,7 @@ function paint(d){
   paintLive();
   paintBanner();
   drawSparks(d);
+  equalTiles();
   paintLinks(d.links||{});
   // uptime lives in the settings pane now; the home screen stays clean
   const mv=$('settings-version');
@@ -7875,6 +7889,9 @@ ICONS = {
 # Settings > General > Release notes shows it, and the "Dashy updated"
 # notification quotes the first line. Every version bump adds an entry here.
 RELEASES = [
+    ("2.7.3", "2026-11-04", [
+        "The small System tiles are always one height, the tallest one's, so Network matches CPU temp on every screen.",
+    ]),
     ("2.7.2", "2026-11-04", [
         "The Network tile is the same height as Processor and Temperature (its upload arrow made it a few pixels taller).",
     ]),
