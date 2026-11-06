@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "2.7.3"
+APP_VERSION = "2.7.4"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -2355,7 +2355,7 @@ def discover():
                     "update": bool(a.get("update")),
                     # Dashy is a custom app too, but it knows its own version
                     "custom": bool(a.get("custom")) and not me,
-                    "iconsrc": ("/appicon/" + a["name"]) if a.get("icon") else None})
+                    "iconsrc": _appicon_src(a["name"]) if a.get("icon") else None})
 
     # Only installed, web-facing TrueNAS apps appear here. The NAS admin UI and
     # Dashy itself have separate header/browser links, never pseudo-app tiles.
@@ -3675,6 +3675,9 @@ PAGE = """<!doctype html>
   .live .pdot{display:inline-block;width:7px;height:7px;min-width:0;margin-right:4px;vertical-align:1px}
   .live .split i[data-i="1"],.live .pdot[data-i="1"]{background:color-mix(in srgb,var(--warn) 85%,var(--panel))}
   .live .split i[data-i="2"],.live .pdot[data-i="2"]{background:var(--ok)}
+  /* Tally's own player colours (its 2.1 palette), so the tile matches the app */
+  .apptile.tally .live .split i[data-i="0"],.apptile.tally .live .pdot[data-i="0"]{background:#4da2ff}
+  .apptile.tally .live .split i[data-i="1"],.apptile.tally .live .pdot[data-i="1"]{background:#fb4903}
   .live .hbars{display:flex;align-items:flex-end;gap:2px;height:34px}
   .live .hbars i{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:flex-end;
                  border-radius:2px;overflow:hidden;background:color-mix(in srgb,var(--ink) 16%,transparent)}
@@ -7889,6 +7892,10 @@ ICONS = {
 # Settings > General > Release notes shows it, and the "Dashy updated"
 # notification quotes the first line. Every version bump adds an entry here.
 RELEASES = [
+    ("2.7.4", "2026-11-07", [
+        "The Tally tile uses Tally's own colours, blue for Cameron and orange for Paget.",
+        "A changed app icon shows up straight away instead of after a day.",
+    ]),
     ("2.7.3", "2026-11-04", [
         "The small System tiles are always one height, the tallest one's, so Network matches CPU temp on every screen.",
     ]),
@@ -8062,6 +8069,18 @@ MANIFEST = {
          "purpose": "maskable"},
     ],
 }
+
+
+def _appicon_src(name):
+    """The icon's URL, stamped with the cached file's mtime: icons are served
+    with a day's max-age, so a changed icon needs a new URL to show up."""
+    d = os.path.join(DATA, "icons")
+    for ext in ("svg", "png", "webp", "jpg"):
+        try:
+            return "/appicon/%s?v=%d" % (name, os.stat(os.path.join(d, name + "." + ext)).st_mtime)
+        except OSError:
+            pass
+    return "/appicon/" + name
 
 
 class Handler(BaseHTTPRequestHandler):
