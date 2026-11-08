@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "2.7.4"
+APP_VERSION = "2.7.5"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -7786,7 +7786,8 @@ document.addEventListener('click',ev=>{
 
   const b=ev.target.closest('button[data-pop]');
   if(b){ const w=b.closest('.cardwrap'); storeFocus=(w&&w.dataset.k)||''; openPop(b.dataset.pop); return; }
-  if(ev.target.id==='sh-x' || ev.target.id==='scrim') closePop();
+  // closest(): a tap on the X lands on its drawn glyph, not the button
+  if(ev.target.closest('#sh-x') || ev.target.id==='scrim') closePop();
 });
 document.addEventListener('keydown',ev=>{ if(ev.key==='Escape') closePop(); });
 
@@ -7892,6 +7893,9 @@ ICONS = {
 # Settings > General > Release notes shows it, and the "Dashy updated"
 # notification quotes the first line. Every version bump adds an entry here.
 RELEASES = [
+    ("2.7.5", "2026-11-08", [
+        "The X on a pop-up closes it again. Tapping the middle of it did nothing; only its edge worked.",
+    ]),
     ("2.7.4", "2026-11-07", [
         "The Tally tile uses Tally's own colours, blue for Cameron and orange for Paget.",
         "A changed app icon shows up straight away instead of after a day.",
