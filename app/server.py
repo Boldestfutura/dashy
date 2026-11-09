@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "2.7.5"
+APP_VERSION = "2.7.6"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -2205,7 +2205,8 @@ def save_prefs(d):
 NOT_WEB = (
     {22, 23, 25, 53, 111, 123, 135, 137, 138, 139, 161, 389, 445, 465, 514,
      587, 636, 993, 995, 1900, 2049, 3306, 3389, 5353, 5432, 6379, 11211,
-     27017, 50300}
+     27017, 50300,
+     10200, 10300, 10400}  # Wyoming voice (Piper, Whisper/TTS, openWakeWord): raw TCP, never HTTP
     | set(range(21115, 21120))            # RustDesk relay
 )
 
@@ -7893,6 +7894,9 @@ ICONS = {
 # Settings > General > Release notes shows it, and the "Dashy updated"
 # notification quotes the first line. Every version bump adds an entry here.
 RELEASES = [
+    ("2.7.6", "2026-11-09", [
+        "Voice apps like Kokoro no longer show as Not responding. Dashy was checking their voice port, which never answers a web request.",
+    ]),
     ("2.7.5", "2026-11-08", [
         "The X on a pop-up closes it again. Tapping the middle of it did nothing; only its edge worked.",
     ]),
