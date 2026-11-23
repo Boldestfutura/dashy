@@ -308,7 +308,8 @@ for a in apps:
     if not isinstance(source, str) or not source:
         continue
     try:
-        signature = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        # "|2": 2.7.7 recolours all-white SVGs, so every icon is fetched once more
+        signature = hashlib.sha256((source + "|2").encode("utf-8")).hexdigest()
         sig_path = os.path.join(icons, name + ".source")
         if os.path.isfile(sig_path) and open(sig_path).read().strip() == signature:
             if any(os.path.isfile(os.path.join(icons, name + "." + ext)) for ext in allowed):
@@ -340,6 +341,14 @@ for a in apps:
 
         if not blob or len(blob) > 512 * 1024:
             continue
+        if ext == "svg":
+            # a glyph drawn only in white (TrueNAS's Frigate icon) vanishes on a light tile
+            text = blob.decode("utf-8", "replace")
+            paints = re.findall(r'(?:fill|stroke)\s*[:=]\s*"?\s*(#[0-9a-fA-F]{3,8}|[a-zA-Z]+)', text)
+            colours = {c.lower() for c in paints if c.lower() not in ("none", "currentcolor", "transparent")}
+            if colours and colours <= {"white", "#fff", "#ffffff", "#ffffffff"}:
+                blob = re.sub(r'((?:fill|stroke)\s*[:=]\s*"?\s*)(?:white|#fff(?:fff(?:ff)?)?)\b', r"\g<1>#5a6acf",
+                              text, flags=re.I).encode("utf-8")
         target = os.path.join(icons, name + "." + ext)
         tmp = target + ".tmp"
         with open(tmp, "wb") as fh:

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import socket
+import ssl
 import threading
 from collections import deque
 import time
@@ -16,7 +17,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VERSION = "2.7.6"
+APP_VERSION = "2.7.7"
 APP_NAME = "Dashy"
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 DATA = os.environ.get("DASH_DATA", "/data")
@@ -1210,10 +1211,12 @@ class _AppHttp:
     and Deluge hand out a session; logging in on every poll would pile them up)."""
     jars = {}
 
-    def __init__(self, svc, base=None):
-        self.base = base or "http://%s:%d" % (svc.get("bind") or HOST_IP, int(svc["lport"]))
+    def __init__(self, svc, base=None, https=False):
+        self.base = base or "%s://%s:%d" % ("https" if https else "http", svc.get("bind") or HOST_IP, int(svc["lport"]))
         self.jar = _AppHttp.jars.setdefault(svc["app"], {})
         self.headers = {}
+        # an app on the NAS that only speaks https (Frigate) has its own self-signed certificate
+        self.ctx = ssl._create_unverified_context() if https and not base else None
 
     def req(self, path, data=None, headers=None, form=False, raw=False, timeout=5):
         h = dict(headers or {})
@@ -1229,7 +1232,7 @@ class _AppHttp:
         h.setdefault("Accept", "application/json")
         r = urllib.request.Request(self.base + path, data=data, headers=h)
         try:
-            with urllib.request.urlopen(r, timeout=timeout) as resp:
+            with urllib.request.urlopen(r, timeout=timeout, context=self.ctx) as resp:
                 self.headers = resp.headers
                 for c in resp.headers.get_all("Set-Cookie") or []:
                     name, _, val = c.split(";", 1)[0].partition("=")
@@ -1500,6 +1503,38 @@ def g_syncthing(h, c):
             "line": ("%.1f GB to fetch" % (need / 1e9)) if need else "Up to date"}
 
 
+def _size_mb(mb):
+    mb = float(mb or 0)
+    if mb < 1000:
+        return "%d MB" % mb
+    return ("%.1f GB" % (mb / 1000)) if mb < 1e6 else "%.1f TB" % (mb / 1e6)
+
+
+def g_frigate(h, c):
+    def get(path):
+        try:
+            return h.req(path)
+        except GlanceAuth:
+            # the session cookie lasts a day; sign in again when Frigate refuses it
+            h.jar.clear()
+            h.req("/api/login", data={"user": c.get("user", ""), "password": c.get("pass", "")}, raw=True)
+            if "frigate_token" not in h.jar:
+                raise GlanceAuth()
+            return h.req(path)
+    day = (get("/api/review/summary") or {}).get("last24Hours") or {}
+    st = get("/api/stats") or {}
+    cams = st.get("cameras") or {}
+    live = sum(1 for v in cams.values() if float((v or {}).get("camera_fps") or 0) > 0)
+    rec = ((st.get("service") or {}).get("storage") or {}).get("/media/frigate/recordings") or {}
+    alerts = int(day.get("total_alert") or 0)
+    todo = alerts - int(day.get("reviewed_alert") or 0)
+    return {"head": "Last 24 hours", "stats": [[_count(alerts), "Alerts"], ["%d/%d" % (live, len(cams)), "Cameras"],
+                                               [_size_mb(rec.get("used")), "Recorded"]],
+            # a 1x tile shows two numbers, so the footage kept is in the line too
+            "line": "%s · %s kept" % (("%d to review" % todo) if todo > 0 else "All reviewed" if alerts else "Nothing to review",
+                                      _size_mb(rec.get("used")))}
+
+
 def g_navidrome(h, c):
     salt = os.urandom(6).hex()
     q = urllib.parse.urlencode({"u": c.get("user", ""), "s": salt, "v": "1.16.1", "c": "dashy", "f": "json",
@@ -1621,6 +1656,9 @@ GLANCE = [
      "hint": "In Paperless: your profile (top right), then API Auth Token."},
     {"id": "syncthing", "what": "Sync state, devices and folders", "name": "Syncthing", "match": r"syncthing", "fields": [KEY], "fetch": g_syncthing,
      "hint": "In Syncthing: Actions, Settings, General, API Key."},
+    {"id": "frigate", "what": "Alerts to review, cameras live and footage kept", "name": "Frigate", "match": r"frigate",
+     "fields": [USER, PASS], "fetch": g_frigate, "https": True,
+     "hint": "The username and password you sign in to Frigate with."},
     {"id": "navidrome", "what": "What's playing, or the library", "name": "Navidrome", "match": r"navidrome", "fields": [USER, PASS], "fetch": g_navidrome,
      "hint": "The username and password you sign in to Navidrome with."},
     {"id": "tailscale", "what": "Devices online, and keys about to expire", "name": "Tailscale", "match": r"tailscale",
@@ -1672,7 +1710,7 @@ def _glance_one(svc, p):
         v = {"need": True}
     else:
         try:
-            v = p["fetch"](_AppHttp(svc, p.get("remote")), c)
+            v = p["fetch"](_AppHttp(svc, p.get("remote"), p.get("https", False)), c)
         except GlanceAuth:
             v = {"error": "key"}
         except urllib.error.HTTPError as e:
@@ -2386,9 +2424,20 @@ def probe(port, host=None):
         with urllib.request.urlopen(req, timeout=4) as r:
             return r.status, round((time.monotonic() - t0) * 1000)
     except urllib.error.HTTPError as e:
-        return e.code, round((time.monotonic() - t0) * 1000)  # 401/403 is still alive
+        ms = round((time.monotonic() - t0) * 1000)
+        if e.code == 400:
+            # nginx's answer to plain http on an https-only port (Frigate): link to it over https
+            try:
+                tls = b"HTTPS port" in e.read(2048)
+            except (OSError, ValueError):
+                tls = False
+            (_https_ports.add if tls else _https_ports.discard)((host or HOST_IP, port))
+        return e.code, ms  # 401/403 is still alive
     except (urllib.error.URLError, socket.timeout, OSError, ValueError):
         return 0, None
+
+
+_https_ports = set()     # (host, port) pairs that only speak https
 
 
 def services_loop():
@@ -2410,7 +2459,8 @@ def services_loop():
                 # Keep discovered LAN/tailnet URLs and the corresponding overrides
                 # separate. The owner can correct either mode without affecting the
                 # other mode or relying on a guessed published port.
-                auto_lan = ("http://%s:%d%s" % (svc.get("bind") or LINK_HOST, svc["lport"], path)
+                tls = (svc.get("bind") or HOST_IP, svc["lport"]) in _https_ports
+                auto_lan = ("%s://%s:%d%s" % ("https" if tls else "http", svc.get("bind") or LINK_HOST, svc["lport"], path)
                             if svc["lport"] else None)
                 auto_ts = ("https://%s:%d%s" % (tn, svc["port"], path)
                            if (tn and svc.get("port")) else None)
@@ -7894,6 +7944,11 @@ ICONS = {
 # Settings > General > Release notes shows it, and the "Dashy updated"
 # notification quotes the first line. Every version bump adds an entry here.
 RELEASES = [
+    ("2.7.7", "2026-11-23", [
+        "Frigate gets a live tile: alerts in the last 24 hours, how many cameras are live, and how much footage is kept. Add your Frigate login in its Customize tab.",
+        "App icons drawn only in white, like Frigate's, are tinted so they show on a light tile.",
+        "An app that only answers over https, like Frigate, gets an https link on your home network.",
+    ]),
     ("2.7.6", "2026-11-09", [
         "Voice apps like Kokoro no longer show as Not responding. Dashy was checking their voice port, which never answers a web request.",
     ]),
